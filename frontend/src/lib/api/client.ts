@@ -1,0 +1,246 @@
+import type {
+  Adjudicator,
+  BetMarket,
+  BetType,
+  BreakAssessment,
+  BreakCategory,
+  BreakEntry,
+  Debate,
+  DebateSummary,
+  DashboardData,
+  Institution,
+  LeaderboardEntry,
+  LoginResponse,
+  Prediction,
+  Round,
+  ScrapeLog,
+  Speaker,
+  Team,
+  TeamStanding,
+  Tournament,
+  TournamentStatus,
+  User,
+} from "./types";
+
+const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+const TOKEN_KEY = "bp_token";
+
+export function getToken(): string | null {
+  if (typeof window === "undefined") return null;
+  return window.localStorage.getItem(TOKEN_KEY);
+}
+
+export function setToken(token: string): void {
+  if (typeof window === "undefined") return;
+  window.localStorage.setItem(TOKEN_KEY, token);
+}
+
+export function clearToken(): void {
+  if (typeof window === "undefined") return;
+  window.localStorage.removeItem(TOKEN_KEY);
+}
+
+export class ApiError extends Error {
+  status: number;
+  detail: string;
+
+  constructor(status: number, detail: string) {
+    super(detail);
+    this.name = "ApiError";
+    this.status = status;
+    this.detail = detail;
+  }
+}
+
+async function request<T>(
+  path: string,
+  options: RequestInit = {}
+): Promise<T> {
+  const token = getToken();
+  const headers = new Headers(options.headers);
+  headers.set("Content-Type", "application/json");
+  if (token) headers.set("Authorization", `Bearer ${token}`);
+
+  let res: Response;
+  try {
+    res = await fetch(`${API_BASE}/api/v1${path}`, {
+      ...options,
+      headers,
+      cache: "no-store",
+    });
+  } catch {
+    throw new ApiError(0, "No se pudo conectar con el servidor.");
+  }
+
+  if (!res.ok) {
+    let detail = `Error ${res.status}`;
+    try {
+      const body = (await res.json()) as { detail?: string };
+      if (body?.detail) detail = body.detail;
+    } catch {
+      // ignore parse errors, fall back to generic detail
+    }
+    throw new ApiError(res.status, detail);
+  }
+
+  if (res.status === 204) return undefined as T;
+
+  const text = await res.text();
+  if (!text) return undefined as T;
+  return JSON.parse(text) as T;
+}
+
+const get = <T>(path: string) => request<T>(path, { method: "GET" });
+const post = <T>(path: string, body?: unknown) =>
+  request<T>(path, { method: "POST", body: body ? JSON.stringify(body) : undefined });
+const patch = <T>(path: string, body?: unknown) =>
+  request<T>(path, { method: "PATCH", body: body ? JSON.stringify(body) : undefined });
+
+function qs(params: Record<string, string | number | undefined | null>) {
+  const usp = new URLSearchParams();
+  for (const [k, v] of Object.entries(params)) {
+    if (v !== undefined && v !== null && v !== "") usp.set(k, String(v));
+  }
+  const s = usp.toString();
+  return s ? `?${s}` : "";
+}
+
+export const api = {
+  auth: {
+    register: (data: { email: string; password: string; display_name: string }) =>
+      post<User>("/auth/register", data),
+    login: (data: { email: string; password: string }) =>
+      post<LoginResponse>("/auth/login", data),
+    me: () => get<User>("/auth/me"),
+  },
+
+  tournaments: {
+    list: () => get<Tournament[]>("/tournaments"),
+    get: (id: number | string) => get<Tournament>(`/tournaments/${id}`),
+    create: (data: {
+      name: string;
+      source_base_url: string;
+      source_slug: string;
+      timezone: string;
+    }) => post<Tournament>("/tournaments", data),
+    update: (
+      id: number | string,
+      data: Partial<{
+        name: string;
+        source_base_url: string;
+        source_slug: string;
+        is_active: boolean;
+      }>
+    ) => patch<Tournament>(`/tournaments/${id}`, data),
+    scrape: (id: number | string) =>
+      post<{ status: "queued" }>(`/tournaments/${id}/scrape`),
+  },
+
+  institutions: {
+    list: (tournamentId: number | string) =>
+      get<Institution[]>(`/tournaments/${tournamentId}/institutions`),
+  },
+
+  teams: {
+    list: (tournamentId: number | string) =>
+      get<Team[]>(`/tournaments/${tournamentId}/teams`),
+    get: (tournamentId: number | string, teamId: number | string) =>
+      get<Team>(`/tournaments/${tournamentId}/teams/${teamId}`),
+  },
+
+  speakers: {
+    list: (tournamentId: number | string) =>
+      get<Speaker[]>(`/tournaments/${tournamentId}/speakers`),
+  },
+
+  adjudicators: {
+    list: (tournamentId: number | string) =>
+      get<Adjudicator[]>(`/tournaments/${tournamentId}/adjudicators`),
+  },
+
+  rounds: {
+    list: (tournamentId: number | string) =>
+      get<Round[]>(`/tournaments/${tournamentId}/rounds`),
+    debates: (tournamentId: number | string, roundId: number | string) =>
+      get<DebateSummary[]>(`/tournaments/${tournamentId}/rounds/${roundId}/debates`),
+  },
+
+  debates: {
+    get: (tournamentId: number | string, debateId: number | string) =>
+      get<Debate>(`/tournaments/${tournamentId}/debates/${debateId}`),
+  },
+
+  standings: {
+    list: (
+      tournamentId: number | string,
+      params?: { break_category_id?: number; as_of_round_seq?: number }
+    ) =>
+      get<TeamStanding[]>(
+        `/tournaments/${tournamentId}/standings${qs({
+          break_category_id: params?.break_category_id,
+          as_of_round_seq: params?.as_of_round_seq,
+        })}`
+      ),
+  },
+
+  breakCategories: {
+    list: (tournamentId: number | string) =>
+      get<BreakCategory[]>(`/tournaments/${tournamentId}/break-categories`),
+    predictions: (tournamentId: number | string, categoryId: number | string) =>
+      get<BreakAssessment[]>(
+        `/tournaments/${tournamentId}/break-categories/${categoryId}/predictions`
+      ),
+    officialBreak: (tournamentId: number | string, categoryId: number | string) =>
+      get<BreakEntry[]>(
+        `/tournaments/${tournamentId}/break-categories/${categoryId}/break`
+      ),
+  },
+
+  betMarkets: {
+    list: (tournamentId: number | string) =>
+      get<BetMarket[]>(`/tournaments/${tournamentId}/bet-markets`),
+    create: (
+      tournamentId: number | string,
+      data: {
+        bet_type: BetType;
+        label: string;
+        description?: string;
+        opens_at: string;
+        closes_at: string;
+        points_rule?: object;
+        target_round_id?: number;
+        target_break_category_id?: number;
+      }
+    ) => post<BetMarket>(`/tournaments/${tournamentId}/bet-markets`, data),
+    update: (marketId: number | string, data: { status?: "open" | "closed" }) =>
+      patch<BetMarket>(`/bet-markets/${marketId}`, data),
+    settle: (marketId: number | string, data?: { manual_outcome?: object }) =>
+      post<{ settled: boolean }>(`/bet-markets/${marketId}/settle`, data ?? {}),
+    myPrediction: (marketId: number | string) =>
+      get<Prediction | null>(`/bet-markets/${marketId}/predictions/me`),
+    createPrediction: (marketId: number | string, payload: object) =>
+      post<Prediction>(`/bet-markets/${marketId}/predictions`, { payload }),
+  },
+
+  leaderboard: {
+    list: (tournamentId: number | string) =>
+      get<LeaderboardEntry[]>(`/tournaments/${tournamentId}/leaderboard`),
+  },
+
+  dashboard: {
+    get: (tournamentId: number | string) =>
+      get<DashboardData>(`/tournaments/${tournamentId}/dashboard`),
+  },
+
+  admin: {
+    scrapeLogs: (tournamentId?: number | string) =>
+      get<ScrapeLog[]>(`/admin/scrape-logs${qs({ tournament_id: tournamentId })}`),
+    users: () => get<User[]>("/admin/users"),
+    updateUser: (
+      id: number | string,
+      data: Partial<{ role: "admin" | "user"; is_active: boolean }>
+    ) => patch<User>(`/admin/users/${id}`, data),
+  },
+};
+
+export type { TournamentStatus };

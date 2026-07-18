@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:tabbycat-tabbykat.readthedocs.io)",
+      "WebFetch(domain:github.com)",
+      "WebSearch"
+    ]
+  }
+}

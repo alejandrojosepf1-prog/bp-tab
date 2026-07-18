@@ -1,0 +1,70 @@
+[project]
+name = "bp-tab-betting-backend"
+version = "0.1.0"
+description = "Backend for the BP debate tournament friendly-betting platform"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115,<0.116",
+    "uvicorn[standard]>=0.32,<0.33",
+    "sqlalchemy[asyncio]>=2.0.35,<2.1",
+    "asyncpg>=0.29,<0.30",
+    "alembic>=1.13,<1.14",
+    "pydantic>=2.9,<3.0",
+    "pydantic-settings>=2.5,<3.0",
+    "celery[redis]>=5.4,<5.5",
+    "redis>=5.0,<6.0",
+    "httpx>=0.27,<0.28",
+    "beautifulsoup4>=4.12,<4.13",
+    "lxml>=5.3,<5.4",
+    "tenacity>=9.0,<10.0",
+    "python-jose[cryptography]>=3.3,<3.4",
+    "passlib[bcrypt]>=1.7,<1.8",
+    # Pinned below 4.1: passlib 1.7.4's bcrypt backend probes `bcrypt.__about__.__version__`
+    # (removed in bcrypt 4.1) and also trips over a wrap-bug self-test against bcrypt 5.x,
+    # raising on every hash/verify call. bcrypt<4.1 is the last line passlib 1.7.4 understands.
+    "bcrypt>=4.0,<4.1",
+    "python-multipart>=0.0.12,<0.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3,<9.0",
+    "pytest-asyncio>=0.24,<0.25",
+    "pytest-httpx>=0.31,<0.32",
+    "aiosqlite>=0.20,<0.21",
+    "ruff>=0.7,<0.8",
+    "mypy>=1.12,<1.13",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+# UP042/UP017/UP047: ruff wants enum.StrEnum / datetime.UTC / PEP 695 generics -- all 3.11+ or
+# 3.12+ only. The Docker image runs 3.12, but we deliberately avoid syntax that would stop the
+# codebase running on 3.10 dev machines.
+ignore = ["UP042", "UP017", "UP047"]
+
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI's dependency-injection pattern is `param: T = Depends(...)` -- a function call as a
+# default argument is exactly how it's meant to be used, not the mutable-default-argument bug
+# B008 normally flags. This tells ruff these specific calls are safe in argument defaults.
+extend-immutable-calls = ["fastapi.Depends", "fastapi.Query", "fastapi.Path", "fastapi.Body"]
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+disallow_untyped_defs = true
