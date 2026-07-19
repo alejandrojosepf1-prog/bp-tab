@@ -20,6 +20,10 @@ RUN pip install .
 COPY alembic.ini ./
 COPY alembic ./alembic
 
+COPY docker-entrypoint.sh ./
+RUN chmod +x docker-entrypoint.sh
+
 EXPOSE 8000
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Binds to $PORT if set (Render and similar PaaS inject it), else 8000 (local docker/compose).
+CMD ["./docker-entrypoint.sh"]
