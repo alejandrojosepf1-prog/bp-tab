@@ -1,0 +1,57 @@
+# Render Blueprint for the free-tier deployment of BP$.
+#
+# This intentionally does NOT include Postgres or Redis/Celery services: Postgres is provided
+# by a free Neon project instead (paste its connection string as DATABASE_URL when Render asks
+# for the unset env vars during blueprint setup), and Celery is skipped entirely -- the backend
+# already has a Celery-independent scraping path (`POST /tournaments/{id}/scrape` via FastAPI
+# BackgroundTasks, see app/api/routers/tournaments.py) built for exactly this "no guaranteed
+# broker" scenario, so no worker/beat service is needed for a friends-scale free deployment.
+#
+# Both services build directly from the existing Dockerfiles (backend/Dockerfile,
+# frontend/Dockerfile) used by docker-compose.yml for local development -- no separate
+# deploy-only Dockerfile needed.
+
+services:
+  - type: web
+    name: bp-tab-backend
+    runtime: docker
+    plan: free
+    rootDir: backend
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /health
+    # Runs pending Alembic migrations on every boot before starting the API server, same as the
+    # local docker-compose `backend` service's command override. Render injects $PORT; the app
+    # must bind to it (uvicorn's default 8000 is only used for local/non-Render runs).
+    # alembic/env.py reads ALEMBIC_DATABASE_URL specifically (not DATABASE_URL/Settings) --
+    # exporting it from DATABASE_URL inline avoids having to paste the same secret twice.
+    dockerCommand: >
+      sh -c "export ALEMBIC_DATABASE_URL=$DATABASE_URL && alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port $PORT"
+    envVars:
+      - key: DATABASE_URL
+        sync: false # paste the Neon connection string here during blueprint setup
+      - key: JWT_SECRET
+        generateValue: true # Render generates a random production secret automatically
+      - key: ENVIRONMENT
+        value: production
+      - key: DEBUG
+        value: "false"
+      - key: CORS_ALLOWED_ORIGINS
+        value: '["https://bp-tab-frontend.onrender.com"]'
+      # No REDIS_URL/CELERY_* here: Settings has working defaults, and nothing on this deploy
+      # path touches Celery/Redis (see comment above).
+
+  - type: web
+    name: bp-tab-frontend
+    runtime: docker
+    plan: free
+    rootDir: frontend
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    # NEXT_PUBLIC_* is inlined into the client bundle at build time (see frontend/Dockerfile's
+    # ARG), so this must also be passed as a Docker build arg, not just a runtime env var --
+    # Render does this automatically for any envVar whose key matches a Dockerfile ARG.
+    dockerCommand: sh -c "next start -p $PORT"
+    envVars:
+      - key: NEXT_PUBLIC_API_URL
+        value: https://bp-tab-backend.onrender.com

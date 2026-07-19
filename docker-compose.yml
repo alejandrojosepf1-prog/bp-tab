@@ -32,6 +32,7 @@ services:
     env_file: .env
     environment:
       DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://bp:bp@postgres:5432/bp_tab}
+      ALEMBIC_DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://bp:bp@postgres:5432/bp_tab}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       CELERY_BROKER_URL: ${CELERY_BROKER_URL:-redis://redis:6379/1}
       CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND:-redis://redis:6379/2}
@@ -43,6 +44,7 @@ services:
     ports:
       - "${BACKEND_PORT:-8000}:8000"
     # Runs pending Alembic migrations on every boot before starting the API server.
+    # alembic/env.py reads ALEMBIC_DATABASE_URL specifically (not DATABASE_URL/Settings).
     command: >
       sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
     healthcheck:
