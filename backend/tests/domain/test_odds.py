@@ -3,11 +3,15 @@ import math
 import pytest
 
 from app.domain.odds import (
+    DEFAULT_SEED,
     HOUSE_MARGIN,
     MAX_ODDS,
     MIN_ODDS,
     decimal_odds_from_probability,
     ordered_sequence_odds,
+    pari_mutuel_odds,
+    pari_mutuel_probability,
+    sequence_probability,
     single_candidate_odds,
     softmax_probabilities,
 )
@@ -110,3 +114,58 @@ def test_ordered_sequence_odds_rejects_duplicate_picks() -> None:
 def test_ordered_sequence_odds_unknown_candidate_raises() -> None:
     with pytest.raises(KeyError):
         ordered_sequence_odds({"a": 1.0, "b": 1.0}, ["a", "ghost"])
+
+
+def test_sequence_probability_matches_ordered_sequence_odds() -> None:
+    # ordered_sequence_odds is just decimal_odds_from_probability(sequence_probability(...)).
+    power = {"a": 10.0, "b": 8.0, "c": 6.0}
+    prob = sequence_probability(power, ["a", "b", "c"])
+    assert decimal_odds_from_probability(prob) == ordered_sequence_odds(power, ["a", "b", "c"])
+
+
+def test_pari_mutuel_probability_with_empty_pool_equals_prior() -> None:
+    # No money staked yet on anything -> the pool contributes nothing, price is exactly the
+    # seeded prior (this is what makes the very first bettor on a market gets a sane price).
+    assert pari_mutuel_probability(0.0, 0.0, 0.3) == pytest.approx(0.3)
+    assert pari_mutuel_probability(0.0, 0.0, 0.3, seed=50.0) == pytest.approx(0.3)
+
+
+def test_pari_mutuel_probability_moves_toward_the_crowd_as_pool_grows() -> None:
+    # A candidate with an unfavorable prior (10%) that's nonetheless attracted ALL the real
+    # money should price higher than the prior as the pool overtakes the seed.
+    prior = 0.10
+    small_pool = pari_mutuel_probability(50.0, 50.0, prior, seed=200.0)
+    large_pool = pari_mutuel_probability(2000.0, 2000.0, prior, seed=200.0)
+    assert prior < small_pool < large_pool
+    # Once the real pool dwarfs the seed, price converges toward "certain" (everyone agrees).
+    assert large_pool > 0.9
+
+
+def test_pari_mutuel_probability_rejects_invalid_inputs() -> None:
+    with pytest.raises(ValueError):
+        pari_mutuel_probability(0.0, 0.0, 0.5, seed=0.0)
+    with pytest.raises(ValueError):
+        pari_mutuel_probability(-1.0, 10.0, 0.5)
+    with pytest.raises(ValueError):
+        pari_mutuel_probability(20.0, 10.0, 0.5)  # candidate can't exceed compartment total
+
+
+def test_pari_mutuel_odds_wide_open_field_stays_within_the_realistic_band() -> None:
+    # A 40-way uniform prior (nobody's bet on anything yet) is exactly the "any of 40 untested
+    # speakers" scenario that used to price at an absurd multiplier -- must now clamp to MAX_ODDS.
+    prior = 1 / 40
+    odds = pari_mutuel_odds(0.0, 0.0, prior)
+    assert odds == MAX_ODDS
+
+
+def test_pari_mutuel_odds_seed_absorbs_a_small_early_bet() -> None:
+    # A lone $5 bet on a fair coin-toss candidate shouldn't swing the price much when the seed
+    # (200) dwarfs the stake.
+    fair_prior = 0.5
+    odds_before_any_bet = pari_mutuel_odds(0.0, 0.0, fair_prior)
+    odds_after_small_bet = pari_mutuel_odds(5.0, 5.0, fair_prior)
+    assert math.isclose(odds_before_any_bet, odds_after_small_bet, rel_tol=0.05)
+
+
+def test_pari_mutuel_odds_default_seed_is_exported() -> None:
+    assert DEFAULT_SEED > 0

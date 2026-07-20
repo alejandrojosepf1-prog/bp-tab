@@ -1,27 +1,38 @@
-"""Fixed-odds pricing for bet markets, computed from each candidate's "power rating" (how
-strong a team/speaker/institution looks right now -- see `app.services.odds_service` for how
-that rating is actually built from standings + strength of schedule).
+"""Pari-mutuel-with-seed odds for bet markets.
 
-This is a *sportsbook* model, not a pari-mutuel pool: odds are priced from the candidates'
-relative strength the moment a prediction is placed and locked onto that `Prediction` row, so a
-later flood of money on a favorite never moves an already-placed bet's payout. `BetMarket`'s
-displayed "pool" (sum of everyone's stakes) is informational flavor only -- it does not feed
-back into the odds math, unlike a real pari-mutuel/parimutuel pool.
+There's no house bankroll behind this app (see `services.betting_service`'s settlement, which
+credits winners without any pool constraining it) -- payouts are only meaningful, and only
+sustainable long-term, if the crowd's own money is what prices the market. That's the classic
+pari-mutuel setup: everyone's stakes on a given outcome go into a shared pot, and the odds fall
+out of how that pot splits, rather than a bookmaker unilaterally setting a price.
 
-A house margin ("vig"/overround) IS applied: every fair 1/p price is shaved by
-`HOUSE_MARGIN` so the implied probabilities across a market sum to >1.0, giving the book a
-positive expected hold no matter which outcome lands. Offered odds are also clamped to a
-realistic `[MIN_ODDS, MAX_ODDS]` band -- a near-certainty still pays a little rather than
-~1.00, and an extreme longshot can't produce the absurd/unbounded payout a raw 1/p would.
+A pure pari-mutuel pool breaks down with only a handful of bettors, though: the very first
+person to bet on a market has no pool to read a price from, and one $5 bet on a longshot in a
+20-person group would otherwise swing that candidate's odds wildly. `pari_mutuel_probability`
+fixes both by blending the real pool with a *seed* -- `DEFAULT_SEED` dollars of phantom
+liquidity distributed according to a prior probability (`app.services.odds_service`'s
+team/speaker/institution "power rating" model, or a flat/uniform prior where no rating data
+exists yet). With an empty pool the price is exactly the prior; as real stakes accumulate they
+progressively take over, and once total stakes on a market pass the seed, the crowd is what's
+actually setting the odds -- the model just breaks the ice.
 
-Two shapes cover every bet type in `app.models.enums.BetType`:
-  - `single_candidate_odds` -- "who wins among this candidate set" (champion, head_to_head,
-    round_winner, best_institution, breakout_team).
-  - `ordered_sequence_odds` -- "pick these N in this exact order" (top_n_break,
-    top_n_speakers), priced via the Plackett-Luce model: the probability of drawing a specific
-    ordered sequence without replacement from a population weighted by `power`, which is exactly
-    how exacta/trifecta-style horse-racing markets are priced and matches the "parley" (parlay)
-    framing of "get every leg exactly right or the ticket pays nothing."
+A house margin ("vig"/overround) is still applied on top (`HOUSE_MARGIN`), and offered odds are
+clamped to a realistic `[MIN_ODDS, MAX_ODDS]` band -- a near-certainty still pays a little more
+than the stake back, and a wide-open field (e.g. "any of 40 untested speakers") can't produce an
+absurd four/five-figure multiplier just because nobody's bet on it yet.
+
+Two prior shapes cover every bet type in `app.models.enums.BetType`:
+  - `softmax_probabilities` -- "who wins among this candidate set" (champion, head_to_head,
+    round_winner, best_institution).
+  - `sequence_probability` -- "pick these N in this exact order" (top_n_break,
+    top_n_speakers), via the Plackett-Luce model: the probability of drawing a specific ordered
+    sequence without replacement from a population weighted by `power`, matching how
+    exacta/trifecta-style horse-racing markets are priced and the "parlay" framing of "get every
+    leg exactly right or the ticket pays nothing."
+
+`single_candidate_odds`/`ordered_sequence_odds` (prior-only, no pool) are kept as the
+pure "fair book" building block pari-mutuel pricing is layered on top of -- see
+`pari_mutuel_odds`.
 """
 
 import math
@@ -41,12 +52,19 @@ MIN_TEMPERATURE = 1.0
 # squarely in real-sportsbook territory (typically 5-10%).
 HOUSE_MARGIN = 0.07
 
-# Realistic decimal-odds band. A real book never offers 10000x (it caps longshots to bound its
-# liability) and never prices a near-certainty at ~1.00 (no action / boring). MAX_ODDS = 51.0 is
-# a "big longshot" ceiling (~2% implied), not a lottery ticket; MIN_ODDS keeps favorites paying
-# a little more than the stake back.
-MIN_ODDS = 1.02
-MAX_ODDS = 51.0
+# Realistic decimal-odds band. A real book never offers a five-figure multiplier (it caps
+# longshots to bound its liability) and never prices a near-certainty at ~1.00 (no action /
+# boring). MAX_ODDS = 20.0 keeps even a wide-open, zero-data field ("any of 40 untested
+# speakers") from paying an exaggerated multiplier; MIN_ODDS keeps favorites paying a little
+# more than the stake back.
+MIN_ODDS = 1.05
+MAX_ODDS = 20.0
+
+# Dollars of phantom liquidity seeded into every market's pari-mutuel pool, split according to
+# the prior probability (see module docstring). Sized to roughly 10x a typical stake so a single
+# early bet doesn't swing the price wildly, while a market that's seen real action (total stakes
+# approaching or passing this) has the crowd's money doing most of the pricing.
+DEFAULT_SEED = 200.0
 
 
 def softmax_probabilities(
@@ -129,16 +147,15 @@ def single_candidate_odds(
     return decimal_odds_from_probability(probabilities[candidate])
 
 
-def ordered_sequence_odds(
+def sequence_probability(
     power_by_candidate: dict[CandidateT, float],
     sequence: list[CandidateT],
     *,
     temperature: float | None = None,
 ) -> float:
-    """Combined decimal odds for drawing `sequence` in that EXACT order (Plackett-Luce): the
-    probability of picking sequence[0] first from the full field, times the probability of
-    picking sequence[1] first from the field with sequence[0] removed, and so on. This is the
-    "parlay" price -- getting 2 of 3 legs right pays nothing, same as a real exacta/trifecta.
+    """Probability of drawing `sequence` in that EXACT order (Plackett-Luce): the probability of
+    picking sequence[0] first from the full field, times the probability of picking sequence[1]
+    first from the field with sequence[0] removed, and so on.
 
     Raises KeyError if any entry of `sequence` isn't in `power_by_candidate`, or ValueError if
     `sequence` has duplicates or is empty.
@@ -163,4 +180,60 @@ def ordered_sequence_odds(
         combined_probability *= step_probabilities[pick]
         del remaining[pick]
 
-    return decimal_odds_from_probability(combined_probability)
+    return combined_probability
+
+
+def ordered_sequence_odds(
+    power_by_candidate: dict[CandidateT, float],
+    sequence: list[CandidateT],
+    *,
+    temperature: float | None = None,
+) -> float:
+    """Fair-book (no pool) combined decimal odds for drawing `sequence` in that EXACT order --
+    the "parlay" price: getting 2 of 3 legs right pays nothing, same as a real exacta/trifecta.
+    See `sequence_probability` for the underlying probability and error conditions."""
+    return decimal_odds_from_probability(
+        sequence_probability(power_by_candidate, sequence, temperature=temperature)
+    )
+
+
+def pari_mutuel_probability(
+    candidate_stake: float,
+    compartment_stake: float,
+    prior_probability: float,
+    *,
+    seed: float = DEFAULT_SEED,
+) -> float:
+    """Blends real money (`candidate_stake` out of `compartment_stake` total, both in dollars
+    already staked on OPEN predictions) with `seed` dollars of phantom liquidity distributed per
+    `prior_probability` -- see module docstring. With no stakes yet this is exactly
+    `prior_probability`; as `compartment_stake` grows past `seed`, the crowd's money dominates.
+
+    `compartment_stake` is the total across every candidate in the same "compartment" the
+    candidate belongs to -- the whole market for most bet types, but e.g. just the two teams in
+    one specific head-to-head pairing, or one specific debate's participants, when a market
+    covers many independent pairings/debates. `candidate_stake` must be `<= compartment_stake`.
+    """
+    if seed <= 0:
+        raise ValueError("seed must be positive")
+    if candidate_stake < 0 or compartment_stake < 0:
+        raise ValueError("stakes must not be negative")
+    if candidate_stake > compartment_stake:
+        raise ValueError("candidate_stake cannot exceed compartment_stake")
+    return (candidate_stake + seed * prior_probability) / (compartment_stake + seed)
+
+
+def pari_mutuel_odds(
+    candidate_stake: float,
+    compartment_stake: float,
+    prior_probability: float,
+    *,
+    seed: float = DEFAULT_SEED,
+) -> float:
+    """Decimal odds from blending the real pool with the seeded prior -- see
+    `pari_mutuel_probability` and the module docstring."""
+    return decimal_odds_from_probability(
+        pari_mutuel_probability(
+            candidate_stake, compartment_stake, prior_probability, seed=seed
+        )
+    )

@@ -59,6 +59,7 @@ export function Navbar() {
   });
 
   const currentTournamentId = params?.id;
+  const tournamentItems = (tournaments ?? []).map((t) => ({ value: String(t.id), label: t.name }));
 
   function goToTournament(id: string | null) {
     if (id) router.push(`/tournaments/${id}`);
@@ -92,6 +93,7 @@ export function Navbar() {
               <Select
                 value={currentTournamentId ?? ""}
                 onValueChange={goToTournament}
+                items={tournamentItems}
               >
                 <SelectTrigger size="sm" className="w-[220px]">
                   <SelectValue placeholder="Seleccionar torneo" />
@@ -148,7 +150,11 @@ export function Navbar() {
               </SheetTrigger>
               <SheetContent side="left" className="w-72">
                 <div className="flex flex-col gap-4 p-4">
-                  <Select value={currentTournamentId ?? ""} onValueChange={goToTournament}>
+                  <Select
+                    value={currentTournamentId ?? ""}
+                    onValueChange={goToTournament}
+                    items={tournamentItems}
+                  >
                     <SelectTrigger className="w-full">
                       <SelectValue placeholder="Seleccionar torneo" />
                     </SelectTrigger>

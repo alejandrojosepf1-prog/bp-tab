@@ -75,7 +75,11 @@ export default function BreakPredictorPage() {
           </p>
         </div>
         {categories && categories.length > 1 && (
-          <Select value={categoryId ?? ""} onValueChange={setManualCategoryId}>
+          <Select
+            value={categoryId ?? ""}
+            onValueChange={setManualCategoryId}
+            items={categories.map((c) => ({ value: String(c.id), label: c.name }))}
+          >
             <SelectTrigger className="w-[200px]">
               <SelectValue placeholder="Categoría" />
             </SelectTrigger>

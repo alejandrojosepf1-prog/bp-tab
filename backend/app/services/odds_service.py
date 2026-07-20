@@ -17,19 +17,25 @@ from collections import defaultdict
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.domain.odds import adaptive_temperature, ordered_sequence_odds, single_candidate_odds
+from app.domain.odds import (
+    adaptive_temperature,
+    pari_mutuel_odds,
+    sequence_probability,
+    softmax_probabilities,
+)
 from app.models import (
     BetMarket,
     Debate,
     DebateTeam,
     Institution,
+    Prediction,
     Round,
     Speaker,
     SpeakerScore,
     Team,
     TeamBreakCategory,
 )
-from app.models.enums import BetType, RoundStage
+from app.models.enums import BetType, PredictionStatus, RoundStage
 from app.services.ranking_service import get_standings
 
 SPEAKER_POINTS_WEIGHT = 0.02  # total_speaker_points are ~10-30x team_points in magnitude
@@ -46,6 +52,124 @@ class UnpriceableMarketError(Exception):
     """Raised when a market/payload combination can't be priced yet (e.g. no debates played
     so there's no standings data to build a power rating from). Callers should surface this as
     a 400 -- betting can't open on a market with nothing to price odds from."""
+
+
+async def _open_stakes(
+    session: AsyncSession, market_id: int, *, exclude_user_id: int | None = None
+) -> list[tuple[dict, float]]:
+    """(payload, stake_amount) for every currently-OPEN prediction on this market -- the live
+    pari-mutuel pool. Settled predictions are excluded: once a market closes its pool is frozen
+    anyway (no new bets), so this only ever matters pre-close, and staying OPEN-only keeps a
+    settled market's history from double-counting if this were ever called after the fact.
+
+    `exclude_user_id` leaves out that user's own current stake -- callers pass the quoting
+    user's id so that re-quoting an existing bet (editing your pick, or the live preview doing
+    the same math before you submit) doesn't let your own prior stake inflate/deflate your own
+    price. `place_prediction` already refunds that same prior stake before charging the new one;
+    this is the pricing-side mirror of that so a resubmit-with-the-same-pick is a no-op on price,
+    not a self-reinforcing one."""
+    conditions = [
+        Prediction.bet_market_id == market_id,
+        Prediction.status == PredictionStatus.OPEN,
+    ]
+    if exclude_user_id is not None:
+        conditions.append(Prediction.user_id != exclude_user_id)
+    rows = (
+        await session.execute(
+            select(Prediction.payload, Prediction.stake_amount).where(*conditions)
+        )
+    ).all()
+    return [(payload, float(stake)) for payload, stake in rows]
+
+
+async def _field_pool(
+    session: AsyncSession,
+    market_id: int,
+    field: str,
+    candidate_value: object,
+    *,
+    exclude_user_id: int | None,
+) -> tuple[float, float]:
+    """(stake on `candidate_value`, total stake across the whole market) for a market where
+    every prediction competes in one shared pool -- champion, best_institution."""
+    candidate_stake = 0.0
+    total = 0.0
+    for payload, stake in await _open_stakes(session, market_id, exclude_user_id=exclude_user_id):
+        total += stake
+        if payload.get(field) == candidate_value:
+            candidate_stake += stake
+    return candidate_stake, total
+
+
+async def _pair_pool(
+    session: AsyncSession,
+    market_id: int,
+    team_a_id: int,
+    team_b_id: int,
+    predicted_winner_id: int,
+    *,
+    exclude_user_id: int | None,
+) -> tuple[float, float]:
+    """Same as `_field_pool`, but scoped to just this one head-to-head pairing -- a HEAD_TO_HEAD
+    market can host many independent pairings, so team A vs. B's money shouldn't dilute or be
+    diluted by C vs. D's."""
+    pair = {team_a_id, team_b_id}
+    candidate_stake = 0.0
+    total = 0.0
+    for payload, stake in await _open_stakes(session, market_id, exclude_user_id=exclude_user_id):
+        a, b = payload.get("team_a_id"), payload.get("team_b_id")
+        if a is None or b is None or {a, b} != pair:
+            continue
+        total += stake
+        if payload.get("predicted_winner_id") == predicted_winner_id:
+            candidate_stake += stake
+    return candidate_stake, total
+
+
+async def _debate_pool(
+    session: AsyncSession,
+    market_id: int,
+    debate_id: int,
+    team_id: int,
+    *,
+    exclude_user_id: int | None,
+) -> tuple[float, float]:
+    """Same idea as `_pair_pool`, scoped to one debate -- a ROUND_WINNER market can span many
+    debates in a round."""
+    candidate_stake = 0.0
+    total = 0.0
+    for payload, stake in await _open_stakes(session, market_id, exclude_user_id=exclude_user_id):
+        if payload.get("debate_id") != debate_id:
+            continue
+        total += stake
+        if payload.get("team_id") == team_id:
+            candidate_stake += stake
+    return candidate_stake, total
+
+
+async def _sequence_pool(
+    session: AsyncSession,
+    market_id: int,
+    id_key: str,
+    sequence: list[int],
+    *,
+    exclude_user_id: int | None,
+) -> tuple[float, float]:
+    """(stake on this exact ordered sequence, total stake across the whole market) for
+    top_n_break/top_n_speakers. In a small group most submitted sequences are unique, so this
+    usually degenerates to (0, total) -- the seeded prior still prices it sensibly (see
+    `app.domain.odds`); it only starts moving once several people converge on the same pick."""
+    target = tuple(sequence)
+    candidate_stake = 0.0
+    total = 0.0
+    for payload, stake in await _open_stakes(session, market_id, exclude_user_id=exclude_user_id):
+        ids = payload.get(id_key)
+        if not ids:
+            continue
+        total += stake
+        if tuple(ids) == target:
+            candidate_stake += stake
+    return candidate_stake, total
 
 
 async def compute_team_power_ratings(
@@ -144,21 +268,44 @@ async def compute_institution_power_ratings(
     return dict(totals)
 
 
-async def quote_odds(session: AsyncSession, bet_market: BetMarket, payload: dict) -> float:
+async def quote_odds(
+    session: AsyncSession,
+    bet_market: BetMarket,
+    payload: dict,
+    *,
+    exclude_user_id: int | None = None,
+) -> float:
     """Prices `payload` (a candidate pick, same shape a Prediction.payload would have) against
-    the market's bet_type. Raises UnpriceableMarketError if there's not enough data yet, or
-    KeyError/ValueError (from app.domain.odds) if the payload names a candidate outside the
-    currently-tracked field -- both are caller errors the router turns into 4xx responses."""
+    the market's bet_type: a prior probability (the power-rating model below) blended with
+    whatever's already been staked on OPEN predictions in this market, via
+    `app.domain.odds.pari_mutuel_odds` -- see that module's docstring for why. Raises
+    UnpriceableMarketError if there's not enough data yet, or KeyError/ValueError (from
+    app.domain.odds) if the payload names a candidate outside the currently-tracked field --
+    both are caller errors the router turns into 4xx responses.
+
+    `exclude_user_id`: pass the quoting user's id so their own currently-OPEN stake (if any --
+    they're editing an existing pick) doesn't count toward the pool it's being priced against --
+    see `_open_stakes`."""
     bet_type = bet_market.bet_type
 
     if bet_type == BetType.BREAKOUT_TEAM:
+        # No principled per-team prior exists for "equipo revelación" (see
+        # DEFAULT_BREAKOUT_TEAM_ODDS's docstring) so there's nothing to blend a pool against;
+        # stays a flat, admin-tunable price.
         return float((bet_market.points_rule or {}).get("odds", DEFAULT_BREAKOUT_TEAM_ODDS))
 
     if bet_type == BetType.CHAMPION:
         power = await compute_team_power_ratings(session, bet_market.tournament_id)
         if not power:
             raise UnpriceableMarketError("no standings yet to price this market from")
-        return single_candidate_odds(power, payload["team_id"])
+        team_id = payload["team_id"]
+        prior = softmax_probabilities(power, temperature=adaptive_temperature(power.values()))[
+            team_id
+        ]
+        candidate_stake, market_stake = await _field_pool(
+            session, bet_market.id, "team_id", team_id, exclude_user_id=exclude_user_id
+        )
+        return pari_mutuel_odds(candidate_stake, market_stake, prior)
 
     if bet_type == BetType.HEAD_TO_HEAD:
         power = await compute_team_power_ratings(session, bet_market.tournament_id)
@@ -174,16 +321,25 @@ async def quote_odds(session: AsyncSession, bet_market: BetMarket, payload: dict
         # favorite" against the whole field's spread keeps a blowout mismatch pricier than a
         # close one.
         temperature = adaptive_temperature(power.values())
-        return single_candidate_odds(
-            pair_power, payload["predicted_winner_id"], temperature=temperature
+        predicted_winner_id = payload["predicted_winner_id"]
+        prior = softmax_probabilities(pair_power, temperature=temperature)[predicted_winner_id]
+        candidate_stake, pair_stake = await _pair_pool(
+            session,
+            bet_market.id,
+            team_a_id,
+            team_b_id,
+            predicted_winner_id,
+            exclude_user_id=exclude_user_id,
         )
+        return pari_mutuel_odds(candidate_stake, pair_stake, prior)
 
     if bet_type == BetType.ROUND_WINNER:
         power = await compute_team_power_ratings(session, bet_market.tournament_id)
+        debate_id = payload["debate_id"]
         debate_team_ids = (
             (
                 await session.execute(
-                    select(DebateTeam.team_id).where(DebateTeam.debate_id == payload["debate_id"])
+                    select(DebateTeam.team_id).where(DebateTeam.debate_id == debate_id)
                 )
             )
             .scalars()
@@ -195,7 +351,12 @@ async def quote_odds(session: AsyncSession, bet_market: BetMarket, payload: dict
         # Same reasoning as HEAD_TO_HEAD above: price this debate's 2-4 teams against the
         # tournament-wide spread, not just amongst themselves.
         temperature = adaptive_temperature(power.values())
-        return single_candidate_odds(debate_power, payload["team_id"], temperature=temperature)
+        team_id = payload["team_id"]
+        prior = softmax_probabilities(debate_power, temperature=temperature)[team_id]
+        candidate_stake, debate_stake = await _debate_pool(
+            session, bet_market.id, debate_id, team_id, exclude_user_id=exclude_user_id
+        )
+        return pari_mutuel_odds(candidate_stake, debate_stake, prior)
 
     if bet_type == BetType.BEST_INSTITUTION:
         institution_power = await compute_institution_power_ratings(
@@ -203,7 +364,18 @@ async def quote_odds(session: AsyncSession, bet_market: BetMarket, payload: dict
         )
         if not institution_power:
             raise UnpriceableMarketError("no standings yet to price this market from")
-        return single_candidate_odds(institution_power, payload["institution_code"])
+        institution_code = payload["institution_code"]
+        prior = softmax_probabilities(
+            institution_power, temperature=adaptive_temperature(institution_power.values())
+        )[institution_code]
+        candidate_stake, market_stake = await _field_pool(
+            session,
+            bet_market.id,
+            "institution_code",
+            institution_code,
+            exclude_user_id=exclude_user_id,
+        )
+        return pari_mutuel_odds(candidate_stake, market_stake, prior)
 
     if bet_type == BetType.TOP_N_BREAK:
         power = await compute_team_power_ratings(
@@ -211,12 +383,22 @@ async def quote_odds(session: AsyncSession, bet_market: BetMarket, payload: dict
         )
         if not power:
             raise UnpriceableMarketError("no standings yet to price this market from")
-        return ordered_sequence_odds(power, list(payload["team_ids"]))
+        team_ids = list(payload["team_ids"])
+        prior = sequence_probability(power, team_ids)
+        candidate_stake, market_stake = await _sequence_pool(
+            session, bet_market.id, "team_ids", team_ids, exclude_user_id=exclude_user_id
+        )
+        return pari_mutuel_odds(candidate_stake, market_stake, prior)
 
     if bet_type == BetType.TOP_N_SPEAKERS:
         power = await compute_speaker_power_ratings(session, bet_market.tournament_id)
         if not power:
             raise UnpriceableMarketError("no speaker scores yet to price this market from")
-        return ordered_sequence_odds(power, list(payload["speaker_ids"]))
+        speaker_ids = list(payload["speaker_ids"])
+        prior = sequence_probability(power, speaker_ids)
+        candidate_stake, market_stake = await _sequence_pool(
+            session, bet_market.id, "speaker_ids", speaker_ids, exclude_user_id=exclude_user_id
+        )
+        return pari_mutuel_odds(candidate_stake, market_stake, prior)
 
     raise ValueError(f"no odds pricing implemented for bet type {bet_type!r}")

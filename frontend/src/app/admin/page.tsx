@@ -261,7 +261,11 @@ function ScrapeLogsTab() {
     <Card>
       <CardHeader className="flex-row items-center justify-between space-y-0">
         <CardTitle className="text-base">Logs de scraping</CardTitle>
-        <Select value={tournamentId} onValueChange={(v) => setTournamentId(v ?? "")}>
+        <Select
+          value={tournamentId}
+          onValueChange={(v) => setTournamentId(v ?? "")}
+          items={(tournaments ?? []).map((t) => ({ value: String(t.id), label: t.name }))}
+        >
           <SelectTrigger className="w-[220px]">
             <SelectValue placeholder="Todos los torneos" />
           </SelectTrigger>
@@ -366,7 +370,11 @@ function BetMarketsTab() {
 
   return (
     <div className="flex flex-col gap-4">
-      <Select value={tournamentId} onValueChange={(v) => setTournamentId(v ?? "")}>
+      <Select
+        value={tournamentId}
+        onValueChange={(v) => setTournamentId(v ?? "")}
+        items={(tournaments ?? []).map((t) => ({ value: String(t.id), label: t.name }))}
+      >
         <SelectTrigger className="w-[240px]">
           <SelectValue placeholder="Seleccionar torneo" />
         </SelectTrigger>
@@ -398,6 +406,7 @@ function BetMarketsTab() {
                   <Select
                     value={form.bet_type}
                     onValueChange={(v) => setForm((f) => ({ ...f, bet_type: v as BetType }))}
+                    items={BET_TYPES}
                   >
                     <SelectTrigger>
                       <SelectValue />
@@ -585,6 +594,10 @@ function UsersTab() {
                     <Select
                       value={u.role}
                       onValueChange={(v) => toggleRole.mutate({ id: u.id, role: v as "admin" | "user" })}
+                      items={[
+                        { value: "user", label: "Usuario" },
+                        { value: "admin", label: "Admin" },
+                      ]}
                     >
                       <SelectTrigger size="sm" className="w-[110px]">
                         <SelectValue />

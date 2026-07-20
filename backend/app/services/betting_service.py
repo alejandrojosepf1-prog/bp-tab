@@ -61,7 +61,7 @@ async def place_prediction(
     if stake_amount <= 0:
         raise ValueError("stake_amount must be positive")
 
-    odds = await quote_odds(session, bet_market, payload)
+    odds = await quote_odds(session, bet_market, payload, exclude_user_id=user.id)
 
     existing = (
         await session.execute(

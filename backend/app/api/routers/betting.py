@@ -145,14 +145,14 @@ async def quote_bet_market_odds(
     market_id: int,
     payload: OddsQuoteRequest,
     session: AsyncSession = Depends(get_db),
-    _current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
 ) -> OddsQuoteOut:
     """Live odds preview for a candidate pick, WITHOUT placing a bet -- the frontend calls this
     as the user builds their pick so they can see "cuota: 1.85x" before committing a stake. Read
     -only: no Prediction is created, no balance touched."""
     market = await _get_market_or_404(session, market_id)
     try:
-        odds = await quote_odds(session, market, payload.payload)
+        odds = await quote_odds(session, market, payload.payload, exclude_user_id=current_user.id)
     except UnpriceableMarketError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     except (KeyError, ValueError) as exc:

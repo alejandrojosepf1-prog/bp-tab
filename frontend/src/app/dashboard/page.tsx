@@ -75,7 +75,11 @@ export default function DashboardPage() {
             </p>
           </div>
           {tournaments.length > 1 && (
-            <Select value={tournamentId ?? ""} onValueChange={setManualTournamentId}>
+            <Select
+              value={tournamentId ?? ""}
+              onValueChange={setManualTournamentId}
+              items={tournaments.map((t) => ({ value: String(t.id), label: t.name }))}
+            >
               <SelectTrigger className="w-[240px]">
                 <SelectValue placeholder="Seleccionar torneo" />
               </SelectTrigger>

@@ -208,8 +208,10 @@ function TeamPickForm({ teams, existingPayload, onPayloadChange }: BaseFormProps
     onPayloadChange(value ? { team_id: Number(value) } : null);
   }
 
+  const items = teams.map((t) => ({ value: String(t.id), label: `${t.emoji ?? ""} ${t.name}`.trim() }));
+
   return (
-    <Select value={teamId} onValueChange={(v) => pick(v ?? "")}>
+    <Select value={teamId} onValueChange={(v) => pick(v ?? "")} items={items}>
       <SelectTrigger className="w-[220px]">
         <SelectValue placeholder="Elegir equipo" />
       </SelectTrigger>
@@ -234,8 +236,13 @@ function InstitutionPickForm({ institutions, existingPayload, onPayloadChange }:
     onPayloadChange(value ? { institution_code: value } : null);
   }
 
+  const items = institutions.map((inst) => ({
+    value: inst.code,
+    label: `${inst.name} (${inst.code})`,
+  }));
+
   return (
-    <Select value={code} onValueChange={(v) => pick(v ?? "")}>
+    <Select value={code} onValueChange={(v) => pick(v ?? "")} items={items}>
       <SelectTrigger className="w-[220px]">
         <SelectValue placeholder="Elegir institución" />
       </SelectTrigger>
@@ -275,22 +282,29 @@ function OrderedTeamsForm({
 
   return (
     <div className="flex flex-wrap items-center gap-2">
-      {RANK_LABELS.map((rankLabel, i) => (
-        <Select key={i} value={picks[i]} onValueChange={(v) => setPick(i, v ?? "")}>
-          <SelectTrigger className="w-[180px]">
-            <SelectValue placeholder={`${rankLabel} ${label}`} />
-          </SelectTrigger>
-          <SelectContent>
-            {teams
-              .filter((t) => !picks.includes(String(t.id)) || picks[i] === String(t.id))
-              .map((t) => (
+      {RANK_LABELS.map((rankLabel, i) => {
+        const options = teams.filter(
+          (t) => !picks.includes(String(t.id)) || picks[i] === String(t.id)
+        );
+        const items = options.map((t) => ({
+          value: String(t.id),
+          label: `${t.emoji ?? ""} ${t.name}`.trim(),
+        }));
+        return (
+          <Select key={i} value={picks[i]} onValueChange={(v) => setPick(i, v ?? "")} items={items}>
+            <SelectTrigger className="w-[180px]">
+              <SelectValue placeholder={`${rankLabel} ${label}`} />
+            </SelectTrigger>
+            <SelectContent>
+              {options.map((t) => (
                 <SelectItem key={t.id} value={String(t.id)}>
                   {t.emoji} {t.name}
                 </SelectItem>
               ))}
-          </SelectContent>
-        </Select>
-      ))}
+            </SelectContent>
+          </Select>
+        );
+      })}
     </div>
   );
 }
@@ -313,22 +327,26 @@ function OrderedSpeakersForm({ speakers, existingPayload, onPayloadChange }: Bas
 
   return (
     <div className="flex flex-wrap items-center gap-2">
-      {RANK_LABELS.map((rankLabel, i) => (
-        <Select key={i} value={picks[i]} onValueChange={(v) => setPick(i, v ?? "")}>
-          <SelectTrigger className="w-[200px]">
-            <SelectValue placeholder={`${rankLabel} speaker`} />
-          </SelectTrigger>
-          <SelectContent>
-            {speakers
-              .filter((s) => !picks.includes(String(s.id)) || picks[i] === String(s.id))
-              .map((s) => (
+      {RANK_LABELS.map((rankLabel, i) => {
+        const options = speakers.filter(
+          (s) => !picks.includes(String(s.id)) || picks[i] === String(s.id)
+        );
+        const items = options.map((s) => ({ value: String(s.id), label: s.name }));
+        return (
+          <Select key={i} value={picks[i]} onValueChange={(v) => setPick(i, v ?? "")} items={items}>
+            <SelectTrigger className="w-[200px]">
+              <SelectValue placeholder={`${rankLabel} speaker`} />
+            </SelectTrigger>
+            <SelectContent>
+              {options.map((s) => (
                 <SelectItem key={s.id} value={String(s.id)}>
                   {s.name}
                 </SelectItem>
               ))}
-          </SelectContent>
-        </Select>
-      ))}
+            </SelectContent>
+          </Select>
+        );
+      })}
     </div>
   );
 }
@@ -357,6 +375,15 @@ function HeadToHeadForm({ teams, existingPayload, onPayloadChange }: BaseFormPro
 
   const teamAOption = teams.find((t) => String(t.id) === teamA);
   const teamBOption = teams.find((t) => String(t.id) === teamB);
+  const allTeamItems = teams.map((t) => ({
+    value: String(t.id),
+    label: `${t.emoji ?? ""} ${t.name}`.trim(),
+  }));
+  const teamBOptions = teams.filter((t) => String(t.id) !== teamA);
+  const teamBItems = teamBOptions.map((t) => ({
+    value: String(t.id),
+    label: `${t.emoji ?? ""} ${t.name}`.trim(),
+  }));
 
   return (
     <div className="flex flex-col gap-2">
@@ -370,6 +397,7 @@ function HeadToHeadForm({ teams, existingPayload, onPayloadChange }: BaseFormPro
             setWinner(nextWinner);
             emit(next, teamB, nextWinner);
           }}
+          items={allTeamItems}
         >
           <SelectTrigger className="w-[200px]">
             <SelectValue placeholder="Equipo A" />
@@ -390,18 +418,17 @@ function HeadToHeadForm({ teams, existingPayload, onPayloadChange }: BaseFormPro
             setTeamB(next);
             emit(teamA, next, winner);
           }}
+          items={teamBItems}
         >
           <SelectTrigger className="w-[200px]">
             <SelectValue placeholder="Equipo B" />
           </SelectTrigger>
           <SelectContent>
-            {teams
-              .filter((t) => String(t.id) !== teamA)
-              .map((t) => (
-                <SelectItem key={t.id} value={String(t.id)}>
-                  {t.emoji} {t.name}
-                </SelectItem>
-              ))}
+            {teamBOptions.map((t) => (
+              <SelectItem key={t.id} value={String(t.id)}>
+                {t.emoji} {t.name}
+              </SelectItem>
+            ))}
           </SelectContent>
         </Select>
       </div>
@@ -476,6 +503,15 @@ function RoundWinnerForm({ tournamentId, teams, existingPayload, onPayloadChange
     );
   }
 
+  const roundItems = (rounds ?? []).map((r: Round) => ({ value: String(r.id), label: r.name }));
+  const debateItems = (debates ?? []).map((d) => ({
+    value: String(d.id),
+    label: d.room?.name ?? `Debate #${d.id}`,
+  }));
+  const debateTeamItems = debateTeamOptions
+    .filter((t): t is Team => Boolean(t))
+    .map((t) => ({ value: String(t.id), label: `${t.emoji ?? ""} ${t.name}`.trim() }));
+
   return (
     <div className="flex flex-wrap items-center gap-2">
       <Select
@@ -486,6 +522,7 @@ function RoundWinnerForm({ tournamentId, teams, existingPayload, onPayloadChange
           setTeamId("");
           onPayloadChange(null);
         }}
+        items={roundItems}
       >
         <SelectTrigger className="w-[160px]">
           <SelectValue placeholder="Ronda" />
@@ -507,6 +544,7 @@ function RoundWinnerForm({ tournamentId, teams, existingPayload, onPayloadChange
           setTeamId("");
           onPayloadChange(null);
         }}
+        items={debateItems}
       >
         <SelectTrigger className="w-[160px]" disabled={!roundId}>
           <SelectValue placeholder="Debate / sala" />
@@ -527,6 +565,7 @@ function RoundWinnerForm({ tournamentId, teams, existingPayload, onPayloadChange
           setTeamId(next);
           emitTeam(debateId, next);
         }}
+        items={debateTeamItems}
       >
         <SelectTrigger className="w-[180px]" disabled={!debateId}>
           <SelectValue placeholder="Equipo ganador" />
