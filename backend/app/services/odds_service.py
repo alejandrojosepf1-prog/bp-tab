@@ -17,7 +17,7 @@ from collections import defaultdict
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.domain.odds import ordered_sequence_odds, single_candidate_odds
+from app.domain.odds import adaptive_temperature, ordered_sequence_odds, single_candidate_odds
 from app.models import (
     BetMarket,
     Debate,
@@ -168,7 +168,15 @@ async def quote_odds(session: AsyncSession, bet_market: BetMarket, payload: dict
         }
         if len(pair_power) != 2:
             raise UnpriceableMarketError("one or both teams have no standings yet")
-        return single_candidate_odds(pair_power, payload["predicted_winner_id"])
+        # Temperature is derived from the FULL tournament field, not just this pair -- with only
+        # two candidates a 2-point gap and a 10-point gap would otherwise normalize to roughly
+        # the same odds (softmax has nothing else to compare the gap against). Pricing "how big a
+        # favorite" against the whole field's spread keeps a blowout mismatch pricier than a
+        # close one.
+        temperature = adaptive_temperature(power.values())
+        return single_candidate_odds(
+            pair_power, payload["predicted_winner_id"], temperature=temperature
+        )
 
     if bet_type == BetType.ROUND_WINNER:
         power = await compute_team_power_ratings(session, bet_market.tournament_id)
@@ -184,7 +192,10 @@ async def quote_odds(session: AsyncSession, bet_market: BetMarket, payload: dict
         debate_power = {t: power[t] for t in debate_team_ids if t in power}
         if len(debate_power) < 2:
             raise UnpriceableMarketError("not enough priced teams in this debate yet")
-        return single_candidate_odds(debate_power, payload["team_id"])
+        # Same reasoning as HEAD_TO_HEAD above: price this debate's 2-4 teams against the
+        # tournament-wide spread, not just amongst themselves.
+        temperature = adaptive_temperature(power.values())
+        return single_candidate_odds(debate_power, payload["team_id"], temperature=temperature)
 
     if bet_type == BetType.BEST_INSTITUTION:
         institution_power = await compute_institution_power_ratings(

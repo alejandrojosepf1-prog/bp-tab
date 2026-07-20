@@ -7,6 +7,20 @@
       "runtimeArgs": ["node_modules/next/dist/bin/next", "dev"],
       "cwd": "frontend",
       "port": 3000
+    },
+    {
+      "name": "frontend-prod",
+      "runtimeExecutable": "C:\\Program Files\\nodejs\\node.exe",
+      "runtimeArgs": ["node_modules/next/dist/bin/next", "start", "-p", "3001"],
+      "cwd": "frontend",
+      "port": 3001
+    },
+    {
+      "name": "backend-dev",
+      "runtimeExecutable": "C:\\Users\\aleja\\OneDrive\\Documents\\BP$\\backend\\.venv\\Scripts\\python.exe",
+      "runtimeArgs": ["-m", "uvicorn", "app.main:app", "--reload", "--host", "0.0.0.0", "--port", "8001"],
+      "cwd": "backend",
+      "port": 8001
     }
   ]
 }

@@ -121,15 +121,16 @@ async def test_full_champion_market_lifecycle_settles_and_updates_leaderboard(
     assert settle_response.status_code == 200
     assert settle_response.json() == {"settled": True}
 
-    # A 2-team field with no debates played yet prices both teams at 50/50 (power=0 for both),
-    # i.e. decimal odds of 2.0 each -- see app.domain.odds. Alice staked 100 on the winner, so
-    # she's paid stake * odds = 200; Bob staked 50 on the loser and gets nothing back.
+    # A 2-team field with no debates played yet prices both teams at a fair 50/50 (power=0 for
+    # both), which after the 7% house margin is decimal odds of 2.0 / 1.07 = 1.87 each -- see
+    # app.domain.odds. Alice staked 100 on the winner, so she's paid stake * odds = 187; Bob
+    # staked 50 on the loser and gets nothing back.
     alice_after = await client.get(
         f"/api/v1/bet-markets/{market_id}/predictions/me", headers=auth_headers(alice)
     )
     assert alice_after.json()["status"] == "settled"
-    assert alice_after.json()["odds"] == 2.0
-    assert alice_after.json()["points_awarded"] == 200.0
+    assert alice_after.json()["odds"] == 1.87
+    assert alice_after.json()["points_awarded"] == 187.0
 
     bob_after = await client.get(
         f"/api/v1/bet-markets/{market_id}/predictions/me", headers=auth_headers(bob)
@@ -142,7 +143,7 @@ async def test_full_champion_market_lifecycle_settles_and_updates_leaderboard(
     assert len(leaderboard) == 2
     top = leaderboard[0]
     assert top["user"]["display_name"] == "Alice"
-    assert top["total_points"] == 100.0  # net profit: 200 payout - 100 stake
+    assert top["total_points"] == 87.0  # net profit: 187 payout - 100 stake
     assert top["rank"] == 1
 
 
