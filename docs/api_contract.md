@@ -19,8 +19,13 @@ This is the single source of truth both the backend (FastAPI implementation) and
 
 - `GET /tournaments` **(public)** -> `Tournament[]`
 - `GET /tournaments/{id}` **(public)** -> `Tournament`
-- `POST /tournaments` **(admin)** `{name, source_base_url, source_slug, timezone}` -> `Tournament`
-- `PATCH /tournaments/{id}` **(admin)** `{name?, source_base_url?, source_slug?, is_active?}` -> `Tournament`
+- `POST /tournaments` **(admin)** `{name, tab_url, timezone}` -> `Tournament` (`tab_url` is any link
+  from the tournament's public CalicoTab tab, e.g.
+  `https://cmude2025.calicotab.com/open/participants/list/` -- the backend derives
+  `source_base_url`/`source_slug` from it via `app.domain.tab_url.parse_tab_url`; 422 if it can't
+  be parsed, 409 if that `(source_base_url, source_slug)` is already registered. Creating a
+  tournament immediately schedules its first scrape -- no separate "force scrape" click needed.)
+- `PATCH /tournaments/{id}` **(admin)** `{name?, tab_url?, is_active?}` -> `Tournament`
 - `POST /tournaments/{id}/scrape` **(admin)** -> `{status: "queued"}` (fires the Celery `scrape_tournament` task)
 
 `Tournament` shape: `{id, name, slug, source_base_url, source_slug, status, api_available, champion_team_id, timezone, is_active, created_at}`

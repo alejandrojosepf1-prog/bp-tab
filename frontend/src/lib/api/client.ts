@@ -117,20 +117,11 @@ export const api = {
   tournaments: {
     list: () => get<Tournament[]>("/tournaments"),
     get: (id: number | string) => get<Tournament>(`/tournaments/${id}`),
-    create: (data: {
-      name: string;
-      source_base_url: string;
-      source_slug: string;
-      timezone: string;
-    }) => post<Tournament>("/tournaments", data),
+    create: (data: { name: string; tab_url: string; timezone: string }) =>
+      post<Tournament>("/tournaments", data),
     update: (
       id: number | string,
-      data: Partial<{
-        name: string;
-        source_base_url: string;
-        source_slug: string;
-        is_active: boolean;
-      }>
+      data: Partial<{ name: string; tab_url: string; is_active: boolean }>
     ) => patch<Tournament>(`/tournaments/${id}`, data),
     scrape: (id: number | string) =>
       post<{ status: "queued" }>(`/tournaments/${id}/scrape`),

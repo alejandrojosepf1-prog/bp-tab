@@ -77,13 +77,13 @@ function TournamentsTab() {
     queryFn: api.tournaments.list,
   });
 
-  const [form, setForm] = useState({ name: "", source_base_url: "", source_slug: "", timezone: "UTC" });
+  const [form, setForm] = useState({ name: "", tab_url: "", timezone: "UTC" });
 
   const createMutation = useMutation({
     mutationFn: () => api.tournaments.create(form),
     onSuccess: () => {
-      toast.success("Torneo creado");
-      setForm({ name: "", source_base_url: "", source_slug: "", timezone: "UTC" });
+      toast.success("Torneo creado — arrancó el primer scraping automáticamente");
+      setForm({ name: "", tab_url: "", timezone: "UTC" });
       queryClient.invalidateQueries({ queryKey: queryKeys.tournaments });
     },
     onError: (err) => toast.error(err instanceof ApiError ? err.detail : "Error al crear el torneo"),
@@ -126,24 +126,18 @@ function TournamentsTab() {
               />
             </div>
             <div className="flex flex-col gap-1.5 sm:col-span-2">
-              <Label htmlFor="source_base_url">URL base de CalicoTab</Label>
+              <Label htmlFor="tab_url">URL del tab de CalicoTab</Label>
               <Input
-                id="source_base_url"
-                value={form.source_base_url}
-                onChange={(e) => setForm((f) => ({ ...f, source_base_url: e.target.value }))}
-                placeholder="https://cmude2025.calicotab.com"
+                id="tab_url"
+                value={form.tab_url}
+                onChange={(e) => setForm((f) => ({ ...f, tab_url: e.target.value }))}
+                placeholder="https://cmude2025.calicotab.com/open/participants/list/"
                 required
               />
-            </div>
-            <div className="flex flex-col gap-1.5 sm:col-span-2">
-              <Label htmlFor="source_slug">Slug del torneo (ej. &quot;open&quot;)</Label>
-              <Input
-                id="source_slug"
-                value={form.source_slug}
-                onChange={(e) => setForm((f) => ({ ...f, source_slug: e.target.value }))}
-                placeholder="open"
-                required
-              />
+              <p className="text-xs text-muted-foreground">
+                Pegá cualquier link del tab del torneo (participantes, resultados, lo que sea) —
+                se detecta automáticamente el sitio y el torneo.
+              </p>
             </div>
             <div className="sm:col-span-2">
               <Button type="submit" disabled={createMutation.isPending}>
@@ -171,11 +165,12 @@ function TournamentsTab() {
 
 function TournamentRow({ tournament }: { tournament: Tournament }) {
   const queryClient = useQueryClient();
-  const [baseUrl, setBaseUrl] = useState(tournament.source_base_url);
-  const [slug, setSlug] = useState(tournament.source_slug);
+  const [tabUrl, setTabUrl] = useState(
+    `${tournament.source_base_url}/${tournament.source_slug}/`
+  );
 
   const updateMutation = useMutation({
-    mutationFn: () => api.tournaments.update(tournament.id, { source_base_url: baseUrl, source_slug: slug }),
+    mutationFn: () => api.tournaments.update(tournament.id, { tab_url: tabUrl }),
     onSuccess: () => {
       toast.success("Torneo actualizado");
       queryClient.invalidateQueries({ queryKey: queryKeys.tournaments });
@@ -226,9 +221,8 @@ function TournamentRow({ tournament }: { tournament: Tournament }) {
           </label>
         </div>
       </div>
-      <div className="grid grid-cols-1 gap-2 sm:grid-cols-[1fr_auto_auto]">
-        <Input value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} className="text-xs" />
-        <Input value={slug} onChange={(e) => setSlug(e.target.value)} className="w-28 text-xs" />
+      <div className="grid grid-cols-1 gap-2 sm:grid-cols-[1fr_auto]">
+        <Input value={tabUrl} onChange={(e) => setTabUrl(e.target.value)} className="text-xs" />
         <Button
           size="sm"
           variant="secondary"

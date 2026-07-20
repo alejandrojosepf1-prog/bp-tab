@@ -53,8 +53,7 @@ async def test_create_tournament_requires_authentication(client: AsyncClient) ->
         "/api/v1/tournaments",
         json={
             "name": "New Cup",
-            "source_base_url": "https://example.com",
-            "source_slug": "open",
+            "tab_url": "https://example.com/open/participants/list/",
             "timezone": "UTC",
         },
     )
@@ -70,8 +69,7 @@ async def test_create_tournament_forbidden_for_non_admin(
         "/api/v1/tournaments",
         json={
             "name": "New Cup",
-            "source_base_url": "https://example.com",
-            "source_slug": "open",
+            "tab_url": "https://example.com/open/participants/list/",
             "timezone": "UTC",
         },
         headers=auth_headers(user),
@@ -79,17 +77,30 @@ async def test_create_tournament_forbidden_for_non_admin(
     assert response.status_code == 403
 
 
-async def test_create_tournament_as_admin_derives_slug(
-    client: AsyncClient, db_session: AsyncSession
+async def test_create_tournament_as_admin_derives_slug_and_parses_tab_url(
+    client: AsyncClient, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Doesn't let the real `scrape_tournament_async` run in the background for the same reason
+    `test_scrape_endpoint_queues_background_task` doesn't -- creating a tournament now schedules
+    an initial scrape automatically, which would otherwise try (and fail) to reach the real
+    Postgres-backed `AsyncSessionLocal` from this in-memory-SQLite test environment."""
     admin = await make_user(db_session, email="admin@example.com", role=UserRole.ADMIN)
+
+    scraped = {}
+
+    async def fake_scrape_tournament_async(tournament_id: int, **kwargs: object) -> dict:
+        scraped["tournament_id"] = tournament_id
+        return {"tournament_id": tournament_id}
+
+    monkeypatch.setattr(
+        "app.api.routers.tournaments.scrape_tournament_async", fake_scrape_tournament_async
+    )
 
     response = await client.post(
         "/api/v1/tournaments",
         json={
             "name": "My Great Cup!",
-            "source_base_url": "https://example.calicotab.com",
-            "source_slug": "open",
+            "tab_url": "https://example.calicotab.com/open/participants/list/",
             "timezone": "America/Lima",
         },
         headers=auth_headers(admin),
@@ -97,8 +108,50 @@ async def test_create_tournament_as_admin_derives_slug(
     assert response.status_code == 201
     body = response.json()
     assert body["slug"] == "my-great-cup"
+    assert body["source_base_url"] == "https://example.calicotab.com"
+    assert body["source_slug"] == "open"
     assert body["status"] == "upcoming"
     assert body["is_active"] is True
+    assert scraped["tournament_id"] == body["id"]
+
+
+async def test_create_tournament_rejects_unparseable_tab_url(
+    client: AsyncClient, db_session: AsyncSession
+) -> None:
+    admin = await make_user(db_session, email="admin4@example.com", role=UserRole.ADMIN)
+
+    response = await client.post(
+        "/api/v1/tournaments",
+        json={"name": "Bad URL Cup", "tab_url": "not a url", "timezone": "UTC"},
+        headers=auth_headers(admin),
+    )
+    assert response.status_code == 422
+
+
+async def test_create_tournament_duplicate_source_is_409(
+    client: AsyncClient, db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await _make_tournament(db_session)
+    admin = await make_user(db_session, email="admin5@example.com", role=UserRole.ADMIN)
+
+    async def fake_scrape_tournament_async(tournament_id: int, **kwargs: object) -> dict:
+        return {"tournament_id": tournament_id}
+
+    monkeypatch.setattr(
+        "app.api.routers.tournaments.scrape_tournament_async", fake_scrape_tournament_async
+    )
+
+    response = await client.post(
+        "/api/v1/tournaments",
+        json={
+            "name": "Duplicate of CMUDE 2025",
+            # Same (base_url, slug) as _make_tournament's fixture -- just a different path.
+            "tab_url": "https://cmude2025.calicotab.com/open/results/round/3/",
+            "timezone": "UTC",
+        },
+        headers=auth_headers(admin),
+    )
+    assert response.status_code == 409
 
 
 async def test_patch_tournament_as_admin(client: AsyncClient, db_session: AsyncSession) -> None:

@@ -1,5 +1,6 @@
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import require_admin
@@ -10,6 +11,7 @@ from app.api.schemas.tournaments import (
     TournamentUpdate,
 )
 from app.db.session import get_db
+from app.domain.tab_url import parse_tab_url
 from app.models import Tournament, User
 from app.services.tournament_service import create_tournament
 from app.tasks.scrape_tasks import scrape_tournament_async
@@ -22,6 +24,15 @@ async def _get_tournament_or_404(session: AsyncSession, tournament_id: int) -> T
     if tournament is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tournament not found")
     return tournament
+
+
+def _parse_tab_url_or_422(tab_url: str) -> tuple[str, str]:
+    try:
+        return parse_tab_url(tab_url)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
+        ) from exc
 
 
 @router.get("", response_model=list[TournamentOut])
@@ -37,18 +48,33 @@ async def get_tournament(tournament_id: int, session: AsyncSession = Depends(get
 @router.post("", response_model=TournamentOut, status_code=status.HTTP_201_CREATED)
 async def create_tournament_endpoint(
     payload: TournamentCreate,
+    background_tasks: BackgroundTasks,
     session: AsyncSession = Depends(get_db),
     _admin: User = Depends(require_admin),
 ) -> Tournament:
-    tournament = await create_tournament(
-        session,
-        name=payload.name,
-        source_base_url=payload.source_base_url,
-        source_slug=payload.source_slug,
-        timezone=payload.timezone,
-    )
-    await session.commit()
+    source_base_url, source_slug = _parse_tab_url_or_422(payload.tab_url)
+    try:
+        tournament = await create_tournament(
+            session,
+            name=payload.name,
+            source_base_url=source_base_url,
+            source_slug=source_slug,
+            timezone=payload.timezone,
+        )
+        await session.commit()
+    except IntegrityError as exc:
+        await session.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"Ya existe un torneo registrado para {source_base_url}/{source_slug} -- "
+                "no hace falta agregarlo de nuevo."
+            ),
+        ) from exc
     await session.refresh(tournament)
+    # Start tracking it immediately instead of leaving an empty shell until the admin remembers
+    # to click "Forzar scraping" separately.
+    background_tasks.add_task(scrape_tournament_async, tournament.id)
     return tournament
 
 
@@ -61,9 +87,21 @@ async def update_tournament(
 ) -> Tournament:
     tournament = await _get_tournament_or_404(session, tournament_id)
     updates = payload.model_dump(exclude_unset=True)
+    tab_url = updates.pop("tab_url", None)
+    if tab_url is not None:
+        source_base_url, source_slug = _parse_tab_url_or_422(tab_url)
+        updates["source_base_url"] = source_base_url
+        updates["source_slug"] = source_slug
     for field, value in updates.items():
         setattr(tournament, field, value)
-    await session.commit()
+    try:
+        await session.commit()
+    except IntegrityError as exc:
+        await session.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Ya existe otro torneo registrado con esa URL.",
+        ) from exc
     await session.refresh(tournament)
     return tournament
 

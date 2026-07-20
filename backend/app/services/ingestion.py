@@ -81,18 +81,32 @@ class IngestionService:
         started_at = datetime.datetime.now(datetime.timezone.utc)
         self._summary = IngestionSummary()
 
+        # Bulk cold-start ingestion against a remote/pooled Postgres can run for many minutes
+        # (each entity upsert is its own SELECT-then-write round trip -- see upsert.py), with no
+        # externally-visible signal otherwise. These phase markers are the difference between
+        # "still working" and "hung" when watching a live log.
+        logger.info("ingest: institutions (%d)", len(snapshot.institutions))
         institution_id_by_code = await self._ingest_institutions(tournament, snapshot)
+        logger.info("ingest: adjudicators (%d)", len(snapshot.adjudicators))
         adjudicator_id_by_ext = await self._ingest_adjudicators(
             tournament, snapshot, institution_id_by_code
         )
+        logger.info("ingest: teams (%d)", len(snapshot.teams))
         team_id_by_ext = await self._ingest_teams(tournament, snapshot, institution_id_by_code)
+        logger.info("ingest: speakers (%d)", len(snapshot.speakers))
         speaker_id_by_key = await self._ingest_speakers(tournament, snapshot, team_id_by_ext)
+        logger.info("ingest: rounds (%d)", len(snapshot.rounds))
         round_id_by_seq = await self._ingest_rounds(tournament, snapshot)
+        total_debates = sum(len(d) for d in snapshot.debates_by_round.values())
+        logger.info("ingest: debates (%d)", total_debates)
         new_debate_ids = await self._ingest_debates(
             tournament, snapshot, team_id_by_ext, adjudicator_id_by_ext, round_id_by_seq
         )
+        logger.info("ingest: ballots (%d)", len(snapshot.ballots))
         await self._ingest_ballots(tournament, snapshot, team_id_by_ext, speaker_id_by_key)
+        logger.info("ingest: breaks")
         await self._ingest_breaks(tournament, snapshot, team_id_by_ext, adjudicator_id_by_ext)
+        logger.info("ingest: done, committing")
 
         self._summary.new_debate_external_ids = new_debate_ids
 
@@ -287,11 +301,16 @@ class IngestionService:
         round_id_by_seq: dict[int, int],
     ) -> list[int]:
         new_debate_external_ids: list[int] = []
+        total_debates = sum(len(d) for d in snapshot.debates_by_round.values())
+        processed = 0
         for round_seq, debates in snapshot.debates_by_round.items():
             round_id = round_id_by_seq.get(round_seq)
             if round_id is None:
                 continue
             for debate in debates:
+                processed += 1
+                if processed % 25 == 0 or processed == total_debates:
+                    logger.info("ingest: debates %d/%d", processed, total_debates)
                 result = await upsert_by_natural_key(
                     self.session,
                     Debate,
@@ -359,7 +378,10 @@ class IngestionService:
         team_id_by_ext: dict[int, int],
         speaker_id_by_key: dict[tuple[int, str], int],
     ) -> None:
-        for ballot in snapshot.ballots:
+        total_ballots = len(snapshot.ballots)
+        for processed, ballot in enumerate(snapshot.ballots, start=1):
+            if processed % 25 == 0 or processed == total_ballots:
+                logger.info("ingest: ballots %d/%d", processed, total_ballots)
             debate = (
                 await self.session.execute(
                     select(Debate).filter_by(

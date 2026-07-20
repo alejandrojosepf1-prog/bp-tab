@@ -1,6 +1,6 @@
 import datetime
 
-from sqlalchemy import DateTime, ForeignKey, func
+from sqlalchemy import BigInteger, DateTime, ForeignKey, func
 from sqlalchemy.orm import Mapped, declared_attr, mapped_column
 
 
@@ -35,6 +35,14 @@ class ExternalIdMixin:
 
     Used as the natural key for idempotent upserts: (tournament_id, external_id) uniquely
     identifies a row regardless of how many times the scraper re-fetches it.
+
+    BigInteger rather than the default 32-bit Integer: real Tabbycat ids are always small, but
+    `Debate.external_id` (the only user of this mixin with a non-Tabbycat-sourced id) sometimes
+    holds a synthesized pseudo-id derived from `zlib.crc32(...)` for elimination-round debates
+    published without a public ballot (see `_synthetic_debate_id` in scraper/parsers.py) --
+    crc32's full unsigned 32-bit output range exceeds Postgres's signed int32 max
+    (2147483647) and was silently accepted by SQLite's dynamic typing in local dev, only
+    surfacing as `DataError: value out of int32 range` once run against real Postgres.
     """
 
-    external_id: Mapped[int] = mapped_column(nullable=False, index=True)
+    external_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
