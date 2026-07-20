@@ -168,6 +168,11 @@ function BetMarketCard({
             {isPastClose ? "cerró" : "cierra"}{" "}
             {formatDistanceToNow(closesAt, { addSuffix: true, locale: es })}
           </span>
+          {market.pool_total > 0 && (
+            <span className="text-[0.7rem] text-muted-foreground">
+              Pool: ${market.pool_total.toLocaleString("es")}
+            </span>
+          )}
         </div>
       </CardHeader>
       <CardContent>
@@ -197,19 +202,21 @@ function BetMarketCard({
 
         {isAuthenticated && myPrediction && (
           <p className="mt-3 text-xs text-muted-foreground">
-            Ya tienes una predicción guardada para este mercado
+            Ya tienes una apuesta de ${myPrediction.stake_amount} a cuota {myPrediction.odds}x
+            guardada para este mercado
             {myPrediction.points_awarded !== null && (
               <>
                 {" "}
                 — resultado:{" "}
-                <span
-                  className={
-                    myPrediction.points_awarded >= 0 ? "text-emerald-400" : "text-red-400"
-                  }
-                >
-                  {myPrediction.points_awarded >= 0 ? "+" : "-"}$
-                  {Math.abs(myPrediction.points_awarded).toLocaleString("es")}
-                </span>
+                {myPrediction.points_awarded > 0 ? (
+                  <span className="text-emerald-400">
+                    +${myPrediction.points_awarded.toLocaleString("es")}
+                  </span>
+                ) : (
+                  <span className="text-red-400">
+                    -${myPrediction.stake_amount.toLocaleString("es")}
+                  </span>
+                )}
               </>
             )}
             .

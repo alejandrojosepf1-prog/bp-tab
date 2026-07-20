@@ -13,7 +13,8 @@ This is the single source of truth both the backend (FastAPI implementation) and
 - `POST /auth/login` `{email, password}` -> `{access_token, token_type: "bearer"}`
 - `GET /auth/me` -> `User`
 
-`User` shape: `{id, email, display_name, role, is_active, created_at}`
+`User` shape: `{id, email, display_name, role, is_active, balance, created_at}`
+(`balance`: fictional USD wallet, global across every tournament -- see Betting section below)
 
 ## Tournaments
 
@@ -65,26 +66,43 @@ This is the single source of truth both the backend (FastAPI implementation) and
 
 ## Betting
 
-**Unit convention:** `points_awarded` (on `Prediction`) and `total_points` (on `LeaderboardEntry`)
-are denominated in **fictional USD** ("dólares apostados"), not abstract points -- there is no
+**Unit convention:** every dollar amount below (`User.balance`, `Prediction.stake_amount`,
+`potential_payout`, `points_awarded`, `LeaderboardEntry.total_points`, `BetMarket.pool_total`)
+is denominated in **fictional USD** ("dólares apostados"), not abstract points -- there is no
 real money anywhere in this platform, but the friend group's score is expressed and displayed
-as dollars won/lost (e.g. render `points_awarded` as `"$100"`, not `"100 pts"`). Same for every
-number inside a `BetMarket.points_rule` (e.g. `{"points": 100}` means "$100 for a correct
-guess"). The frontend should format all of these with a `$` prefix.
+as dollars (e.g. render `points_awarded` as `"$100"`, not `"100 pts"`). The frontend should
+format all of these with a `$` prefix.
+
+**Odds model:** fixed-odds (sportsbook-style), not pari-mutuel. `POST .../quote` prices a
+candidate pick from that team's/speaker's/institution's current strength (see
+`app.domain.odds` and `app.services.odds_service`) WITHOUT placing a bet -- call it live as the
+user builds their pick to show a "cuota: 1.85x" preview. `POST .../predictions` re-prices the
+same way and locks the resulting `odds` onto the `Prediction` row at that moment; a later swing
+in the market's pool or in team strength never changes an already-placed bet's payout.
+`pool_total` (sum of everyone's stakes) is informational flavor only and does not feed back into
+anyone's odds.
 
 - `GET /tournaments/{id}/bet-markets` -> `BetMarket[]`
-  `{id, bet_type, label, description, opens_at, closes_at, status, target_round_id, target_break_category_id}`
+  `{id, bet_type, label, description, opens_at, closes_at, status, target_round_id, target_break_category_id, pool_total}`
   (`bet_type`: `champion|top_n_break|top_n_speakers|round_winner|head_to_head|breakout_team|best_institution`)
   (`status`: `open|closed|settled`)
 - `POST /tournaments/{id}/bet-markets` **(admin)** `{bet_type, label, description?, opens_at, closes_at, points_rule?, target_round_id?, target_break_category_id?}` -> `BetMarket`
+  (`points_rule` is now only used by `breakout_team`, e.g. `{"odds": 4.0}` -- every other bet_type is priced automatically)
 - `PATCH /bet-markets/{market_id}` **(admin)** `{status?}` (only `open<->closed` transitions; `settled` is set by the system)
 - `POST /bet-markets/{market_id}/settle` **(admin)** `{manual_outcome?: object}` -> `{settled: bool}`
+- `POST /bet-markets/{market_id}/quote` `{payload: object}` -> `{odds: number}` (live preview, no side effects)
 - `GET /bet-markets/{market_id}/predictions/me` -> `Prediction | null`
-- `POST /bet-markets/{market_id}/predictions` `{payload: object}` -> `Prediction`
-  (payload shape depends on bet_type -- see below. Rejected with 400 if market isn't `open` or `now > closes_at`.)
+- `POST /bet-markets/{market_id}/predictions` `{payload: object, stake_amount: number}` -> `Prediction`
+  (payload shape depends on bet_type -- see below. Rejected with 400 if market isn't `open`,
+  `now > closes_at`, the market can't be priced yet (no standings/scores), or the user's balance
+  can't cover `stake_amount`; 422 if the payload names a team/speaker/institution outside the
+  currently-tracked field. Re-submitting on the same market refunds the prior stake before
+  charging the new one, rather than creating a second prediction.)
 
-`Prediction` shape: `{id, bet_market_id, user_id, payload, status, points_awarded, locked_at, created_at}`
-(`status`: `open|locked|settled`)
+`Prediction` shape: `{id, bet_market_id, user_id, payload, status, stake_amount, odds, potential_payout, points_awarded, locked_at, created_at}`
+(`status`: `open|locked|settled`; `potential_payout = stake_amount * odds`; `points_awarded` is
+the amount actually credited back once settled -- `potential_payout` if won, `0` if lost, `null`
+while still open)
 
 ### Payload shape per bet_type (both request body when creating and what's stored)
 

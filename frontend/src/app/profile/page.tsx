@@ -2,7 +2,7 @@
 
 import { formatDistanceToNow } from "date-fns";
 import { es } from "date-fns/locale";
-import { CalendarDays, Mail, ShieldCheck, User as UserIcon } from "lucide-react";
+import { CalendarDays, Mail, ShieldCheck, User as UserIcon, Wallet } from "lucide-react";
 import { useAuth } from "@/lib/auth/auth-context";
 import { RequireAuth } from "@/components/auth/require-auth";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -58,6 +58,17 @@ function ProfileContent() {
               <Mail className="size-3.5" /> {user.email}
             </span>
           </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardContent className="flex items-center justify-between gap-3 pt-6">
+          <span className="flex items-center gap-1.5 text-sm text-muted-foreground">
+            <Wallet className="size-4" /> Saldo disponible
+          </span>
+          <span className="text-2xl font-semibold tabular-nums">
+            ${user.balance.toLocaleString("es")}
+          </span>
         </CardContent>
       </Card>
 

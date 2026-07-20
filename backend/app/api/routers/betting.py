@@ -1,7 +1,7 @@
 import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, require_admin
@@ -9,6 +9,8 @@ from app.api.schemas.betting import (
     BetMarketCreate,
     BetMarketOut,
     BetMarketPatch,
+    OddsQuoteOut,
+    OddsQuoteRequest,
     PredictionCreate,
     PredictionOut,
     SettleRequest,
@@ -16,9 +18,14 @@ from app.api.schemas.betting import (
 )
 from app.db.session import get_db
 from app.models import BetMarket, Prediction, Tournament, User
-from app.models.enums import BetMarketStatus, PredictionStatus
-from app.repositories.upsert import upsert_by_natural_key
-from app.services.betting_service import set_bet_market_status, settle_market
+from app.models.enums import BetMarketStatus
+from app.services.betting_service import (
+    InsufficientBalanceError,
+    place_prediction,
+    set_bet_market_status,
+    settle_market,
+)
+from app.services.odds_service import UnpriceableMarketError, quote_odds
 
 router = APIRouter(tags=["betting"])
 
@@ -37,16 +44,40 @@ async def _get_market_or_404(session: AsyncSession, market_id: int) -> BetMarket
     return market
 
 
+async def _pool_total(session: AsyncSession, market_id: int) -> float:
+    total = (
+        await session.execute(
+            select(func.coalesce(func.sum(Prediction.stake_amount), 0.0)).where(
+                Prediction.bet_market_id == market_id
+            )
+        )
+    ).scalar_one()
+    return float(total)
+
+
+async def _to_bet_market_out(session: AsyncSession, market: BetMarket) -> BetMarketOut:
+    out = BetMarketOut.model_validate(market)
+    out.pool_total = await _pool_total(session, market.id)
+    return out
+
+
+def _to_prediction_out(prediction: Prediction) -> PredictionOut:
+    out = PredictionOut.model_validate(prediction)
+    out.potential_payout = round(prediction.stake_amount * prediction.odds, 2)
+    return out
+
+
 @router.get("/tournaments/{tournament_id}/bet-markets", response_model=list[BetMarketOut])
 async def list_bet_markets(
     tournament_id: int, session: AsyncSession = Depends(get_db)
-) -> list[BetMarket]:
+) -> list[BetMarketOut]:
     stmt = (
         select(BetMarket)
         .where(BetMarket.tournament_id == tournament_id)
         .order_by(BetMarket.opens_at)
     )
-    return list((await session.execute(stmt)).scalars().all())
+    markets = (await session.execute(stmt)).scalars().all()
+    return [await _to_bet_market_out(session, m) for m in markets]
 
 
 @router.post(
@@ -59,7 +90,7 @@ async def create_bet_market(
     payload: BetMarketCreate,
     session: AsyncSession = Depends(get_db),
     _admin: User = Depends(require_admin),
-) -> BetMarket:
+) -> BetMarketOut:
     await _get_tournament_or_404(session, tournament_id)
     market = BetMarket(
         tournament_id=tournament_id,
@@ -75,7 +106,7 @@ async def create_bet_market(
     session.add(market)
     await session.commit()
     await session.refresh(market)
-    return market
+    return await _to_bet_market_out(session, market)
 
 
 @router.patch("/bet-markets/{market_id}", response_model=BetMarketOut)
@@ -84,7 +115,7 @@ async def patch_bet_market(
     payload: BetMarketPatch,
     session: AsyncSession = Depends(get_db),
     _admin: User = Depends(require_admin),
-) -> BetMarket:
+) -> BetMarketOut:
     market = await _get_market_or_404(session, market_id)
     if payload.status is not None:
         try:
@@ -93,7 +124,7 @@ async def patch_bet_market(
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     await session.commit()
     await session.refresh(market)
-    return market
+    return await _to_bet_market_out(session, market)
 
 
 @router.post("/bet-markets/{market_id}/settle", response_model=SettleResponse)
@@ -109,17 +140,41 @@ async def settle_bet_market(
     return SettleResponse(settled=settled)
 
 
+@router.post("/bet-markets/{market_id}/quote", response_model=OddsQuoteOut)
+async def quote_bet_market_odds(
+    market_id: int,
+    payload: OddsQuoteRequest,
+    session: AsyncSession = Depends(get_db),
+    _current_user: User = Depends(get_current_user),
+) -> OddsQuoteOut:
+    """Live odds preview for a candidate pick, WITHOUT placing a bet -- the frontend calls this
+    as the user builds their pick so they can see "cuota: 1.85x" before committing a stake. Read
+    -only: no Prediction is created, no balance touched."""
+    market = await _get_market_or_404(session, market_id)
+    try:
+        odds = await quote_odds(session, market, payload.payload)
+    except UnpriceableMarketError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except (KeyError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"invalid pick for this market: {exc}",
+        ) from exc
+    return OddsQuoteOut(odds=odds)
+
+
 @router.get("/bet-markets/{market_id}/predictions/me", response_model=PredictionOut | None)
 async def get_my_prediction(
     market_id: int,
     session: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
-) -> Prediction | None:
+) -> PredictionOut | None:
     await _get_market_or_404(session, market_id)
     stmt = select(Prediction).where(
         Prediction.bet_market_id == market_id, Prediction.user_id == current_user.id
     )
-    return (await session.execute(stmt)).scalar_one_or_none()
+    prediction = (await session.execute(stmt)).scalar_one_or_none()
+    return _to_prediction_out(prediction) if prediction else None
 
 
 @router.post(
@@ -132,7 +187,7 @@ async def create_prediction(
     payload: PredictionCreate,
     session: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
-) -> Prediction:
+) -> PredictionOut:
     market = await _get_market_or_404(session, market_id)
     now = datetime.datetime.now(datetime.timezone.utc)
     closes_at = market.closes_at
@@ -143,18 +198,29 @@ async def create_prediction(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="This bet market is not open for predictions",
         )
+    if payload.stake_amount <= 0:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="stake_amount must be greater than 0",
+        )
 
-    result = await upsert_by_natural_key(
-        session,
-        Prediction,
-        lookup={"bet_market_id": market_id, "user_id": current_user.id},
-        values={
-            "payload": payload.payload,
-            "locked_at": now,
-            "status": PredictionStatus.OPEN,
-            "points_awarded": None,
-        },
-    )
+    try:
+        prediction = await place_prediction(
+            session, market, current_user, payload.payload, payload.stake_amount
+        )
+    except UnpriceableMarketError as exc:
+        await session.rollback()
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except (KeyError, ValueError) as exc:
+        await session.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"invalid pick for this market: {exc}",
+        ) from exc
+    except InsufficientBalanceError as exc:
+        await session.rollback()
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
     await session.commit()
-    await session.refresh(result.instance)
-    return result.instance
+    await session.refresh(prediction)
+    return _to_prediction_out(prediction)

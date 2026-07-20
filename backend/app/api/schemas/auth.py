@@ -13,6 +13,8 @@ class UserOut(BaseModel):
     display_name: str
     role: UserRole
     is_active: bool
+    # Fictional USD bankroll -- see app.models.betting.User.balance.
+    balance: float
     created_at: datetime.datetime
 
 

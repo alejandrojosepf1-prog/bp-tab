@@ -27,6 +27,10 @@ class User(Base, TimestampMixin):
     display_name: Mapped[str] = mapped_column(String(100), nullable=False)
     role: Mapped[UserRole] = mapped_column(default=UserRole.USER, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    # Fictional USD bankroll -- goes up and down as the user places/wins/loses bets (see
+    # services/betting_service.py). STARTING_BALANCE is the one-time grant a brand new user
+    # gets; there is no real money anywhere in this platform.
+    balance: Mapped[float] = mapped_column(Float, default=1000.0, nullable=False)
 
 
 class BetMarket(Base, TournamentScopedMixin, TimestampMixin):
@@ -81,6 +85,18 @@ class Prediction(Base, TimestampMixin):
     payload: Mapped[dict] = mapped_column(JSON, nullable=False)
     locked_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     status: Mapped[PredictionStatus] = mapped_column(default=PredictionStatus.OPEN, nullable=False)
+    # Fictional USD wagered on this specific prediction, deducted from User.balance the moment
+    # it's placed (see services/betting_service.py::place_prediction).
+    stake_amount: Mapped[float] = mapped_column(Float, nullable=False)
+    # Decimal ("pays 1.85x") odds, priced from team/speaker/institution strength by
+    # app.services.odds_service at the moment this prediction was placed and frozen from then
+    # on -- a later swing in the market's pool or in team strength never changes an
+    # already-placed bet's payout, same as a real fixed-odds sportsbook (not pari-mutuel).
+    odds: Mapped[float] = mapped_column(Float, nullable=False)
+    # The actual amount credited back to User.balance once settled: stake_amount * odds if this
+    # prediction won, 0.0 if it lost, None while still OPEN. (Field predates the odds/stake
+    # model -- kept under its original name since it's the same "how much did this prediction
+    # pay" concept, just no longer a fixed per-bet_type point value.)
     points_awarded: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     bet_market = relationship("BetMarket", back_populates="predictions")

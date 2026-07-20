@@ -17,7 +17,7 @@ import datetime
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.domain.scoring import score_prediction
+from app.domain.bet_outcomes import did_prediction_win
 from app.models import (
     Break,
     Debate,
@@ -28,13 +28,72 @@ from app.models import (
     SpeakerScore,
     Team,
     Tournament,
+    User,
 )
 from app.models.betting import BetMarket
 from app.models.enums import BetMarketStatus, BetType, PredictionStatus
 from app.repositories.upsert import upsert_by_natural_key
+from app.services.odds_service import quote_odds
 from app.services.ranking_service import get_standings
 
 _PER_PREDICTION_BET_TYPES = {BetType.HEAD_TO_HEAD, BetType.ROUND_WINNER}
+
+
+class InsufficientBalanceError(Exception):
+    """Raised when a user's balance can't cover a stake -- the router maps this to a 400."""
+
+
+async def place_prediction(
+    session: AsyncSession,
+    bet_market: BetMarket,
+    user: User,
+    payload: dict,
+    stake_amount: float,
+) -> Prediction:
+    """Prices `payload` via `odds_service.quote_odds`, charges `stake_amount` against
+    `user.balance`, and upserts the Prediction row with odds locked in at this moment.
+
+    If the user already has an OPEN prediction on this market (they're changing their pick
+    before it closes), that prior stake is refunded first so editing a bet never double-charges
+    them. Raises InsufficientBalanceError if the balance (after any refund) can't cover the new
+    stake -- callers should not commit the session in that case.
+    """
+    if stake_amount <= 0:
+        raise ValueError("stake_amount must be positive")
+
+    odds = await quote_odds(session, bet_market, payload)
+
+    existing = (
+        await session.execute(
+            select(Prediction).where(
+                Prediction.bet_market_id == bet_market.id, Prediction.user_id == user.id
+            )
+        )
+    ).scalar_one_or_none()
+    if existing is not None and existing.status == PredictionStatus.OPEN:
+        user.balance += existing.stake_amount
+
+    if user.balance < stake_amount:
+        raise InsufficientBalanceError(
+            f"insufficient balance: have {user.balance:.2f}, need {stake_amount:.2f}"
+        )
+    user.balance -= stake_amount
+
+    now = datetime.datetime.now(datetime.timezone.utc)
+    result = await upsert_by_natural_key(
+        session,
+        Prediction,
+        lookup={"bet_market_id": bet_market.id, "user_id": user.id},
+        values={
+            "payload": payload,
+            "locked_at": now,
+            "status": PredictionStatus.OPEN,
+            "stake_amount": stake_amount,
+            "odds": odds,
+            "points_awarded": None,
+        },
+    )
+    return result.instance
 
 
 async def build_market_outcome(session: AsyncSession, bet_market: BetMarket) -> dict | None:
@@ -161,11 +220,15 @@ async def settle_market(
         assert (
             outcome is not None
         )  # guaranteed by the shared_outcome check above when not per_prediction
-        prediction.points_awarded = score_prediction(
-            bet_market.bet_type, prediction.payload, outcome, bet_market.points_rule
-        )
+        won = did_prediction_win(bet_market.bet_type, prediction.payload, outcome)
+        payout = prediction.stake_amount * prediction.odds if won else 0.0
+        prediction.points_awarded = payout
         prediction.status = PredictionStatus.SETTLED
         any_settled = True
+        if won:
+            user = await session.get(User, prediction.user_id)
+            if user is not None:
+                user.balance += payout
 
     if per_prediction and not all(p.status == PredictionStatus.SETTLED for p in predictions):
         return (
@@ -197,10 +260,22 @@ def set_bet_market_status(bet_market: BetMarket, new_status: BetMarketStatus) ->
 
 
 async def recompute_leaderboard(session: AsyncSession, tournament_id: int) -> None:
-    """Rewrites LeaderboardEntry from scratch off Prediction.points_awarded -- never hand-edited,
-    always derived, so it can never drift out of sync with the predictions it summarizes."""
+    """Rewrites LeaderboardEntry from scratch off settled Predictions in this tournament --
+    never hand-edited, always derived, so it can never drift out of sync with the predictions it
+    summarizes.
+
+    `total_points` here is this tournament's NET profit/loss (payout minus stake across every
+    settled prediction on one of its markets), not the user's overall bankroll: `User.balance`
+    is a single global wallet shared across every tournament a friend group tracks, so a
+    per-tournament leaderboard has to look at that tournament's predictions specifically to say
+    anything meaningful about "who called CMUDE 2025 the best." Unlike balance this CAN go
+    negative -- it's a scoreboard of prediction skill, not a running cash total.
+    """
     stmt = (
-        select(Prediction.user_id, func.sum(Prediction.points_awarded))
+        select(
+            Prediction.user_id,
+            func.sum(Prediction.points_awarded - Prediction.stake_amount),
+        )
         .join(BetMarket, Prediction.bet_market_id == BetMarket.id)
         .where(
             BetMarket.tournament_id == tournament_id, Prediction.status == PredictionStatus.SETTLED
@@ -211,10 +286,10 @@ async def recompute_leaderboard(session: AsyncSession, tournament_id: int) -> No
     ranked = sorted(rows, key=lambda r: -(r[1] or 0.0))
 
     now = datetime.datetime.now(datetime.timezone.utc)
-    for i, (user_id, total_points) in enumerate(ranked):
+    for i, (user_id, net_profit) in enumerate(ranked):
         await upsert_by_natural_key(
             session,
             LeaderboardEntry,
             lookup={"tournament_id": tournament_id, "user_id": user_id},
-            values={"total_points": float(total_points or 0.0), "rank": i + 1, "computed_at": now},
+            values={"total_points": float(net_profit or 0.0), "rank": i + 1, "computed_at": now},
         )

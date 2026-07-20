@@ -173,6 +173,8 @@ async def test_scrape_tournament_async_settles_a_champion_market_once_resolvable
                 user_id=user.id,
                 payload={"team_id": pucp_fm.id},
                 locked_at=datetime.now(timezone.utc),
+                stake_amount=10.0,
+                odds=10.0,
             )
         )
         await session.commit()
@@ -190,7 +192,7 @@ async def test_scrape_tournament_async_settles_a_champion_market_once_resolvable
         ).scalar_one()
         assert market.status == BetMarketStatus.SETTLED
         prediction = (await session.execute(select(Prediction))).scalar_one()
-        assert prediction.points_awarded == 100.0
+        assert prediction.points_awarded == 100.0  # stake 10 * odds 10
 
 
 @pytest.mark.asyncio

@@ -35,11 +35,17 @@ export function MyPredictionsCard({
             <div key={p.id} className="flex items-center justify-between gap-3 py-2 text-sm">
               <span className="text-muted-foreground">Mercado #{p.bet_market_id}</span>
               <div className="flex items-center gap-2">
-                {p.points_awarded !== null && (
+                {p.points_awarded === null ? (
+                  <span className="tabular-nums text-muted-foreground">
+                    ${p.stake_amount} @ {p.odds}x
+                  </span>
+                ) : (
                   <span
-                    className={`tabular-nums font-medium ${p.points_awarded >= 0 ? "text-emerald-400" : "text-red-400"}`}
+                    className={`tabular-nums font-medium ${p.points_awarded > 0 ? "text-emerald-400" : "text-red-400"}`}
                   >
-                    {p.points_awarded >= 0 ? "+" : "-"}${Math.abs(p.points_awarded).toLocaleString("es")}
+                    {p.points_awarded > 0
+                      ? `+$${p.points_awarded.toLocaleString("es")}`
+                      : `-$${p.stake_amount.toLocaleString("es")}`}
                   </span>
                 )}
                 <StatusBadge status={p.status} />

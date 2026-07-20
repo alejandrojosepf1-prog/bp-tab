@@ -209,8 +209,13 @@ export const api = {
       post<{ settled: boolean }>(`/bet-markets/${marketId}/settle`, data ?? {}),
     myPrediction: (marketId: number | string) =>
       get<Prediction | null>(`/bet-markets/${marketId}/predictions/me`),
-    createPrediction: (marketId: number | string, payload: object) =>
-      post<Prediction>(`/bet-markets/${marketId}/predictions`, { payload }),
+    createPrediction: (marketId: number | string, payload: object, stakeAmount: number) =>
+      post<Prediction>(`/bet-markets/${marketId}/predictions`, {
+        payload,
+        stake_amount: stakeAmount,
+      }),
+    quoteOdds: (marketId: number | string, payload: object) =>
+      post<{ odds: number }>(`/bet-markets/${marketId}/quote`, { payload }),
   },
 
   leaderboard: {

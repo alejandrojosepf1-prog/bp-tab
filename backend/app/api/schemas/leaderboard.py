@@ -10,8 +10,10 @@ class LeaderboardUserOut(BaseModel):
 
 class LeaderboardEntryOut(BaseModel):
     user: LeaderboardUserOut
-    # Fictional USD ("dólares ficticios apostados") accumulated across every settled
-    # prediction -- no real money involved, see app.domain.scoring.
+    # Net profit/loss (payout minus stake, in fictional USD) across every settled prediction on
+    # THIS tournament's markets -- can go negative, unlike the user's overall wallet balance
+    # (User.balance / GET /auth/me), which is global across every tournament. No real money
+    # involved anywhere -- see app.domain.odds and app.services.betting_service.
     total_points: float
     rank: int
     computed_at: datetime.datetime

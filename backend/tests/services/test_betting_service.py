@@ -82,13 +82,26 @@ async def test_settle_market_champion_scores_and_updates_leaderboard(db_session)
 
     db_session.add(
         Prediction(
-            bet_market_id=market.id, user_id=alice.id, payload={"team_id": team.id}, locked_at=NOW
+            bet_market_id=market.id,
+            user_id=alice.id,
+            payload={"team_id": team.id},
+            locked_at=NOW,
+            stake_amount=100.0,
+            odds=2.0,
         )
     )
     db_session.add(
-        Prediction(bet_market_id=market.id, user_id=bob.id, payload={"team_id": 999}, locked_at=NOW)
+        Prediction(
+            bet_market_id=market.id,
+            user_id=bob.id,
+            payload={"team_id": 999},
+            locked_at=NOW,
+            stake_amount=50.0,
+            odds=3.0,
+        )
     )
     await db_session.commit()
+    alice_balance_before = alice.balance
 
     settled = await settle_market(db_session, market)
     await db_session.commit()
@@ -100,15 +113,21 @@ async def test_settle_market_champion_scores_and_updates_leaderboard(db_session)
         (await db_session.execute(select(Prediction).order_by(Prediction.user_id))).scalars().all()
     )
     by_user = {p.user_id: p for p in predictions}
-    assert by_user[alice.id].points_awarded == 100.0
+    # Alice won: payout = stake * odds = 100 * 2.0.
+    assert by_user[alice.id].points_awarded == 200.0
     assert by_user[alice.id].status == PredictionStatus.SETTLED
+    # Bob lost: stake was already deducted at placement time, no further loss on settlement.
     assert by_user[bob.id].points_awarded == 0.0
+
+    await db_session.refresh(alice)
+    assert alice.balance == alice_balance_before + 200.0
 
     leaderboard = (await db_session.execute(select(LeaderboardEntry))).scalars().all()
     by_user_lb = {entry.user_id: entry for entry in leaderboard}
-    assert by_user_lb[alice.id].total_points == 100.0
+    # total_points is net profit (payout - stake) for THIS tournament, not the global balance.
+    assert by_user_lb[alice.id].total_points == 100.0  # 200 payout - 100 stake
     assert by_user_lb[alice.id].rank == 1
-    assert by_user_lb[bob.id].total_points == 0.0
+    assert by_user_lb[bob.id].total_points == -50.0  # 0 payout - 50 stake
     assert by_user_lb[bob.id].rank == 2
 
 
@@ -161,6 +180,8 @@ async def test_settle_market_top_n_break(db_session) -> None:
             user_id=alice.id,
             payload={"team_ids": [team_1.id, team_2.id]},
             locked_at=NOW,
+            stake_amount=10.0,
+            odds=5.0,
         )
     )
     await db_session.commit()
@@ -170,7 +191,8 @@ async def test_settle_market_top_n_break(db_session) -> None:
 
     assert settled is True
     prediction = (await db_session.execute(select(Prediction))).scalar_one()
-    assert prediction.points_awarded == 30.0  # 2 exact-position hits: (10+5) * 2
+    # Exact-order top-N match (all-or-nothing parlay, see domain.bet_outcomes): stake * odds.
+    assert prediction.points_awarded == 50.0
 
 
 async def test_settle_market_head_to_head_is_per_prediction(db_session) -> None:
@@ -221,6 +243,8 @@ async def test_settle_market_head_to_head_is_per_prediction(db_session) -> None:
                 "predicted_winner_id": team_a.id,
             },
             locked_at=NOW,
+            stake_amount=10.0,
+            odds=4.0,
         )
     )
     await db_session.commit()
@@ -230,7 +254,7 @@ async def test_settle_market_head_to_head_is_per_prediction(db_session) -> None:
 
     assert settled is True
     prediction = (await db_session.execute(select(Prediction))).scalar_one()
-    assert prediction.points_awarded == 15.0
+    assert prediction.points_awarded == 40.0
 
 
 async def test_settle_market_breakout_team_requires_manual_outcome(db_session) -> None:
@@ -242,7 +266,12 @@ async def test_settle_market_breakout_team_requires_manual_outcome(db_session) -
     alice = await _make_user(db_session, "alice@example.com")
     db_session.add(
         Prediction(
-            bet_market_id=market.id, user_id=alice.id, payload={"team_id": team.id}, locked_at=NOW
+            bet_market_id=market.id,
+            user_id=alice.id,
+            payload={"team_id": team.id},
+            locked_at=NOW,
+            stake_amount=10.0,
+            odds=4.0,
         )
     )
     await db_session.commit()

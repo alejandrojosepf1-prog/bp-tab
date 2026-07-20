@@ -13,6 +13,8 @@ export interface User {
   display_name: string;
   role: Role;
   is_active: boolean;
+  // Fictional USD bankroll -- goes up and down as bets are placed/won/lost. No real money.
+  balance: number;
   created_at: string;
 }
 
@@ -198,6 +200,13 @@ export interface BetMarket {
   status: BetMarketStatus;
   target_round_id: number | null;
   target_break_category_id: number | null;
+  // Sum of every stake placed on this market so far ($). Informational only -- fixed odds,
+  // not a pari-mutuel pool, so this does not affect anyone's payout.
+  pool_total: number;
+}
+
+export interface OddsQuote {
+  odds: number;
 }
 
 export type PredictionStatus = "open" | "locked" | "settled";
@@ -242,6 +251,13 @@ export interface Prediction {
   user_id: number;
   payload: Record<string, unknown>;
   status: PredictionStatus;
+  // Fictional USD staked on this pick, and the decimal odds ("pays 1.85x") locked in at the
+  // moment it was placed -- see app.domain.odds. potential_payout = stake_amount * odds.
+  stake_amount: number;
+  odds: number;
+  potential_payout: number;
+  // The amount actually credited back once settled (stake_amount * odds if won, 0 if lost),
+  // null while still open.
   points_awarded: number | null;
   locked_at: string | null;
   created_at: string;

@@ -12,7 +12,10 @@ PAST = NOW - datetime.timedelta(days=1)
 FUTURE = NOW + datetime.timedelta(days=1)
 
 
-async def _make_tournament_with_team(db_session: AsyncSession) -> tuple[Tournament, Team]:
+async def _make_tournament_with_team(db_session: AsyncSession) -> tuple[Tournament, Team, Team]:
+    """Two teams, not one: odds pricing needs at least a 2-team field to price anything (a
+    lone-candidate market is a nonsensical "certain to win" case), and most of these tests just
+    need *a* second, real team for the "wrong pick" side of a bet."""
     tournament = Tournament(
         name="Betting Cup",
         slug="betting-cup",
@@ -23,17 +26,19 @@ async def _make_tournament_with_team(db_session: AsyncSession) -> tuple[Tourname
     db_session.add(tournament)
     await db_session.flush()
     team = Team(tournament_id=tournament.id, external_id=1, name="Champions Team")
-    db_session.add(team)
+    other_team = Team(tournament_id=tournament.id, external_id=2, name="Runners Up")
+    db_session.add_all([team, other_team])
     await db_session.commit()
     await db_session.refresh(tournament)
     await db_session.refresh(team)
-    return tournament, team
+    await db_session.refresh(other_team)
+    return tournament, team, other_team
 
 
 async def test_create_bet_market_requires_admin(
     client: AsyncClient, db_session: AsyncSession
 ) -> None:
-    tournament, _team = await _make_tournament_with_team(db_session)
+    tournament, _team, _other_team = await _make_tournament_with_team(db_session)
     user = await make_user(db_session, email="notadmin@example.com", role=UserRole.USER)
 
     response = await client.post(
@@ -52,7 +57,7 @@ async def test_create_bet_market_requires_admin(
 async def test_full_champion_market_lifecycle_settles_and_updates_leaderboard(
     client: AsyncClient, db_session: AsyncSession
 ) -> None:
-    tournament, team = await _make_tournament_with_team(db_session)
+    tournament, team, other_team = await _make_tournament_with_team(db_session)
     admin = await make_user(db_session, email="admin@example.com", role=UserRole.ADMIN)
     alice = await make_user(db_session, email="alice@example.com", display_name="Alice")
     bob = await make_user(db_session, email="bob@example.com", display_name="Bob")
@@ -75,7 +80,7 @@ async def test_full_champion_market_lifecycle_settles_and_updates_leaderboard(
     # Alice predicts correctly, Bob predicts incorrectly.
     alice_prediction = await client.post(
         f"/api/v1/bet-markets/{market_id}/predictions",
-        json={"payload": {"team_id": team.id}},
+        json={"payload": {"team_id": team.id}, "stake_amount": 100.0},
         headers=auth_headers(alice),
     )
     assert alice_prediction.status_code == 201
@@ -84,7 +89,7 @@ async def test_full_champion_market_lifecycle_settles_and_updates_leaderboard(
 
     bob_prediction = await client.post(
         f"/api/v1/bet-markets/{market_id}/predictions",
-        json={"payload": {"team_id": 999999}},
+        json={"payload": {"team_id": other_team.id}, "stake_amount": 50.0},
         headers=auth_headers(bob),
     )
     assert bob_prediction.status_code == 201
@@ -99,7 +104,7 @@ async def test_full_champion_market_lifecycle_settles_and_updates_leaderboard(
     # Re-submitting updates the same row rather than creating a second one (unique constraint).
     alice_resubmit = await client.post(
         f"/api/v1/bet-markets/{market_id}/predictions",
-        json={"payload": {"team_id": team.id}},
+        json={"payload": {"team_id": team.id}, "stake_amount": 100.0},
         headers=auth_headers(alice),
     )
     assert alice_resubmit.status_code == 201
@@ -116,11 +121,15 @@ async def test_full_champion_market_lifecycle_settles_and_updates_leaderboard(
     assert settle_response.status_code == 200
     assert settle_response.json() == {"settled": True}
 
+    # A 2-team field with no debates played yet prices both teams at 50/50 (power=0 for both),
+    # i.e. decimal odds of 2.0 each -- see app.domain.odds. Alice staked 100 on the winner, so
+    # she's paid stake * odds = 200; Bob staked 50 on the loser and gets nothing back.
     alice_after = await client.get(
         f"/api/v1/bet-markets/{market_id}/predictions/me", headers=auth_headers(alice)
     )
     assert alice_after.json()["status"] == "settled"
-    assert alice_after.json()["points_awarded"] == 100.0
+    assert alice_after.json()["odds"] == 2.0
+    assert alice_after.json()["points_awarded"] == 200.0
 
     bob_after = await client.get(
         f"/api/v1/bet-markets/{market_id}/predictions/me", headers=auth_headers(bob)
@@ -133,14 +142,14 @@ async def test_full_champion_market_lifecycle_settles_and_updates_leaderboard(
     assert len(leaderboard) == 2
     top = leaderboard[0]
     assert top["user"]["display_name"] == "Alice"
-    assert top["total_points"] == 100.0
+    assert top["total_points"] == 100.0  # net profit: 200 payout - 100 stake
     assert top["rank"] == 1
 
 
 async def test_prediction_requires_authentication(
     client: AsyncClient, db_session: AsyncSession
 ) -> None:
-    tournament, team = await _make_tournament_with_team(db_session)
+    tournament, team, other_team = await _make_tournament_with_team(db_session)
     admin = await make_user(db_session, email="admin2@example.com", role=UserRole.ADMIN)
     create_response = await client.post(
         f"/api/v1/tournaments/{tournament.id}/bet-markets",
@@ -156,7 +165,7 @@ async def test_prediction_requires_authentication(
 
     response = await client.post(
         f"/api/v1/bet-markets/{market_id}/predictions",
-        json={"payload": {"team_id": team.id}},
+        json={"payload": {"team_id": team.id}, "stake_amount": 100.0},
     )
     assert response.status_code == 401
 
@@ -164,7 +173,7 @@ async def test_prediction_requires_authentication(
 async def test_prediction_rejected_when_market_closed(
     client: AsyncClient, db_session: AsyncSession
 ) -> None:
-    tournament, team = await _make_tournament_with_team(db_session)
+    tournament, team, other_team = await _make_tournament_with_team(db_session)
     admin = await make_user(db_session, email="admin3@example.com", role=UserRole.ADMIN)
     user = await make_user(db_session, email="user4@example.com")
 
@@ -190,7 +199,7 @@ async def test_prediction_rejected_when_market_closed(
 
     response = await client.post(
         f"/api/v1/bet-markets/{market_id}/predictions",
-        json={"payload": {"team_id": team.id}},
+        json={"payload": {"team_id": team.id}, "stake_amount": 100.0},
         headers=auth_headers(user),
     )
     assert response.status_code == 400
@@ -199,7 +208,7 @@ async def test_prediction_rejected_when_market_closed(
 async def test_prediction_rejected_when_past_closes_at(
     client: AsyncClient, db_session: AsyncSession
 ) -> None:
-    tournament, team = await _make_tournament_with_team(db_session)
+    tournament, team, other_team = await _make_tournament_with_team(db_session)
     admin = await make_user(db_session, email="admin4@example.com", role=UserRole.ADMIN)
     user = await make_user(db_session, email="user5@example.com")
 
@@ -217,7 +226,7 @@ async def test_prediction_rejected_when_past_closes_at(
 
     response = await client.post(
         f"/api/v1/bet-markets/{market_id}/predictions",
-        json={"payload": {"team_id": team.id}},
+        json={"payload": {"team_id": team.id}, "stake_amount": 100.0},
         headers=auth_headers(user),
     )
     assert response.status_code == 400
@@ -226,7 +235,7 @@ async def test_prediction_rejected_when_past_closes_at(
 async def test_patch_bet_market_cannot_set_settled_directly(
     client: AsyncClient, db_session: AsyncSession
 ) -> None:
-    tournament, _team = await _make_tournament_with_team(db_session)
+    tournament, _team, _other_team = await _make_tournament_with_team(db_session)
     admin = await make_user(db_session, email="admin5@example.com", role=UserRole.ADMIN)
 
     create_response = await client.post(
@@ -250,7 +259,7 @@ async def test_patch_bet_market_cannot_set_settled_directly(
 
 
 async def test_settle_requires_admin(client: AsyncClient, db_session: AsyncSession) -> None:
-    tournament, _team = await _make_tournament_with_team(db_session)
+    tournament, _team, _other_team = await _make_tournament_with_team(db_session)
     admin = await make_user(db_session, email="admin6@example.com", role=UserRole.ADMIN)
     user = await make_user(db_session, email="user6@example.com")
 
