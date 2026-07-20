@@ -1,6 +1,6 @@
 import datetime
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, model_validator
 
 from app.models.enums import ScrapeStatus, ScrapeStrategy, UserRole
 
@@ -22,3 +22,36 @@ class ScrapeLogOut(BaseModel):
 class AdminUserUpdate(BaseModel):
     role: UserRole | None = None
     is_active: bool | None = None
+
+
+class PendingEliminationTeamOut(BaseModel):
+    team_id: int
+    team_name: str
+
+
+class PendingEliminationDebateOut(BaseModel):
+    """One elimination-round debate whose outcome Tabbycat hasn't published, surfaced so an
+    admin can fill it in by hand (see app.services.manual_results_service)."""
+
+    debate_id: int
+    tournament_id: int
+    round_id: int
+    round_name: str
+    is_final: bool
+    teams: list[PendingEliminationTeamOut]
+
+
+class ManualEliminationResultIn(BaseModel):
+    """Exactly one of the two fields must be set, matching whether the target debate is the
+    Grand Final (champion_team_id) or an earlier elimination round (advancing_team_ids)."""
+
+    champion_team_id: int | None = None
+    advancing_team_ids: list[int] | None = None
+
+    @model_validator(mode="after")
+    def _exactly_one_field(self) -> "ManualEliminationResultIn":
+        if (self.champion_team_id is None) == (self.advancing_team_ids is None):
+            raise ValueError(
+                "provide exactly one of champion_team_id or advancing_team_ids"
+            )
+        return self

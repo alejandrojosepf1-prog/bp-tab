@@ -36,4 +36,6 @@ export const queryKeys = {
   me: ["auth", "me"] as const,
   adminUsers: ["admin", "users"] as const,
   adminScrapeLogs: (tournamentId?: Id) => ["admin", "scrape-logs", tournamentId ?? "all"] as const,
+  adminPendingEliminationResults: (tournamentId?: Id) =>
+    ["admin", "pending-elimination-results", tournamentId ?? "all"] as const,
 };

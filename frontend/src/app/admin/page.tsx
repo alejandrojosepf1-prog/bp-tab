@@ -17,10 +17,21 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Table, TableBody, TableCell, TableHeader, TableRow, TableHead } from "@/components/ui/table";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog";
+import { Badge } from "@/components/ui/badge";
 import { StatusBadge } from "@/components/status-badge";
 import { PageTransition } from "@/components/motion";
 import { LoadingState, EmptyState } from "@/components/query-state";
-import type { BetType, ScrapeStatus, Tournament } from "@/lib/api/types";
+import { AlertTriangle } from "lucide-react";
+import type { BetType, PendingEliminationDebate, ScrapeStatus, Tournament } from "@/lib/api/types";
 
 export default function AdminPage() {
   return (
@@ -35,6 +46,13 @@ export default function AdminPage() {
 }
 
 function AdminContent() {
+  const { data: pending } = useQuery({
+    queryKey: queryKeys.adminPendingEliminationResults(),
+    queryFn: () => api.admin.pendingEliminationResults(),
+    refetchInterval: 60_000,
+  });
+  const pendingCount = pending?.length ?? 0;
+
   return (
     <div className="flex flex-col gap-4">
       <h2 className="flex items-center gap-2 text-xl font-semibold tracking-tight">
@@ -46,6 +64,14 @@ function AdminContent() {
           <TabsTrigger value="tournaments">Torneos</TabsTrigger>
           <TabsTrigger value="logs">Scrape logs</TabsTrigger>
           <TabsTrigger value="bets">Apuestas</TabsTrigger>
+          <TabsTrigger value="results" className="gap-1.5">
+            Resultados manuales
+            {pendingCount > 0 && (
+              <Badge variant="destructive" className="h-4.5 px-1.5">
+                {pendingCount}
+              </Badge>
+            )}
+          </TabsTrigger>
           <TabsTrigger value="users">Usuarios</TabsTrigger>
         </TabsList>
 
@@ -57,6 +83,9 @@ function AdminContent() {
         </TabsContent>
         <TabsContent value="bets" className="mt-4">
           <BetMarketsTab />
+        </TabsContent>
+        <TabsContent value="results" className="mt-4">
+          <ManualResultsTab pending={pending ?? []} />
         </TabsContent>
         <TabsContent value="users" className="mt-4">
           <UsersTab />
@@ -315,6 +344,116 @@ function ScrapeLogsTab() {
         )}
       </CardContent>
     </Card>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Resultados manuales: eliminatorias/final sin ballot publicado en Tabbycat
+// ---------------------------------------------------------------------------
+
+function ManualResultsTab({ pending }: { pending: PendingEliminationDebate[] }) {
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2 text-base">
+          <AlertTriangle className="size-4 text-destructive" /> Resultados pendientes de confirmar
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-2">
+        <p className="text-xs text-muted-foreground">
+          Rondas eliminatorias (incluida la Gran Final) cuyo cruce ya se conoce pero cuyo
+          resultado todavía no aparece en Tabbycat. Muchos torneos nunca suben ese ballot porque
+          no afecta el tab — acá lo confirmás vos como admin. Si Tabbycat después sí publica el
+          resultado oficial, el próximo scraping lo sobreescribe automáticamente.
+        </p>
+        {pending.length === 0 && <EmptyState title="No hay resultados pendientes" />}
+        {pending.map((debate) => (
+          <PendingResultRow key={debate.debate_id} debate={debate} />
+        ))}
+      </CardContent>
+    </Card>
+  );
+}
+
+function PendingResultRow({ debate }: { debate: PendingEliminationDebate }) {
+  const queryClient = useQueryClient();
+  const [open, setOpen] = useState(false);
+  const [selected, setSelected] = useState<number[]>([]);
+
+  const submitMutation = useMutation({
+    mutationFn: () =>
+      debate.is_final
+        ? api.admin.submitManualResult(debate.debate_id, { champion_team_id: selected[0] })
+        : api.admin.submitManualResult(debate.debate_id, { advancing_team_ids: selected }),
+    onSuccess: () => {
+      toast.success("Resultado confirmado");
+      setOpen(false);
+      setSelected([]);
+      queryClient.invalidateQueries({ queryKey: queryKeys.adminPendingEliminationResults() });
+      queryClient.invalidateQueries({ queryKey: queryKeys.tournament(debate.tournament_id) });
+    },
+    onError: (err) => toast.error(err instanceof ApiError ? err.detail : "Error al confirmar el resultado"),
+  });
+
+  const toggleTeam = (teamId: number) => {
+    if (debate.is_final) {
+      setSelected([teamId]);
+      return;
+    }
+    setSelected((prev) =>
+      prev.includes(teamId) ? prev.filter((id) => id !== teamId) : [...prev, teamId]
+    );
+  };
+
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border p-3">
+      <div className="flex flex-col gap-0.5">
+        <span className="text-sm font-medium">
+          {debate.round_name} {debate.is_final && "🏆"}
+        </span>
+        <span className="text-xs text-muted-foreground">
+          {debate.teams.map((t) => t.team_name).join(" vs. ")}
+        </span>
+      </div>
+      <Dialog open={open} onOpenChange={setOpen}>
+        <DialogTrigger render={<Button size="sm" variant="outline" />}>
+          {debate.is_final ? "Confirmar campeón" : "Confirmar avance"}
+        </DialogTrigger>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{debate.round_name}</DialogTitle>
+            <DialogDescription>
+              {debate.is_final
+                ? "Seleccioná el equipo campeón del torneo."
+                : "Seleccioná los equipos que avanzaron a la siguiente ronda."}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex flex-col gap-2">
+            {debate.teams.map((t) => (
+              <label
+                key={t.team_id}
+                className="flex items-center gap-2 rounded-md border border-border p-2 text-sm"
+              >
+                <Checkbox
+                  checked={selected.includes(t.team_id)}
+                  onCheckedChange={() => toggleTeam(t.team_id)}
+                />
+                {t.team_name}
+              </label>
+            ))}
+          </div>
+          <DialogFooter>
+            <Button
+              disabled={selected.length === 0 || submitMutation.isPending}
+              onClick={() => submitMutation.mutate()}
+            >
+              {submitMutation.isPending && <Loader2 className="size-3.5 animate-spin" />}
+              Confirmar
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </div>
   );
 }
 

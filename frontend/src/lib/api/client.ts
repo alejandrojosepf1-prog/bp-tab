@@ -11,6 +11,7 @@ import type {
   Institution,
   LeaderboardEntry,
   LoginResponse,
+  PendingEliminationDebate,
   Prediction,
   Round,
   ScrapeLog,
@@ -236,6 +237,14 @@ export const api = {
       id: number | string,
       data: Partial<{ role: "admin" | "user"; is_active: boolean }>
     ) => patch<User>(`/admin/users/${id}`, data),
+    pendingEliminationResults: (tournamentId?: number | string) =>
+      get<PendingEliminationDebate[]>(
+        `/admin/pending-elimination-results${qs({ tournament_id: tournamentId })}`
+      ),
+    submitManualResult: (
+      debateId: number | string,
+      data: { champion_team_id: number } | { advancing_team_ids: number[] }
+    ) => post<{ status: string }>(`/admin/debates/${debateId}/manual-result`, data),
   },
 };
 

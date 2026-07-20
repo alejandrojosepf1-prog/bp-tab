@@ -308,6 +308,22 @@ export interface ScrapeLog {
   error_message: string | null;
 }
 
+// Elimination-round debate whose outcome Tabbycat hasn't published yet (e.g. a Grand Final
+// never confirmed because it doesn't affect the tab) -- needs a manual result from an admin.
+export interface PendingEliminationTeam {
+  team_id: number;
+  team_name: string;
+}
+
+export interface PendingEliminationDebate {
+  debate_id: number;
+  tournament_id: number;
+  round_id: number;
+  round_name: string;
+  is_final: boolean;
+  teams: PendingEliminationTeam[];
+}
+
 // ---------- Errors ----------
 
 export interface ApiErrorBody {
