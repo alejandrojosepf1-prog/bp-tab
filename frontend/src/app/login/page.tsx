@@ -4,7 +4,7 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { motion, AnimatePresence } from "framer-motion";
 import { toast } from "sonner";
-import { Loader2 } from "lucide-react";
+import { Gem, Loader2 } from "lucide-react";
 import { useAuth } from "@/lib/auth/auth-context";
 import { ApiError } from "@/lib/api/client";
 import { Button } from "@/components/ui/button";
@@ -53,7 +53,14 @@ export default function LoginPage() {
       >
         <Card className="shadow-lg">
           <CardHeader className="text-center">
-            <div className="mx-auto mb-2 text-2xl font-bold tracking-tight">BP$</div>
+            <div className="mx-auto mb-2 flex items-center justify-center gap-2">
+              <span className="flex size-9 items-center justify-center rounded-lg bg-primary text-primary-foreground">
+                <Gem className="size-5" strokeWidth={2.4} />
+              </span>
+              <span className="font-heading text-xl font-bold uppercase tracking-[0.18em]">
+                Claim
+              </span>
+            </div>
             <CardTitle>{mode === "login" ? "Iniciar sesión" : "Crear cuenta"}</CardTitle>
             <CardDescription>
               {mode === "login"

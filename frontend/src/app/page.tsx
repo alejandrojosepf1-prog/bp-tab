@@ -11,5 +11,5 @@ export default function RootPage() {
     router.replace("/dashboard");
   }, [router]);
 
-  return <LoadingState label="Cargando BP$…" />;
+  return <LoadingState label="Cargando Claim…" />;
 }

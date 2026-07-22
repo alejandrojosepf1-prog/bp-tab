@@ -1,22 +1,28 @@
 import type { Metadata } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
+import { Inter, Space_Grotesk, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import { Providers } from "@/components/providers";
-import { Navbar } from "@/components/layout/navbar";
+import { Sidebar } from "@/components/layout/sidebar";
 
-const geistSans = Geist({
-  variable: "--font-geist-sans",
+const inter = Inter({
+  variable: "--font-sans",
+  subsets: ["latin"],
+});
+
+const spaceGrotesk = Space_Grotesk({
+  variable: "--font-display",
   subsets: ["latin"],
 });
 
 const geistMono = Geist_Mono({
-  variable: "--font-geist-mono",
+  variable: "--font-mono",
   subsets: ["latin"],
 });
 
 export const metadata: Metadata = {
-  title: "BP$ — Predicciones BP",
-  description: "Plataforma de predicciones y apuestas para torneos de BP entre amigos",
+  title: "Claim — apuestas de torneo",
+  description:
+    "Claim: mercados de predicción en vivo sobre torneos de debate BP. Dólares ficticios, cero dinero real.",
 };
 
 export default function RootLayout({
@@ -27,12 +33,16 @@ export default function RootLayout({
   return (
     <html
       lang="es"
-      className={`dark ${geistSans.variable} ${geistMono.variable} h-full antialiased`}
+      className={`dark ${inter.variable} ${spaceGrotesk.variable} ${geistMono.variable} h-full antialiased`}
     >
-      <body className="min-h-full flex flex-col bg-background text-foreground">
+      <body className="min-h-full bg-background text-foreground">
         <Providers>
-          <Navbar />
-          <main className="flex-1 flex flex-col">{children}</main>
+          <div className="flex min-h-screen">
+            <Sidebar />
+            <main className="claim-glow flex min-w-0 flex-1 flex-col pt-14 lg:pt-0 lg:pl-60">
+              {children}
+            </main>
+          </div>
         </Providers>
       </body>
     </html>

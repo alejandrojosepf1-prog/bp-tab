@@ -46,6 +46,7 @@ from app.models import (
 from app.models.enums import (
     BreakStatus,
     ChangeType,
+    DebateStatus,
     RoundStage,
     RoundStatus,
     ScrapeStatus,
@@ -53,6 +54,7 @@ from app.models.enums import (
 )
 from app.repositories.upsert import UpsertResult, upsert_by_natural_key
 from app.scraper.dtos import TournamentSnapshot
+from app.scraper.parsers import _ELIMINATION_KEYWORDS, _synthetic_debate_id
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +104,8 @@ class IngestionService:
         new_debate_ids = await self._ingest_debates(
             tournament, snapshot, team_id_by_ext, adjudicator_id_by_ext, round_id_by_seq
         )
+        logger.info("ingest: draw (%s)", snapshot.draw.round_name if snapshot.draw else "none")
+        await self._ingest_draw(tournament, snapshot, team_id_by_ext, round_id_by_seq)
         logger.info("ingest: ballots (%d)", len(snapshot.ballots))
         await self._ingest_ballots(tournament, snapshot, team_id_by_ext, speaker_id_by_key)
         logger.info("ingest: breaks")
@@ -273,9 +277,21 @@ class IngestionService:
     ) -> dict[int, int]:
         ids: dict[int, int] = {}
         for round_ref in snapshot.rounds:
-            # `.get(...)` truthiness, not `in`: a round whose results page fetched fine but
-            # yielded zero parseable debates must not be marked COMPLETED.
-            has_debates = bool(snapshot.debates_by_round.get(round_ref.seq))
+            debates = snapshot.debates_by_round.get(round_ref.seq) or ()
+            # A round is only COMPLETED once at least one of its debates actually carries a
+            # judged outcome (a 1st-4th rank or an advancing/eliminated flag). A results page
+            # that lists pairings with no outcomes yet is a round in progress -> RELEASED.
+            has_results = any(
+                entry.rank_in_debate is not None or entry.advanced is not None
+                for debate in debates
+                for entry in debate.teams
+            )
+            if has_results:
+                status = RoundStatus.COMPLETED
+            elif debates:
+                status = RoundStatus.RELEASED
+            else:
+                status = RoundStatus.DRAFT
             result = await upsert_by_natural_key(
                 self.session,
                 Round,
@@ -285,12 +301,116 @@ class IngestionService:
                     "stage": RoundStage.ELIMINATION
                     if round_ref.is_elimination
                     else RoundStage.PRELIMINARY,
-                    "status": RoundStatus.COMPLETED if has_debates else RoundStatus.DRAFT,
+                    "status": status,
                 },
             )
             await self._track(tournament.id, "Round", result)
             ids[round_ref.seq] = result.instance.id
         return ids
+
+    async def _ingest_draw(
+        self,
+        tournament: Tournament,
+        snapshot: TournamentSnapshot,
+        team_id_by_ext: dict[int, int],
+        round_id_by_seq: dict[int, int],
+    ) -> None:
+        """Ingests the public draw page as the tournament's ACTIVE round (status RELEASED).
+
+        The results navigation only lists rounds that already have a results page, so the round
+        currently being debated is otherwise invisible -- this is what used to make the
+        dashboard show the last COMPLETED round as "current" even though the tab had already
+        published the next round's draw.
+
+        Debates created here use the same synthetic external id scheme as elimination rounds
+        without public ballots (stable across scrape cycles). Once the round's real results
+        page appears, `_ingest_rounds`/`_ingest_debates` take over: the round flips to
+        COMPLETED and this method skips it from then on, so a stale draw page can never
+        downgrade a judged round.
+        """
+        draw = snapshot.draw
+        if draw is None:
+            return
+
+        known = {r.seq: r for r in snapshot.rounds}
+        draw_name = draw.round_name.strip().lower()
+        seq = next(
+            (s for s, ref in known.items() if ref.name.strip().lower() == draw_name),
+            None,
+        )
+        if seq is not None and snapshot.debates_by_round.get(seq):
+            return  # results already published for this round; they are the better source
+        if seq is None:
+            max_known_seq = max(known.keys(), default=0)
+            existing_max = (
+                await self.session.execute(
+                    select(Round.seq)
+                    .where(Round.tournament_id == tournament.id)
+                    .order_by(Round.seq.desc())
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+            seq = max(max_known_seq, existing_max or 0) + 1
+            # If a round with this NAME already exists (created by a previous draw scrape),
+            # reuse its seq instead of stacking a new row per cycle.
+            existing_by_name = (
+                await self.session.execute(
+                    select(Round.seq).where(
+                        Round.tournament_id == tournament.id, Round.name == draw.round_name
+                    )
+                )
+            ).scalar_one_or_none()
+            if existing_by_name is not None:
+                seq = existing_by_name
+
+        is_elimination = any(kw in draw.round_name.lower() for kw in _ELIMINATION_KEYWORDS)
+        round_result = await upsert_by_natural_key(
+            self.session,
+            Round,
+            lookup={"tournament_id": tournament.id, "seq": seq},
+            values={
+                "name": draw.round_name,
+                "stage": RoundStage.ELIMINATION if is_elimination else RoundStage.PRELIMINARY,
+                "status": RoundStatus.RELEASED,
+            },
+        )
+        await self._track(tournament.id, "Round", round_result)
+        round_id = round_result.instance.id
+        round_id_by_seq[seq] = round_id
+
+        for debate in draw.debates:
+            team_names = [t.team_name for t in debate.teams]
+            external_id = _synthetic_debate_id(seq, team_names)
+
+            room_id = None
+            if debate.room_name:
+                room_result = await upsert_by_natural_key(
+                    self.session,
+                    Room,
+                    lookup={"tournament_id": tournament.id, "name": debate.room_name},
+                    values={},
+                )
+                room_id = room_result.instance.id
+
+            debate_result = await upsert_by_natural_key(
+                self.session,
+                Debate,
+                lookup={"tournament_id": tournament.id, "external_id": external_id},
+                values={"round_id": round_id, "room_id": room_id},
+            )
+            await self._track(tournament.id, "Debate", debate_result, round_id=round_id)
+
+            for entry in debate.teams:
+                team_id = team_id_by_ext.get(entry.team_external_id)
+                if team_id is None:
+                    continue
+                dt_result = await upsert_by_natural_key(
+                    self.session,
+                    DebateTeam,
+                    lookup={"debate_id": debate_result.instance.id, "team_id": team_id},
+                    values={"position": entry.position},
+                )
+                await self._track(tournament.id, "DebateTeam", dt_result, round_id=round_id)
 
     async def _ingest_debates(
         self,
@@ -311,6 +431,13 @@ class IngestionService:
                 processed += 1
                 if processed % 25 == 0 or processed == total_debates:
                     logger.info("ingest: debates %d/%d", processed, total_debates)
+                # A debate whose row carries any judged outcome is CONFIRMED -- before this,
+                # every debate stayed DRAFT forever (nothing else ever set the status), so the
+                # UI showed "Borrador" even for fully judged, published results.
+                has_outcome = any(
+                    entry.rank_in_debate is not None or entry.advanced is not None
+                    for entry in debate.teams
+                )
                 result = await upsert_by_natural_key(
                     self.session,
                     Debate,
@@ -318,7 +445,10 @@ class IngestionService:
                         "tournament_id": tournament.id,
                         "external_id": debate.debate_external_id,
                     },
-                    values={"round_id": round_id},
+                    values={
+                        "round_id": round_id,
+                        "status": DebateStatus.CONFIRMED if has_outcome else DebateStatus.DRAFT,
+                    },
                 )
                 await self._track(tournament.id, "Debate", result, round_id=round_id)
                 if result.created:

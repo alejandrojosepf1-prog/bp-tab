@@ -131,6 +131,30 @@ class ScrapedBallot:
 
 
 @dataclass(frozen=True)
+class ScrapedDrawTeamEntry:
+    team_external_id: int
+    team_name: str
+    position: BPPosition
+
+
+@dataclass(frozen=True)
+class ScrapedDrawDebate:
+    room_name: str | None
+    teams: tuple[ScrapedDrawTeamEntry, ...]
+
+
+@dataclass(frozen=True)
+class ScrapedDraw:
+    """The public draw page for the round currently in progress. This is the only public
+    signal of which round is ACTIVE: the results navigation only ever lists rounds whose
+    results page already exists, so a round that has been drawn but not yet judged (the one
+    everyone is actually debating right now) is invisible to the rest of the scrape."""
+
+    round_name: str
+    debates: tuple[ScrapedDrawDebate, ...]
+
+
+@dataclass(frozen=True)
 class ScrapedBreakCategoryRef:
     slug: str
     name: str
@@ -162,6 +186,7 @@ class TournamentSnapshot:
     speakers: tuple[ScrapedSpeaker, ...] = ()
     rounds: tuple[ScrapedRoundRef, ...] = ()
     debates_by_round: dict[int, tuple[ScrapedDebate, ...]] = field(default_factory=dict)
+    draw: "ScrapedDraw | None" = None
     ballots: tuple[ScrapedBallot, ...] = ()
     break_categories: tuple[ScrapedBreakCategoryRef, ...] = ()
     team_breaks: dict[str, tuple[ScrapedTeamBreakEntry, ...]] = field(default_factory=dict)

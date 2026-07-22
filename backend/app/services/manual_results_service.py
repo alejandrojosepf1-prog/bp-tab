@@ -75,7 +75,9 @@ async def get_pending_elimination_debates(
             else any(dt.advanced is None for dt in debate.teams)
         )
         if missing:
-            pending.append(PendingEliminationDebate(debate=debate, round=debate.round, is_final=is_final))
+            pending.append(
+                PendingEliminationDebate(debate=debate, round=debate.round, is_final=is_final)
+            )
     return pending
 
 
@@ -91,7 +93,9 @@ async def _load_debate_with_teams(session: AsyncSession, debate_id: int) -> Deba
     return (await session.execute(stmt)).scalar_one_or_none()
 
 
-async def apply_manual_champion(session: AsyncSession, debate_id: int, champion_team_id: int) -> Debate:
+async def apply_manual_champion(
+    session: AsyncSession, debate_id: int, champion_team_id: int
+) -> Debate:
     """Marks `champion_team_id` as the winner of the Grand Final debate `debate_id`, and sets it
     as the tournament's champion so BetType.CHAMPION markets can settle against it."""
     debate = await _load_debate_with_teams(session, debate_id)

@@ -2,6 +2,7 @@ import datetime
 
 from pydantic import BaseModel, ConfigDict
 
+from app.api.schemas.rounds import RoundOut
 from app.models.enums import TournamentStatus
 
 
@@ -19,6 +20,12 @@ class TournamentOut(BaseModel):
     timezone: str
     is_active: bool
     created_at: datetime.datetime
+    # Card-level summary for the dashboard (filled by the list/get endpoints, not columns):
+    # lets the tournament cards show "ronda actual", team count and open-market count without
+    # extra round-trips per tournament.
+    current_round: RoundOut | None = None
+    teams_count: int = 0
+    open_markets_count: int = 0
 
 
 class TournamentCreate(BaseModel):

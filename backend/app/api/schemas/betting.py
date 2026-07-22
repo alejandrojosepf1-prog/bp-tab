@@ -18,10 +18,27 @@ class BetMarketOut(BaseModel):
     status: BetMarketStatus
     target_round_id: int | None
     target_break_category_id: int | None
-    # Sum of every stake placed on this market so far, in fictional USD. Informational only --
-    # unlike a real pari-mutuel pool, it does NOT feed back into anyone's odds (see
-    # app.domain.odds's module docstring); this is purely "how much action is on this market."
+    # Sum of every stake placed on this market so far, in fictional USD, and how many distinct
+    # users have staked. Under pari-mutuel-with-seed pricing (see app.domain.odds) the open
+    # pool DOES feed back into quoted odds. Both are computed by the router, not columns.
     pool_total: float = 0.0
+    bettors_count: int = 0
+
+
+class MarketBoardOptionOut(BaseModel):
+    key: str
+    label: str
+    emoji: str | None
+    stake: float
+    backers: int
+    odds: float
+
+
+class MarketBoardOut(BaseModel):
+    market: BetMarketOut
+    pool_total: float
+    bettors: int
+    options: list[MarketBoardOptionOut]
 
 
 class BetMarketCreate(BaseModel):

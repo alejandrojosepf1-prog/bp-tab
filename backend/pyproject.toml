@@ -30,9 +30,12 @@ dependencies = [
 dev = [
     "pytest>=8.3,<9.0",
     "pytest-asyncio>=0.24,<0.25",
-    "pytest-httpx>=0.31,<0.32",
+    # >=0.32: the test suite passes `is_reusable=` to add_response, which 0.31 rejects.
+    "pytest-httpx>=0.32,<0.36",
     "aiosqlite>=0.20,<0.21",
-    "ruff>=0.7,<0.8",
+    # >=0.8: the UP047 selector ignored under [tool.ruff.lint] doesn't exist in 0.7, which
+    # made `ruff check` fail to parse this very file under the old pin.
+    "ruff>=0.8,<0.9",
     "mypy>=1.12,<1.13",
 ]
 

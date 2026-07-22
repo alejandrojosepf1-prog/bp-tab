@@ -74,6 +74,10 @@ class TournamentScraper:
 
         debates_by_round, all_debates = await self._fetch_round_results(rounds)
 
+        # The round currently in progress only exists on the public draw page -- the results
+        # nav above never lists it until its results page appears (see ScrapedDraw docstring).
+        draw = await self._safe_fetch_parse("draw/", parsers.parse_draw, default=None)
+
         ballots = await self._fetch_new_ballots(all_debates, known_debate_external_ids)
 
         adjudicators = await self._apply_adjudicator_break(adjudicators, break_categories)
@@ -86,6 +90,7 @@ class TournamentScraper:
             speakers=tuple(speakers),
             rounds=tuple(rounds),
             debates_by_round=debates_by_round,
+            draw=draw,
             ballots=tuple(ballots),
             break_categories=tuple(break_categories),
             team_breaks=team_breaks,

@@ -43,6 +43,10 @@ export interface Tournament {
   timezone: string;
   is_active: boolean;
   created_at: string;
+  // Resumen para las tarjetas del dashboard (calculado por el backend, no columnas).
+  current_round: Round | null;
+  teams_count: number;
+  open_markets_count: number;
 }
 
 // ---------- Participants ----------
@@ -200,9 +204,26 @@ export interface BetMarket {
   status: BetMarketStatus;
   target_round_id: number | null;
   target_break_category_id: number | null;
-  // Sum of every stake placed on this market so far ($). Informational only -- fixed odds,
-  // not a pari-mutuel pool, so this does not affect anyone's payout.
+  // Suma de todo lo apostado en este mercado ($ ficticios) y cuántos usuarios apostaron.
+  // Con pricing pari-mutuel sembrado, el pool SÍ mueve las cuotas en vivo.
   pool_total: number;
+  bettors_count: number;
+}
+
+export interface MarketBoardOption {
+  key: string;
+  label: string;
+  emoji: string | null;
+  stake: number;
+  backers: number;
+  odds: number;
+}
+
+export interface MarketBoard {
+  market: BetMarket;
+  pool_total: number;
+  bettors: number;
+  options: MarketBoardOption[];
 }
 
 export interface OddsQuote {
@@ -263,6 +284,23 @@ export interface Prediction {
   created_at: string;
 }
 
+/** Historial de apuestas del usuario (GET /auth/me/predictions). */
+export interface MyPrediction {
+  id: number;
+  bet_market_id: number;
+  market_label: string;
+  bet_type: string;
+  market_status: string;
+  tournament_id: number;
+  tournament_name: string;
+  status: string;
+  stake_amount: number;
+  odds: number;
+  potential_payout: number;
+  points_awarded: number | null;
+  created_at: string;
+}
+
 // ---------- Leaderboard ----------
 
 export interface LeaderboardEntry {
@@ -285,7 +323,9 @@ export interface ChangeEvent {
 }
 
 export interface DashboardData {
+  current_round: Round | null;
   latest_round: Round | null;
+  rounds: Round[];
   recent_changes: ChangeEvent[];
   leaderboard_top: LeaderboardEntry[];
   my_predictions: Prediction[];

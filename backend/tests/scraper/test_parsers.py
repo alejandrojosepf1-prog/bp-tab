@@ -1,5 +1,8 @@
+import pytest
+
 from app.models.enums import BPPosition, JudgeRole, SpeakerRole
 from app.scraper import parsers
+from app.scraper.exceptions import ParseError
 
 
 def test_parse_institutions(fixture_html) -> None:
@@ -136,3 +139,30 @@ def test_parse_break_category_nav(fixture_html) -> None:
     assert len(categories) == 1
     assert categories[0].is_adjudicator_break is True
     assert categories[0].slug == "adjudicators"
+
+
+def test_parse_draw_extracts_active_round_with_rooms_and_positions(fixture_html) -> None:
+    """Live fixture from PreCMUDE Quito 2026 mid-Ronda 5: the draw page is the ONLY public
+    signal of the round currently in progress (the results nav omits it until judged)."""
+    draw = parsers.parse_draw(fixture_html("draw_ronda5.html"))
+    assert draw.round_name == "Ronda 5"
+    assert len(draw.debates) == 5
+
+    first = draw.debates[0]
+    assert first.room_name == "203"
+    assert [t.position for t in first.teams] == [
+        BPPosition.OPENING_GOVERNMENT,
+        BPPosition.OPENING_OPPOSITION,
+        BPPosition.CLOSING_GOVERNMENT,
+        BPPosition.CLOSING_OPPOSITION,
+    ]
+    by_position = {t.position: t for t in first.teams}
+    assert by_position[BPPosition.OPENING_GOVERNMENT].team_name == "LEONATHAN RETURNS"
+    assert by_position[BPPosition.OPENING_GOVERNMENT].team_external_id == 391537
+    # No results on a draw page, ever -- every entry is just a pairing.
+    assert all(t.team_external_id > 0 for d in draw.debates for t in d.teams)
+
+
+def test_parse_draw_rejects_page_without_draw(fixture_html) -> None:
+    with pytest.raises(ParseError):
+        parsers.parse_draw(fixture_html("institutions_list.html"))

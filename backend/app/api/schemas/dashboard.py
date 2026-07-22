@@ -22,7 +22,12 @@ class ChangeEventOut(BaseModel):
 
 
 class DashboardOut(BaseModel):
+    # The round actually in progress (status RELEASED -- a published draw without results),
+    # falling back to the latest completed one. `latest_round` is kept as an alias of the same
+    # value for any consumer still reading the old field name.
+    current_round: RoundOut | None
     latest_round: RoundOut | None
+    rounds: list[RoundOut]
     recent_changes: list[ChangeEventOut]
     leaderboard_top: list[LeaderboardEntryOut]
     my_predictions: list[PredictionOut] | None

@@ -9,6 +9,8 @@ from app.api.schemas.betting import (
     BetMarketCreate,
     BetMarketOut,
     BetMarketPatch,
+    MarketBoardOptionOut,
+    MarketBoardOut,
     OddsQuoteOut,
     OddsQuoteRequest,
     PredictionCreate,
@@ -25,7 +27,7 @@ from app.services.betting_service import (
     set_bet_market_status,
     settle_market,
 )
-from app.services.odds_service import UnpriceableMarketError, quote_odds
+from app.services.odds_service import UnpriceableMarketError, market_board, quote_odds
 
 router = APIRouter(tags=["betting"])
 
@@ -55,10 +57,26 @@ async def _pool_total(session: AsyncSession, market_id: int) -> float:
     return float(total)
 
 
-async def _to_bet_market_out(session: AsyncSession, market: BetMarket) -> BetMarketOut:
+async def to_bet_market_out(session: AsyncSession, market: BetMarket) -> BetMarketOut:
+    """Shared by this router AND the dashboard: pool_total/bettors_count are computed, not
+    columns, so any endpoint returning a BetMarketOut must fill them the same way -- the
+    dashboard used to skip this and permanently showed pool $0 for markets that had real
+    stakes on the betting page."""
     out = BetMarketOut.model_validate(market)
     out.pool_total = await _pool_total(session, market.id)
+    out.bettors_count = int(
+        (
+            await session.execute(
+                select(func.count(func.distinct(Prediction.user_id))).where(
+                    Prediction.bet_market_id == market.id
+                )
+            )
+        ).scalar_one()
+    )
     return out
+
+
+_to_bet_market_out = to_bet_market_out
 
 
 def _to_prediction_out(prediction: Prediction) -> PredictionOut:
@@ -138,6 +156,33 @@ async def settle_bet_market(
     settled = await settle_market(session, market, manual_outcome=payload.manual_outcome)
     await session.commit()
     return SettleResponse(settled=settled)
+
+
+@router.get("/bet-markets/{market_id}/board", response_model=MarketBoardOut)
+async def get_bet_market_board(
+    market_id: int, session: AsyncSession = Depends(get_db)
+) -> MarketBoardOut:
+    """Live per-option view of a market: how much is staked on each candidate, by how many
+    users, and the CURRENT quoted odds (seeded pari-mutuel) -- what the 'Mercados abiertos'
+    section renders. Public: no auth, mirrors the market list itself."""
+    market = await _get_market_or_404(session, market_id)
+    board = await market_board(session, market)
+    return MarketBoardOut(
+        market=await _to_bet_market_out(session, market),
+        pool_total=board.pool_total,
+        bettors=board.bettors,
+        options=[
+            MarketBoardOptionOut(
+                key=o.key,
+                label=o.label,
+                emoji=o.emoji,
+                stake=o.stake,
+                backers=o.backers,
+                odds=o.odds,
+            )
+            for o in board.options
+        ],
+    )
 
 
 @router.post("/bet-markets/{market_id}/quote", response_model=OddsQuoteOut)

@@ -1,4 +1,4 @@
-# BP$ REST API Contract (v1)
+# Claim REST API Contract (v1)
 
 Base path: `/api/v1`. All responses JSON. Auth via `Authorization: Bearer <JWT>`.
 Roles: `admin`, `user`. Endpoints marked **(admin)** require `role=admin`; everything else
@@ -9,12 +9,21 @@ This is the single source of truth both the backend (FastAPI implementation) and
 
 ## Auth
 
-- `POST /auth/register` `{email, password, display_name}` -> `User` (role always starts as `user`)
+- `POST /auth/register` `{email, password, display_name}` -> `User` (the very first account ever
+  registered on a fresh database becomes `admin` automatically -- there is no other way to mint
+  the first admin without hand-editing the database; every registration after that gets `user`)
 - `POST /auth/login` `{email, password}` -> `{access_token, token_type: "bearer"}`
 - `GET /auth/me` -> `User`
+- `GET /auth/me/predictions` -> `MyPredictionOut[]` (this user's full bet history across every
+  tournament, newest first)
 
 `User` shape: `{id, email, display_name, role, is_active, balance, created_at}`
 (`balance`: fictional USD wallet, global across every tournament -- see Betting section below)
+
+`MyPredictionOut` shape: `{id, bet_market_id, market_label, bet_type, market_status,
+tournament_id, tournament_name, status, stake_amount, odds, potential_payout, points_awarded,
+created_at}` -- a `Prediction` joined with just enough market/tournament context to render a
+history list without extra round-trips.
 
 ## Tournaments
 
@@ -29,8 +38,20 @@ This is the single source of truth both the backend (FastAPI implementation) and
 - `PATCH /tournaments/{id}` **(admin)** `{name?, tab_url?, is_active?}` -> `Tournament`
 - `POST /tournaments/{id}/scrape` **(admin)** -> `{status: "queued"}` (fires the Celery `scrape_tournament` task)
 
-`Tournament` shape: `{id, name, slug, source_base_url, source_slug, status, api_available, champion_team_id, timezone, is_active, created_at}`
-`status` enum: `upcoming | in_progress | eliminations | completed`
+`Tournament` shape: `{id, name, slug, source_base_url, source_slug, status, api_available,
+champion_team_id, timezone, is_active, created_at, current_round: Round|null, teams_count,
+open_markets_count}`
+`status` enum: `upcoming | in_progress | break_pending | eliminations | completed`
+
+`current_round`/`teams_count`/`open_markets_count` are computed by the router on every
+list/get call (not columns) so the dashboard's tournament cards can show "ronda actual", team
+count, and open-market count without a round-trip per tournament. `current_round` is the
+highest-seq `released` round (a published draw still being debated) if one exists, else the
+highest-seq `completed` round, else the tournament's first round -- see
+`app.services.tournament_service.get_current_round`. This is deliberately NOT just "the
+highest-seq round": the results navigation on the source tab only ever lists a round once its
+results page exists, so the round currently being debated (drawn, not yet judged) would
+otherwise be invisible everywhere in the app.
 
 ## Participants (all scoped under a tournament, all public/read-only)
 
@@ -42,7 +63,10 @@ This is the single source of truth both the backend (FastAPI implementation) and
 
 ## Rounds / Debates / Results (public/read-only)
 
-- `GET /tournaments/{id}/rounds` -> `Round[]` `{id, seq, name, stage, status}` (`stage`: `preliminary|elimination`)
+- `GET /tournaments/{id}/rounds` -> `Round[]` `{id, seq, name, stage, status}` (`stage`:
+  `preliminary|elimination`; `status`: `draft|released|completed` -- `draft` means not yet
+  drawn, `released` means drawn/in progress with no judged debate yet, `completed` means at
+  least one debate in the round has a judged outcome)
 - `GET /tournaments/{id}/rounds/{round_id}/debates` -> `Debate[]` (summary: id, room name, teams w/ position+rank+points)
 - `GET /tournaments/{id}/debates/{debate_id}` -> `Debate` full detail:
   `{id, round: Round, room: {name}|null, status, motion_text, ballot_source_url,
@@ -73,23 +97,31 @@ real money anywhere in this platform, but the friend group's score is expressed 
 as dollars (e.g. render `points_awarded` as `"$100"`, not `"100 pts"`). The frontend should
 format all of these with a `$` prefix.
 
-**Odds model:** fixed-odds (sportsbook-style), not pari-mutuel. `POST .../quote` prices a
-candidate pick from that team's/speaker's/institution's current strength (see
-`app.domain.odds` and `app.services.odds_service`) WITHOUT placing a bet -- call it live as the
-user builds their pick to show a "cuota: 1.85x" preview. `POST .../predictions` re-prices the
-same way and locks the resulting `odds` onto the `Prediction` row at that moment; a later swing
-in the market's pool or in team strength never changes an already-placed bet's payout.
-`pool_total` (sum of everyone's stakes) is informational flavor only and does not feed back into
-anyone's odds.
+**Odds model:** pari-mutuel-with-seed, NOT fixed/bookmaker odds. `POST .../quote` prices a
+candidate pick by blending a prior probability (from that team's/speaker's/institution's
+current strength -- see `app.domain.odds` and `app.services.odds_service`) with whatever's
+already staked on OPEN predictions in that market/compartment; with an empty pool the price is
+exactly the prior, and as real stakes accumulate the crowd's money takes over. A 7% house
+margin is applied and prices are clamped to `[1.05, 20.0]`. `POST .../predictions` re-prices
+the same way and locks the resulting `odds` onto the `Prediction` row at that moment; a later
+swing in the market's pool or in team strength never changes an already-placed bet's payout.
+`pool_total`/`bettors_count` DO feed back into everyone's live-quoted odds (unlike a flavor-only
+stat) -- they're just not retroactive for bets already placed.
 
 - `GET /tournaments/{id}/bet-markets` -> `BetMarket[]`
-  `{id, bet_type, label, description, opens_at, closes_at, status, target_round_id, target_break_category_id, pool_total}`
+  `{id, bet_type, label, description, opens_at, closes_at, status, target_round_id, target_break_category_id, pool_total, bettors_count}`
   (`bet_type`: `champion|top_n_break|top_n_speakers|round_winner|head_to_head|breakout_team|best_institution`)
   (`status`: `open|closed|settled`)
 - `POST /tournaments/{id}/bet-markets` **(admin)** `{bet_type, label, description?, opens_at, closes_at, points_rule?, target_round_id?, target_break_category_id?}` -> `BetMarket`
   (`points_rule` is now only used by `breakout_team`, e.g. `{"odds": 4.0}` -- every other bet_type is priced automatically)
 - `PATCH /bet-markets/{market_id}` **(admin)** `{status?}` (only `open<->closed` transitions; `settled` is set by the system)
 - `POST /bet-markets/{market_id}/settle` **(admin)** `{manual_outcome?: object}` -> `{settled: bool}`
+- `GET /bet-markets/{market_id}/board` **(public)** -> `MarketBoardOut`
+  `{market: BetMarket, pool_total, bettors, options: MarketBoardOption[]}` where
+  `MarketBoardOption` is `{key, label, emoji, stake, backers, odds}` -- one row per candidate
+  (or per distinct staked payload, for bet types with no enumerable field like `head_to_head`),
+  each priced through the same live pari-mutuel math `quote` uses. This is what the "Mercados
+  abiertos" board renders: pool, apostadores, cuota y pago por opción, sin round-trips extra.
 - `POST /bet-markets/{market_id}/quote` `{payload: object}` -> `{odds: number}` (live preview, no side effects)
 - `GET /bet-markets/{market_id}/predictions/me` -> `Prediction | null`
 - `POST /bet-markets/{market_id}/predictions` `{payload: object, stake_amount: number}` -> `Prediction`
@@ -121,8 +153,13 @@ while still open)
 ## Dashboard (convenience aggregate, public)
 
 - `GET /tournaments/{id}/dashboard` ->
-  `{latest_round: Round|null, recent_changes: ChangeEvent[] (last 20), leaderboard_top: LeaderboardEntry[] (top 5),
-    my_predictions: Prediction[] (only if authenticated), open_bet_markets: BetMarket[]}`
+  `{current_round: Round|null, latest_round: Round|null (alias of current_round, kept for older
+    consumers), rounds: Round[] (every round, ascending seq), recent_changes: ChangeEvent[] (last 20),
+    leaderboard_top: LeaderboardEntry[] (top 5), my_predictions: Prediction[] (only if authenticated),
+    open_bet_markets: BetMarket[]}`
+
+`current_round` uses the same "round actually in progress" logic as `Tournament.current_round`
+(see `app.services.tournament_service.get_current_round`) -- NOT simply the highest-seq round.
 
 `ChangeEvent` shape: `{id, entity_type, entity_id, change_type, field_diff, round_id, detected_at}`
 
@@ -131,6 +168,12 @@ while still open)
 - `GET /admin/scrape-logs?tournament_id=` **(admin)** -> `ScrapeLog[]` `{id, started_at, finished_at, status, strategy_used, pages_fetched, entities_created, entities_updated, error_message}`
 - `GET /admin/users` **(admin)** -> `User[]`
 - `PATCH /admin/users/{id}` **(admin)** `{role?, is_active?}` -> `User`
+- `GET /admin/pending-elimination-results?tournament_id=` **(admin)** -> `PendingEliminationDebateOut[]`
+  `{debate_id, tournament_id, round_id, round_name, is_final, teams: {team_id, team_name}[]}` --
+  elimination-round debates whose draw is known but whose result the source tab never published
+  (common for the Grand Final).
+- `POST /admin/debates/{debate_id}/manual-result` **(admin)**
+  `{champion_team_id}` (final) or `{advancing_team_ids: number[]}` (non-final) -> `{status: "ok"}`
 
 ## Conventions
 

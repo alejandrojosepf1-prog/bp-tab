@@ -14,7 +14,31 @@ from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Debate, DebateTeam, Round, Tournament
-from app.models.enums import RoundStage, TournamentStatus
+from app.models.enums import RoundStage, RoundStatus, TournamentStatus
+
+
+async def get_current_round(session: AsyncSession, tournament_id: int) -> Round | None:
+    """The round the tournament is actually AT right now: the highest-seq RELEASED round (a
+    published draw still being debated), else the highest-seq COMPLETED round, else the
+    lowest-seq round of any status (a tournament that hasn't started yet)."""
+    rounds = (
+        (
+            await session.execute(
+                select(Round).where(Round.tournament_id == tournament_id).order_by(Round.seq)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if not rounds:
+        return None
+    released = [r for r in rounds if r.status == RoundStatus.RELEASED]
+    if released:
+        return released[-1]
+    completed = [r for r in rounds if r.status == RoundStatus.COMPLETED]
+    if completed:
+        return completed[-1]
+    return rounds[0]
 
 
 def _slugify(name: str) -> str:

@@ -1,8 +1,8 @@
-# BP$
+# Claim
 
 ## Qué es esto
 
-BP$ es una plataforma privada, entre amigos, para apostar sobre el desarrollo de torneos de
+Claim es una plataforma privada, entre amigos, para apostar sobre el desarrollo de torneos de
 Debate Parlamentario Británico (British Parliamentary, BP). La idea es simple: apuntamos la
 plataforma a un torneo que esté publicando su TAB en vivo en
 [CalicoTab](https://www.calicotab.com/) (el hosting público de [Tabbycat](https://tabbycat.readthedocs.io/),

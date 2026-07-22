@@ -110,7 +110,13 @@ async def get_debate(
             selectinload(Debate.result),
             selectinload(Debate.adjudicators).selectinload(DebateAdjudicator.adjudicator),
             selectinload(Debate.teams).selectinload(DebateTeam.team).selectinload(Team.institution),
-            selectinload(Debate.teams).selectinload(DebateTeam.team).selectinload(Team.speakers),
+            # Team.speakers -> Speaker.categories was missing here (the list endpoint above
+            # loads it): _speaker_schema touches `speaker.categories`, and that lazy load in an
+            # async context raised MissingGreenlet -> a 500 on EVERY debate detail request.
+            selectinload(Debate.teams)
+            .selectinload(DebateTeam.team)
+            .selectinload(Team.speakers)
+            .selectinload(Speaker.categories),
             selectinload(Debate.teams)
             .selectinload(DebateTeam.speaker_scores)
             .selectinload(SpeakerScore.speaker)

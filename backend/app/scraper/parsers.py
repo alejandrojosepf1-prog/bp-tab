@@ -21,6 +21,9 @@ from app.scraper.dtos import (
     ScrapedDebate,
     ScrapedDebateAdjudicator,
     ScrapedDebateTeamEntry,
+    ScrapedDraw,
+    ScrapedDrawDebate,
+    ScrapedDrawTeamEntry,
     ScrapedInstitution,
     ScrapedRoundRef,
     ScrapedSpeaker,
@@ -377,6 +380,91 @@ def _parse_debate_adjudicators(cell: dict | None) -> list[ScrapedDebateAdjudicat
             ScrapedDebateAdjudicator(external_id=ext_id, name=match.group("name"), role=role)
         )
     return out
+
+
+# --- Draw page (the round currently in progress) ----------------------------------------
+
+_DRAW_TITLE_RE = re.compile(r"draw for (.+?)\s*$", re.IGNORECASE)
+
+
+def parse_draw(html: str) -> ScrapedDraw:
+    """Parses the public `/draw/` page: the round currently being debated, with its room
+    assignments and team pairings but (by definition) no results yet.
+
+    The draw table's team columns are keyed "0".."3" with OG/OO/CG/CO column titles, and each
+    team cell carries its external id only inside its popover's "View X's Record" link -- both
+    unlike the results tables, hence a dedicated parser instead of reusing their row shape.
+    Raises ParseError when the page isn't a released draw (e.g. the between-rounds placeholder
+    with no vueData table), which `_safe_fetch_parse` treats as "no draw right now".
+    """
+    round_name = _draw_round_name(html)
+    if not round_name:
+        raise ParseError("no 'Draw for <round>' title found on draw page")
+
+    tables = extract_tables_data(html)
+    if not tables:
+        raise ParseError("no draw table found on draw page")
+    table = tables[0]
+
+    position_by_key: dict[str, BPPosition] = {}
+    venue_key = None
+    for col in table["head"]:
+        key = col.get("key")
+        title = (col.get("title") or "").strip().upper()
+        if key == "venue" or (col.get("tooltip") or "").strip().lower() == "room":
+            venue_key = key
+        try:
+            position_by_key[key] = BPPosition(title)
+        except ValueError:
+            continue
+
+    debates: list[ScrapedDrawDebate] = []
+    for raw_row in table["data"]:
+        row = row_to_dict(table["head"], raw_row)
+        teams: list[ScrapedDrawTeamEntry] = []
+        for key, position in position_by_key.items():
+            cell = row.get(key)
+            if not cell:
+                continue
+            name = cell_text(cell)
+            ext_id = cell_external_id(cell)
+            if ext_id is None:
+                ext_id = next(
+                    (
+                        parsed
+                        for parsed in (
+                            external_id_from_link(link) for link in popover_links(cell)
+                        )
+                        if parsed is not None
+                    ),
+                    None,
+                )
+            if ext_id is None or not name:
+                continue
+            teams.append(
+                ScrapedDrawTeamEntry(team_external_id=ext_id, team_name=name, position=position)
+            )
+        if not teams:
+            continue
+        room_name = cell_text(row.get(venue_key)) if venue_key else None
+        debates.append(ScrapedDrawDebate(room_name=room_name or None, teams=tuple(teams)))
+
+    return ScrapedDraw(round_name=round_name, debates=tuple(debates))
+
+
+def _draw_round_name(html: str) -> str | None:
+    soup = BeautifulSoup(html, "lxml")
+    title = soup.find("title")
+    if title:
+        match = _DRAW_TITLE_RE.search(title.get_text(" ", strip=True))
+        if match:
+            return match.group(1).strip()
+    page_title = soup.select_one("#pageTitle")
+    if page_title:
+        match = _DRAW_TITLE_RE.search(page_title.get_text(" ", strip=True))
+        if match:
+            return match.group(1).strip()
+    return None
 
 
 # --- Ballot / scoresheet detail page (plain HTML, BeautifulSoup) -----------------------

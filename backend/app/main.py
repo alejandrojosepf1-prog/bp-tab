@@ -1,5 +1,8 @@
-from fastapi import FastAPI
+import logging
+
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from app.api.routers import (
     admin,
@@ -30,6 +33,21 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+_logger = logging.getLogger(__name__)
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    """Catch-all so unexpected errors become a JSON 500 *inside* the middleware stack.
+
+    Without this, an unhandled exception propagates past CORSMiddleware and the bare 500 ships
+    without CORS headers -- the browser then reports a network failure ("Failed to fetch")
+    instead of the real 500, which is how the debate-detail crash surfaced as a silently
+    unresponsive page instead of a visible server error.
+    """
+    _logger.exception("unhandled error on %s %s", request.method, request.url.path, exc_info=exc)
+    return JSONResponse(status_code=500, content={"detail": "Internal server error"})
 
 API_PREFIX = "/api/v1"
 

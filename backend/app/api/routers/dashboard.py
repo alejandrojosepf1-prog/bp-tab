@@ -4,13 +4,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.api.deps import get_current_user_optional
-from app.api.schemas.betting import BetMarketOut, PredictionOut
+from app.api.routers.betting import to_bet_market_out
+from app.api.schemas.betting import PredictionOut
 from app.api.schemas.dashboard import ChangeEventOut, DashboardOut
 from app.api.schemas.leaderboard import LeaderboardEntryOut, LeaderboardUserOut
 from app.api.schemas.rounds import RoundOut
 from app.db.session import get_db
 from app.models import BetMarket, ChangeEvent, LeaderboardEntry, Prediction, Round, User
 from app.models.enums import BetMarketStatus
+from app.services.tournament_service import get_current_round
 
 router = APIRouter(prefix="/tournaments/{tournament_id}", tags=["dashboard"])
 
@@ -21,14 +23,20 @@ async def get_dashboard(
     session: AsyncSession = Depends(get_db),
     current_user: User | None = Depends(get_current_user_optional),
 ) -> DashboardOut:
-    latest_round = (
-        await session.execute(
-            select(Round)
-            .where(Round.tournament_id == tournament_id)
-            .order_by(Round.seq.desc())
-            .limit(1)
+    # The round the tournament is actually at (see get_current_round) -- NOT simply the
+    # highest-seq round, which used to surface a not-yet-drawn final as "latest" while the
+    # round everyone was debating stayed invisible.
+    current_round = await get_current_round(session, tournament_id)
+
+    rounds = (
+        (
+            await session.execute(
+                select(Round).where(Round.tournament_id == tournament_id).order_by(Round.seq)
+            )
         )
-    ).scalar_one_or_none()
+        .scalars()
+        .all()
+    )
 
     recent_changes = (
         (
@@ -88,8 +96,11 @@ async def get_dashboard(
         )
         my_predictions = [PredictionOut.model_validate(p) for p in predictions]
 
+    current_round_out = RoundOut.model_validate(current_round) if current_round else None
     return DashboardOut(
-        latest_round=RoundOut.model_validate(latest_round) if latest_round else None,
+        current_round=current_round_out,
+        latest_round=current_round_out,
+        rounds=[RoundOut.model_validate(r) for r in rounds],
         recent_changes=[ChangeEventOut.model_validate(c) for c in recent_changes],
         leaderboard_top=[
             LeaderboardEntryOut(
@@ -101,5 +112,5 @@ async def get_dashboard(
             for e in leaderboard_top
         ],
         my_predictions=my_predictions,
-        open_bet_markets=[BetMarketOut.model_validate(m) for m in open_bet_markets],
+        open_bet_markets=[await to_bet_market_out(session, m) for m in open_bet_markets],
     )

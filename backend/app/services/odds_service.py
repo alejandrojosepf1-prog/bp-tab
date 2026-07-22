@@ -13,6 +13,7 @@ tracks -- nothing here invents a new stat:
 """
 
 from collections import defaultdict
+from dataclasses import dataclass
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -402,3 +403,189 @@ async def quote_odds(
         return pari_mutuel_odds(candidate_stake, market_stake, prior)
 
     raise ValueError(f"no odds pricing implemented for bet type {bet_type!r}")
+
+
+# --- Live market board -------------------------------------------------------------------
+#
+# Read-only aggregate for the "Mercados abiertos" UI: per candidate/option, how much is
+# staked, by how many people, and what the CURRENT quoted odds are -- same math as
+# `quote_odds` (seeded pari-mutuel), just computed for the whole field at once instead of a
+# single payload, so a champion market over 60 teams doesn't cost 60 standings queries.
+
+
+@dataclass(frozen=True)
+class MarketBoardOption:
+    key: str
+    label: str
+    emoji: str | None
+    stake: float
+    backers: int
+    odds: float
+
+
+@dataclass(frozen=True)
+class MarketBoard:
+    pool_total: float
+    bettors: int
+    options: list[MarketBoardOption]
+
+
+_BOARD_MAX_UNSTAKED_OPTIONS = 12
+
+
+async def market_board(session: AsyncSession, bet_market: BetMarket) -> MarketBoard:
+    rows = (
+        await session.execute(
+            select(Prediction.user_id, Prediction.payload, Prediction.stake_amount).where(
+                Prediction.bet_market_id == bet_market.id
+            )
+        )
+    ).all()
+    pool_total = sum(float(stake) for _, _, stake in rows)
+    bettors = len({user_id for user_id, _, _ in rows})
+
+    bet_type = bet_market.bet_type
+    options: list[MarketBoardOption] = []
+
+    def _stakes_by(key_fn) -> tuple[dict, dict]:
+        stake_by: dict = defaultdict(float)
+        backers_by: dict = defaultdict(set)
+        for (user_id, payload, stake) in rows:
+            key = key_fn(payload)
+            if key is None:
+                continue
+            stake_by[key] += float(stake)
+            backers_by[key].add(user_id)
+        return stake_by, {k: len(v) for k, v in backers_by.items()}
+
+    if bet_type == BetType.CHAMPION:
+        power = await compute_team_power_ratings(session, bet_market.tournament_id)
+        if not power:
+            return MarketBoard(pool_total=pool_total, bettors=bettors, options=[])
+        probs = softmax_probabilities(power, temperature=adaptive_temperature(power.values()))
+        stake_by, backers_by = _stakes_by(lambda p: p.get("team_id"))
+        total_open = sum(stake_by.values())
+        teams = {
+            t.id: t
+            for t in (
+                await session.execute(
+                    select(Team).where(Team.tournament_id == bet_market.tournament_id)
+                )
+            ).scalars()
+        }
+        ranked = sorted(probs, key=lambda tid: -probs[tid])
+        keep = [tid for tid in ranked if stake_by.get(tid)] + [
+            tid for tid in ranked if not stake_by.get(tid)
+        ][:_BOARD_MAX_UNSTAKED_OPTIONS]
+        for tid in sorted(set(keep), key=lambda t: -probs.get(t, 0.0)):
+            team = teams.get(tid)
+            if team is None:
+                continue
+            options.append(
+                MarketBoardOption(
+                    key=f"team:{tid}",
+                    label=team.name,
+                    emoji=team.emoji,
+                    stake=round(stake_by.get(tid, 0.0), 2),
+                    backers=backers_by.get(tid, 0),
+                    odds=pari_mutuel_odds(stake_by.get(tid, 0.0), total_open, probs[tid]),
+                )
+            )
+        return MarketBoard(pool_total=pool_total, bettors=bettors, options=options)
+
+    if bet_type == BetType.BEST_INSTITUTION:
+        institution_power = await compute_institution_power_ratings(
+            session, bet_market.tournament_id
+        )
+        if not institution_power:
+            return MarketBoard(pool_total=pool_total, bettors=bettors, options=[])
+        probs = softmax_probabilities(
+            institution_power, temperature=adaptive_temperature(institution_power.values())
+        )
+        stake_by, backers_by = _stakes_by(lambda p: p.get("institution_code"))
+        total_open = sum(stake_by.values())
+        for code in sorted(probs, key=lambda c: -probs[c]):
+            options.append(
+                MarketBoardOption(
+                    key=f"inst:{code}",
+                    label=code,
+                    emoji=None,
+                    stake=round(stake_by.get(code, 0.0), 2),
+                    backers=backers_by.get(code, 0),
+                    odds=pari_mutuel_odds(stake_by.get(code, 0.0), total_open, probs[code]),
+                )
+            )
+        return MarketBoard(pool_total=pool_total, bettors=bettors, options=options[:20])
+
+    # Remaining bet types have no enumerable candidate field (their options are whatever
+    # payload combinations people actually staked), so the board lists the staked picks and
+    # prices each through the same quote path a new bet would use.
+    def _payload_key(payload: dict) -> str:
+        return "|".join(f"{k}={payload[k]}" for k in sorted(payload))
+
+    stake_by, backers_by = _stakes_by(_payload_key)
+    payload_by_key = {}
+    for _, payload, _stake in rows:
+        payload_by_key[_payload_key(payload)] = payload
+
+    team_names = {
+        t.id: (t.name, t.emoji)
+        for t in (
+            await session.execute(
+                select(Team).where(Team.tournament_id == bet_market.tournament_id)
+            )
+        ).scalars()
+    }
+    speaker_names = {
+        s.id: s.name
+        for s in (
+            await session.execute(
+                select(Speaker).where(Speaker.tournament_id == bet_market.tournament_id)
+            )
+        ).scalars()
+    }
+
+    def _label(payload: dict) -> tuple[str, str | None]:
+        def team(tid):  # noqa: ANN001 - tiny local helper
+            name, emoji = team_names.get(tid, (f"Equipo {tid}", None))
+            return name, emoji
+
+        if bet_type == BetType.HEAD_TO_HEAD:
+            winner, emoji = team(payload.get("predicted_winner_id"))
+            a, _ = team(payload.get("team_a_id"))
+            b, _ = team(payload.get("team_b_id"))
+            return f"{winner} gana ({a} vs. {b})", emoji
+        if bet_type == BetType.ROUND_WINNER:
+            name, emoji = team(payload.get("team_id"))
+            return f"{name} gana su debate", emoji
+        if bet_type == BetType.BREAKOUT_TEAM:
+            name, emoji = team(payload.get("team_id"))
+            return name, emoji
+        if bet_type == BetType.TOP_N_BREAK:
+            names = " → ".join(team(tid)[0] for tid in payload.get("team_ids", []))
+            return names or "—", None
+        if bet_type == BetType.TOP_N_SPEAKERS:
+            names = " → ".join(
+                speaker_names.get(sid, f"Speaker {sid}") for sid in payload.get("speaker_ids", [])
+            )
+            return names or "—", None
+        return _payload_key(payload), None
+
+    for key, payload in payload_by_key.items():
+        try:
+            odds = await quote_odds(session, bet_market, payload)
+        except (UnpriceableMarketError, KeyError, ValueError):
+            continue
+        label, emoji = _label(payload)
+        options.append(
+            MarketBoardOption(
+                key=key,
+                label=label,
+                emoji=emoji,
+                stake=round(stake_by.get(key, 0.0), 2),
+                backers=backers_by.get(key, 0),
+                odds=odds,
+            )
+        )
+    options.sort(key=lambda o: -o.stake)
+    return MarketBoard(pool_total=pool_total, bettors=bettors, options=options)

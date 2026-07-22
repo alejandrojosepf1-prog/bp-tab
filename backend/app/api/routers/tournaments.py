@@ -1,9 +1,10 @@
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import require_admin
+from app.api.schemas.rounds import RoundOut
 from app.api.schemas.tournaments import (
     ScrapeQueuedResponse,
     TournamentCreate,
@@ -12,8 +13,9 @@ from app.api.schemas.tournaments import (
 )
 from app.db.session import get_db
 from app.domain.tab_url import parse_tab_url
-from app.models import Tournament, User
-from app.services.tournament_service import create_tournament
+from app.models import BetMarket, Team, Tournament, User
+from app.models.enums import BetMarketStatus
+from app.services.tournament_service import create_tournament, get_current_round
 from app.tasks.scrape_tasks import scrape_tournament_async
 
 router = APIRouter(prefix="/tournaments", tags=["tournaments"])
@@ -35,14 +37,44 @@ def _parse_tab_url_or_422(tab_url: str) -> tuple[str, str]:
         ) from exc
 
 
+async def _to_tournament_out(session: AsyncSession, tournament: Tournament) -> TournamentOut:
+    out = TournamentOut.model_validate(tournament)
+    current_round = await get_current_round(session, tournament.id)
+    out.current_round = RoundOut.model_validate(current_round) if current_round else None
+    out.teams_count = int(
+        (
+            await session.execute(
+                select(func.count(Team.id)).where(Team.tournament_id == tournament.id)
+            )
+        ).scalar_one()
+    )
+    out.open_markets_count = int(
+        (
+            await session.execute(
+                select(func.count(BetMarket.id)).where(
+                    BetMarket.tournament_id == tournament.id,
+                    BetMarket.status == BetMarketStatus.OPEN,
+                )
+            )
+        ).scalar_one()
+    )
+    return out
+
+
 @router.get("", response_model=list[TournamentOut])
-async def list_tournaments(session: AsyncSession = Depends(get_db)) -> list[Tournament]:
-    return list((await session.execute(select(Tournament).order_by(Tournament.id))).scalars().all())
+async def list_tournaments(session: AsyncSession = Depends(get_db)) -> list[TournamentOut]:
+    tournaments = (
+        (await session.execute(select(Tournament).order_by(Tournament.id))).scalars().all()
+    )
+    return [await _to_tournament_out(session, t) for t in tournaments]
 
 
 @router.get("/{tournament_id}", response_model=TournamentOut)
-async def get_tournament(tournament_id: int, session: AsyncSession = Depends(get_db)) -> Tournament:
-    return await _get_tournament_or_404(session, tournament_id)
+async def get_tournament(
+    tournament_id: int, session: AsyncSession = Depends(get_db)
+) -> TournamentOut:
+    tournament = await _get_tournament_or_404(session, tournament_id)
+    return await _to_tournament_out(session, tournament)
 
 
 @router.post("", response_model=TournamentOut, status_code=status.HTTP_201_CREATED)

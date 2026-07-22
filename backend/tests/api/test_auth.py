@@ -4,19 +4,28 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from tests.api.conftest import auth_headers, make_user
 
 
-async def test_register_creates_user_with_default_role(client: AsyncClient) -> None:
-    response = await client.post(
+async def test_register_first_user_becomes_admin_then_default_role(client: AsyncClient) -> None:
+    """The very first account bootstraps as admin (there is no other way to mint one on a
+    fresh database); every subsequent registration gets the plain `user` role."""
+    first = await client.post(
         "/api/v1/auth/register",
         json={"email": "alice@example.com", "password": "hunter2", "display_name": "Alice"},
     )
-    assert response.status_code == 201
-    body = response.json()
-    assert body["email"] == "alice@example.com"
-    assert body["display_name"] == "Alice"
-    assert body["role"] == "user"
-    assert body["is_active"] is True
-    assert "password" not in body
-    assert "password_hash" not in body
+    assert first.status_code == 201
+    first_body = first.json()
+    assert first_body["email"] == "alice@example.com"
+    assert first_body["display_name"] == "Alice"
+    assert first_body["role"] == "admin"
+    assert first_body["is_active"] is True
+    assert "password" not in first_body
+    assert "password_hash" not in first_body
+
+    second = await client.post(
+        "/api/v1/auth/register",
+        json={"email": "dave@example.com", "password": "hunter2", "display_name": "Dave"},
+    )
+    assert second.status_code == 201
+    assert second.json()["role"] == "user"
 
 
 async def test_register_duplicate_email_conflicts(client: AsyncClient) -> None:

@@ -3,10 +3,17 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
-from app.api.schemas.auth import LoginRequest, RegisterRequest, TokenResponse, UserOut
+from app.api.schemas.auth import (
+    LoginRequest,
+    MyPredictionOut,
+    RegisterRequest,
+    TokenResponse,
+    UserOut,
+)
 from app.core.security import create_access_token, hash_password, verify_password
 from app.db.session import get_db
-from app.models import User
+from app.models import BetMarket, Prediction, Tournament, User
+from app.models.enums import UserRole
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -19,10 +26,15 @@ async def register(payload: RegisterRequest, session: AsyncSession = Depends(get
     if existing is not None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Email already registered")
 
+    # The very first account becomes admin: /admin/users (the only way to grant roles) itself
+    # requires an admin, so a fresh deployment (e.g. a brand-new Neon database) previously had
+    # no way to ever produce one without hand-editing the database.
+    any_user = (await session.execute(select(User.id).limit(1))).scalar_one_or_none()
     user = User(
         email=payload.email,
         password_hash=hash_password(payload.password),
         display_name=payload.display_name,
+        role=UserRole.ADMIN if any_user is None else UserRole.USER,
     )
     session.add(user)
     await session.commit()
@@ -50,3 +62,38 @@ async def login(payload: LoginRequest, session: AsyncSession = Depends(get_db)) 
 @router.get("/me", response_model=UserOut)
 async def me(current_user: User = Depends(get_current_user)) -> User:
     return current_user
+
+
+@router.get("/me/predictions", response_model=list[MyPredictionOut])
+async def my_predictions(
+    session: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> list[MyPredictionOut]:
+    """Full bet history for the logged-in user across every tournament, newest first."""
+    rows = (
+        await session.execute(
+            select(Prediction, BetMarket, Tournament)
+            .join(BetMarket, Prediction.bet_market_id == BetMarket.id)
+            .join(Tournament, BetMarket.tournament_id == Tournament.id)
+            .where(Prediction.user_id == current_user.id)
+            .order_by(Prediction.created_at.desc())
+        )
+    ).all()
+    return [
+        MyPredictionOut(
+            id=prediction.id,
+            bet_market_id=market.id,
+            market_label=market.label,
+            bet_type=market.bet_type.value,
+            market_status=market.status.value,
+            tournament_id=tournament.id,
+            tournament_name=tournament.name,
+            status=prediction.status.value,
+            stake_amount=prediction.stake_amount,
+            odds=prediction.odds,
+            potential_payout=round(prediction.stake_amount * prediction.odds, 2),
+            points_awarded=prediction.points_awarded,
+            created_at=prediction.created_at,
+        )
+        for prediction, market, tournament in rows
+    ]

@@ -18,6 +18,25 @@ class UserOut(BaseModel):
     created_at: datetime.datetime
 
 
+class MyPredictionOut(BaseModel):
+    """A user's prediction joined with enough market/tournament context to render a bet
+    history without extra round-trips."""
+
+    id: int
+    bet_market_id: int
+    market_label: str
+    bet_type: str
+    market_status: str
+    tournament_id: int
+    tournament_name: str
+    status: str
+    stake_amount: float
+    odds: float
+    potential_payout: float
+    points_awarded: float | None
+    created_at: datetime.datetime
+
+
 class RegisterRequest(BaseModel):
     email: str
     password: str

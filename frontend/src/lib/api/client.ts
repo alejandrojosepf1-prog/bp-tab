@@ -11,6 +11,8 @@ import type {
   Institution,
   LeaderboardEntry,
   LoginResponse,
+  MarketBoard,
+  MyPrediction,
   PendingEliminationDebate,
   Prediction,
   Round,
@@ -113,6 +115,7 @@ export const api = {
     login: (data: { email: string; password: string }) =>
       post<LoginResponse>("/auth/login", data),
     me: () => get<User>("/auth/me"),
+    myPredictions: () => get<MyPrediction[]>("/auth/me/predictions"),
   },
 
   tournaments: {
@@ -208,6 +211,8 @@ export const api = {
       patch<BetMarket>(`/bet-markets/${marketId}`, data),
     settle: (marketId: number | string, data?: { manual_outcome?: object }) =>
       post<{ settled: boolean }>(`/bet-markets/${marketId}/settle`, data ?? {}),
+    board: (marketId: number | string) =>
+      get<MarketBoard>(`/bet-markets/${marketId}/board`),
     myPrediction: (marketId: number | string) =>
       get<Prediction | null>(`/bet-markets/${marketId}/predictions/me`),
     createPrediction: (marketId: number | string, payload: object, stakeAmount: number) =>
