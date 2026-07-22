@@ -8,6 +8,7 @@ import type {
   Debate,
   DebateSummary,
   DashboardData,
+  HouseFinance,
   Institution,
   LeaderboardEntry,
   LoginResponse,
@@ -213,8 +214,10 @@ export const api = {
       post<{ settled: boolean }>(`/bet-markets/${marketId}/settle`, data ?? {}),
     board: (marketId: number | string) =>
       get<MarketBoard>(`/bet-markets/${marketId}/board`),
-    myPrediction: (marketId: number | string) =>
-      get<Prediction | null>(`/bet-markets/${marketId}/predictions/me`),
+    // A user can hold one OPEN prediction PER entity within a market (one per debate/slot/team),
+    // not one per market -- see backend app.services.betting_service._entity_key.
+    myPredictions: (marketId: number | string) =>
+      get<Prediction[]>(`/bet-markets/${marketId}/predictions/me`),
     createPrediction: (marketId: number | string, payload: object, stakeAmount: number) =>
       post<Prediction>(`/bet-markets/${marketId}/predictions`, {
         payload,
@@ -250,6 +253,8 @@ export const api = {
       debateId: number | string,
       data: { champion_team_id: number } | { advancing_team_ids: number[] }
     ) => post<{ status: string }>(`/admin/debates/${debateId}/manual-result`, data),
+    houseFinance: (tournamentId?: number | string) =>
+      get<HouseFinance>(`/admin/house-finance${qs({ tournament_id: tournamentId })}`),
   },
 };
 

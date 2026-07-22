@@ -17,6 +17,7 @@ import {
   Menu,
   X,
   Gem,
+  Landmark,
 } from "lucide-react";
 import { useAuth } from "@/lib/auth/auth-context";
 import { cn } from "@/lib/utils";
@@ -34,6 +35,7 @@ const ADMIN_ITEMS = [
   { href: "/admin/results", label: "Resultados", icon: ClipboardCheck },
   { href: "/admin/users", label: "Usuarios", icon: Users },
   { href: "/admin/scraping", label: "Scraping", icon: Radar },
+  { href: "/admin/finance", label: "Finanzas", icon: Landmark },
 ];
 
 function Wordmark() {

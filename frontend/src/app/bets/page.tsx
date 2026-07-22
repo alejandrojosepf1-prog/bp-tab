@@ -1,16 +1,25 @@
 "use client";
 
+import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import Link from "next/link";
-import { Ticket } from "lucide-react";
+import { ChevronDown, Lock, Ticket, Unlock } from "lucide-react";
 import { api } from "@/lib/api/client";
 import { queryKeys } from "@/lib/api/query-keys";
 import { LoadingState, ErrorState, EmptyState } from "@/components/query-state";
 import { MarketCard } from "@/components/betting/market-card";
-import type { Tournament } from "@/lib/api/types";
+import { cn } from "@/lib/utils";
+import type { BetMarket, Tournament } from "@/lib/api/types";
 
-/** Mercados de un torneo, con su board (pool, apostadores, cuotas) y apuesta inline. */
-function TournamentMarkets({ tournament }: { tournament: Tournament }) {
+/** Un torneo's markets filtered to just `statusFilter`, as MarketCard blocks -- reused by both
+ * accordion sections (Abiertos/Cerrados) below; TanStack Query dedupes the underlying fetch. */
+function TournamentMarketsGroup({
+  tournament,
+  statusFilter,
+}: {
+  tournament: Tournament;
+  statusFilter: "open" | "closed";
+}) {
   const id = String(tournament.id);
   const { data: markets, isLoading } = useQuery({
     queryKey: queryKeys.betMarkets(id),
@@ -36,14 +45,17 @@ function TournamentMarkets({ tournament }: { tournament: Tournament }) {
 
   if (isLoading) return <LoadingState label="Cargando mercados…" />;
 
-  const open = (markets ?? []).filter((m) => m.status === "open");
-  const closed = (markets ?? []).filter((m) => m.status !== "open");
-  if (!open.length && !closed.length) return null;
+  const filtered = (markets ?? []).filter((m: BetMarket) =>
+    statusFilter === "open" ? m.status === "open" : m.status !== "open"
+  );
+  if (!filtered.length) return null;
 
   return (
     <section className="flex flex-col gap-3">
       <div className="flex items-baseline justify-between gap-2">
-        <h2 className="font-heading text-base font-bold">{tournament.name}</h2>
+        <h3 className="font-heading text-sm font-bold text-muted-foreground">
+          {tournament.name}
+        </h3>
         <Link
           href={`/tournaments/${tournament.id}`}
           className="text-xs font-medium text-primary hover:underline"
@@ -52,7 +64,7 @@ function TournamentMarkets({ tournament }: { tournament: Tournament }) {
         </Link>
       </div>
       <div className="flex flex-col gap-3">
-        {open.map((market) => (
+        {filtered.map((market) => (
           <MarketCard
             key={market.id}
             tournamentId={id}
@@ -60,20 +72,40 @@ function TournamentMarkets({ tournament }: { tournament: Tournament }) {
             teams={teams ?? []}
             speakers={speakers ?? []}
             institutions={institutions ?? []}
-            defaultExpanded={open.length === 1}
-          />
-        ))}
-        {closed.map((market) => (
-          <MarketCard
-            key={market.id}
-            tournamentId={id}
-            market={market}
-            teams={teams ?? []}
-            speakers={speakers ?? []}
-            institutions={institutions ?? []}
+            defaultExpanded={statusFilter === "open" && filtered.length === 1}
           />
         ))}
       </div>
+    </section>
+  );
+}
+
+function AccordionSection({
+  title,
+  icon: Icon,
+  defaultOpen,
+  children,
+}: {
+  title: string;
+  icon: typeof Unlock;
+  defaultOpen: boolean;
+  children: React.ReactNode;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <section className="flex flex-col gap-3 rounded-2xl border border-border bg-card/40 p-4">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        className="flex items-center gap-2 text-left"
+      >
+        <Icon className="size-4 text-primary" />
+        <h2 className="flex-1 font-heading text-lg font-bold">{title}</h2>
+        <ChevronDown
+          className={cn("size-4 text-muted-foreground transition-transform", open && "rotate-180")}
+        />
+      </button>
+      {open && <div className="flex flex-col gap-6">{children}</div>}
     </section>
   );
 }
@@ -110,9 +142,20 @@ export default function BetsPage() {
         />
       )}
 
-      {withMarkets.map((t) => (
-        <TournamentMarkets key={t.id} tournament={t} />
-      ))}
+      {withMarkets.length > 0 && (
+        <>
+          <AccordionSection title="Mercados abiertos" icon={Unlock} defaultOpen>
+            {withMarkets.map((t) => (
+              <TournamentMarketsGroup key={t.id} tournament={t} statusFilter="open" />
+            ))}
+          </AccordionSection>
+          <AccordionSection title="Mercados cerrados" icon={Lock} defaultOpen={false}>
+            {withMarkets.map((t) => (
+              <TournamentMarketsGroup key={t.id} tournament={t} statusFilter="closed" />
+            ))}
+          </AccordionSection>
+        </>
+      )}
     </div>
   );
 }

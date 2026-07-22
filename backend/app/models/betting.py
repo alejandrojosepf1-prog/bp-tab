@@ -67,11 +67,20 @@ class BetMarket(Base, TournamentScopedMixin, TimestampMixin):
 
 class Prediction(Base, TimestampMixin):
     """A single user's answer to a BetMarket. Frozen at creation time via locked_at so a later
-    edit to the market's closing time can't retroactively affect an already-placed bet."""
+    edit to the market's closing time can't retroactively affect an already-placed bet.
+
+    A user can hold more than one OPEN prediction on the same market, as long as each one
+    targets a different `entity_key` -- e.g. a different debate within a round-scoped market,
+    a different top-3 position, or a different team in an independent team_break market.
+    Re-submitting the SAME entity_key still edits/replaces that one prediction (refunding its
+    prior stake), matching a real sportsbook's "one open position per selection" rule rather
+    than "one bet per market" (see app.services.betting_service._entity_key)."""
 
     __tablename__ = "predictions"
     __table_args__ = (
-        UniqueConstraint("bet_market_id", "user_id", name="uq_predictions_market_user"),
+        UniqueConstraint(
+            "bet_market_id", "user_id", "entity_key", name="uq_predictions_market_user_entity"
+        ),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -81,6 +90,12 @@ class Prediction(Base, TimestampMixin):
     user_id: Mapped[int] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
     )
+    # What this prediction competes against for uniqueness within (bet_market_id, user_id) --
+    # "__market__" for single-choice bet types (champion, best_institution, ...), else a
+    # payload-derived key (e.g. "debate:123", "position:2", "team:45") so a user can hold one
+    # open prediction PER debate/position/team instead of one per market. See
+    # app.services.betting_service._entity_key -- the single source of truth for this value.
+    entity_key: Mapped[str] = mapped_column(String(64), nullable=False)
 
     payload: Mapped[dict] = mapped_column(JSON, nullable=False)
     locked_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False)

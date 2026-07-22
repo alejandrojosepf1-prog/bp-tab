@@ -39,4 +39,6 @@ export const queryKeys = {
   adminScrapeLogs: (tournamentId?: Id) => ["admin", "scrape-logs", tournamentId ?? "all"] as const,
   adminPendingEliminationResults: (tournamentId?: Id) =>
     ["admin", "pending-elimination-results", tournamentId ?? "all"] as const,
+  adminHouseFinance: (tournamentId?: Id) =>
+    ["admin", "house-finance", tournamentId ?? "all"] as const,
 };

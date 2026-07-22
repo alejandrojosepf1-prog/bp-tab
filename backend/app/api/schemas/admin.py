@@ -55,3 +55,21 @@ class ManualEliminationResultIn(BaseModel):
                 "provide exactly one of champion_team_id or advancing_team_ids"
             )
         return self
+
+
+class MarketExposureOut(BaseModel):
+    market_id: int
+    market_label: str
+    pool_total: float
+    worst_case: float
+    best_case: float
+
+
+class HouseFinanceOut(BaseModel):
+    total_staked_open: float
+    total_staked_settled: float
+    total_paid_out: float
+    realized_net_profit: float
+    exposure: list[MarketExposureOut]
+    exposure_worst_case_total: float
+    exposure_best_case_total: float

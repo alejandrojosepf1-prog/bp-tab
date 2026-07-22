@@ -23,38 +23,50 @@ function HistoryRow({ prediction }: { prediction: MyPrediction }) {
   const won = settled && (prediction.points_awarded ?? 0) > 0;
   const status = PREDICTION_STATUS[prediction.status];
   return (
-    <div className="flex flex-wrap items-center gap-3 px-4 py-3">
-      <div className="min-w-0 flex-1">
-        <p className="truncate text-sm font-medium">{prediction.market_label}</p>
-        <p className="truncate text-xs text-muted-foreground">
-          {prediction.tournament_name} ·{" "}
-          {format(new Date(prediction.created_at), "d MMM HH:mm", { locale: es })}
-        </p>
+    <div className="flex flex-col gap-2 rounded-xl border border-border/70 bg-card/40 p-4">
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div className="min-w-0">
+          <p className="truncate text-sm font-semibold">{prediction.market_label}</p>
+          <p className="truncate text-xs text-muted-foreground">
+            {prediction.tournament_name} ·{" "}
+            {format(new Date(prediction.created_at), "d MMM HH:mm", { locale: es })}
+          </p>
+        </div>
+        {status && (
+          <Badge variant="outline" className={cn("shrink-0", status.className)}>
+            {status.label}
+          </Badge>
+        )}
       </div>
-      <span className="font-mono text-sm">
-        ${prediction.stake_amount.toLocaleString("es")}{" "}
-        <span className="text-muted-foreground">@ {prediction.odds}x</span>
-      </span>
-      {settled ? (
-        won ? (
-          <span className="font-mono text-sm font-semibold text-primary">
-            +${(prediction.points_awarded ?? 0).toLocaleString("es")}
-          </span>
-        ) : (
-          <span className="font-mono text-sm font-semibold text-destructive">
-            −${prediction.stake_amount.toLocaleString("es")}
-          </span>
-        )
-      ) : (
-        <span className="font-mono text-xs text-muted-foreground">
-          pagaría ${prediction.potential_payout.toLocaleString("es")}
+
+      <div className="rounded-lg bg-muted/40 px-3 py-2 text-sm font-medium">
+        {prediction.selection_label}
+      </div>
+
+      <div className="flex flex-wrap items-center justify-between gap-2 text-sm">
+        <span className="text-muted-foreground">
+          Apostado{" "}
+          <span className="font-mono font-medium text-foreground">
+            ${prediction.stake_amount.toLocaleString("es")}
+          </span>{" "}
+          · cuota <span className="font-mono">{prediction.odds}x</span>
         </span>
-      )}
-      {status && (
-        <Badge variant="outline" className={cn("shrink-0", status.className)}>
-          {status.label}
-        </Badge>
-      )}
+        {settled ? (
+          won ? (
+            <span className="font-mono text-sm font-semibold text-primary">
+              +${(prediction.points_awarded ?? 0).toLocaleString("es")}
+            </span>
+          ) : (
+            <span className="font-mono text-sm font-semibold text-destructive">
+              −${prediction.stake_amount.toLocaleString("es")}
+            </span>
+          )
+        ) : (
+          <span className="font-mono text-xs text-muted-foreground">
+            pagaría ${prediction.potential_payout.toLocaleString("es")}
+          </span>
+        )}
+      </div>
     </div>
   );
 }
@@ -133,7 +145,7 @@ function AccountContent() {
           />
         )}
         {history && history.length > 0 && (
-          <div className="flex flex-col divide-y divide-border/50 rounded-xl border border-border/70">
+          <div className="flex flex-col gap-2">
             {history.map((p) => (
               <HistoryRow key={p.id} prediction={p} />
             ))}

@@ -12,8 +12,9 @@ from app.api.schemas.auth import (
 )
 from app.core.security import create_access_token, hash_password, verify_password
 from app.db.session import get_db
-from app.models import BetMarket, Prediction, Tournament, User
+from app.models import BetMarket, Prediction, Speaker, Team, Tournament, User
 from app.models.enums import UserRole
+from app.services.odds_service import format_payload_label
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -79,21 +80,51 @@ async def my_predictions(
             .order_by(Prediction.created_at.desc())
         )
     ).all()
-    return [
-        MyPredictionOut(
-            id=prediction.id,
-            bet_market_id=market.id,
-            market_label=market.label,
-            bet_type=market.bet_type.value,
-            market_status=market.status.value,
-            tournament_id=tournament.id,
-            tournament_name=tournament.name,
-            status=prediction.status.value,
-            stake_amount=prediction.stake_amount,
-            odds=prediction.odds,
-            potential_payout=round(prediction.stake_amount * prediction.odds, 2),
-            points_awarded=prediction.points_awarded,
-            created_at=prediction.created_at,
+
+    # Batched per distinct tournament (usually just one or two for this friends-scale app)
+    # rather than per-prediction, so labeling a long bet history doesn't N+1 query team/speaker
+    # names -- format_payload_label itself is pure string formatting, no DB access.
+    tournament_ids = {tournament.id for _, _, tournament in rows}
+    team_names_by_tournament: dict[int, dict[int, tuple[str, str | None]]] = {}
+    speaker_names_by_tournament: dict[int, dict[int, str]] = {}
+    for tid in tournament_ids:
+        team_names_by_tournament[tid] = {
+            t.id: (t.name, t.emoji)
+            for t in (
+                await session.execute(select(Team).where(Team.tournament_id == tid))
+            ).scalars()
+        }
+        speaker_names_by_tournament[tid] = {
+            s.id: s.name
+            for s in (
+                await session.execute(select(Speaker).where(Speaker.tournament_id == tid))
+            ).scalars()
+        }
+
+    out = []
+    for prediction, market, tournament in rows:
+        label, _emoji = format_payload_label(
+            market.bet_type,
+            prediction.payload,
+            team_names=team_names_by_tournament[tournament.id],
+            speaker_names=speaker_names_by_tournament[tournament.id],
         )
-        for prediction, market, tournament in rows
-    ]
+        out.append(
+            MyPredictionOut(
+                id=prediction.id,
+                bet_market_id=market.id,
+                market_label=market.label,
+                bet_type=market.bet_type.value,
+                market_status=market.status.value,
+                tournament_id=tournament.id,
+                tournament_name=tournament.name,
+                selection_label=label,
+                status=prediction.status.value,
+                stake_amount=prediction.stake_amount,
+                odds=prediction.odds,
+                potential_payout=round(prediction.stake_amount * prediction.odds, 2),
+                points_awarded=prediction.points_awarded,
+                created_at=prediction.created_at,
+            )
+        )
+    return out

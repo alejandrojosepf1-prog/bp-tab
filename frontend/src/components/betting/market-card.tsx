@@ -2,8 +2,6 @@
 
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { formatDistanceToNow } from "date-fns";
-import { es } from "date-fns/locale";
 import { toast } from "sonner";
 import { ChevronDown, Coins, Loader2, Users } from "lucide-react";
 import { api, ApiError } from "@/lib/api/client";
@@ -13,6 +11,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { OptionPicker } from "@/components/ui/option-picker";
+import { CountdownBadge } from "@/components/ui/countdown-badge";
 import { LoadingState } from "@/components/query-state";
 import { cn } from "@/lib/utils";
 import type {
@@ -44,6 +43,35 @@ const MARKET_STATUS_LABEL: Record<string, string> = {
   closed: "Cerrado",
   settled: "Liquidado",
 };
+
+/** Mirrors the backend's `app.services.betting_service._entity_key` exactly: a user can hold
+ * one OPEN prediction per entity within a market (one per debate/slot/team), not one per
+ * market. Used to match the currently-configured payload against the user's existing
+ * predictions on this market, e.g. "did I already bet on THIS debate / THIS position". */
+function entityKeyForPayload(
+  betType: BetType,
+  payload: Record<string, unknown> | null | undefined
+): string | null {
+  if (!payload) return null;
+  switch (betType) {
+    case "round_winner":
+    case "round_full_call":
+      return payload.debate_id != null ? `debate:${payload.debate_id}` : null;
+    case "top_speaker_position":
+      return payload.position != null ? `position:${payload.position}` : null;
+    case "team_break":
+      return payload.team_id != null ? `team:${payload.team_id}` : null;
+    case "head_to_head": {
+      const a = payload.team_a_id as number | undefined;
+      const b = payload.team_b_id as number | undefined;
+      if (a == null || b == null) return null;
+      const [x, y] = [Number(a), Number(b)].sort((m, n) => m - n);
+      return `pair:${x}:${y}`;
+    }
+    default:
+      return "__market__";
+  }
+}
 
 /* ------------------------------------------------------------------------------------ */
 /* Board en vivo: pool, apostadores, cuotas y pagos por opción                           */
@@ -123,7 +151,13 @@ interface PickerProps {
   teams: Team[];
   speakers: Speaker[];
   institutions: Institution[];
+  /** The single existing prediction's payload, for single-entity bet types where a user can
+   * only ever hold one (champion, best_institution, head_to_head, ...). */
   existingPayload: Record<string, unknown> | undefined;
+  /** Every OPEN-or-settled prediction this user holds on this market -- for multi-entity bet
+   * types (round_winner, round_full_call, top_speaker_position, team_break) where a user can
+   * hold one per debate/slot/team, so a picker can mark "ya apostado" per entity. */
+  myPredictions: Prediction[];
   onPayloadChange: (payload: Record<string, unknown> | null) => void;
 }
 
@@ -378,15 +412,30 @@ function useRoundDebates(tournamentId: string, market: BetMarket) {
   return { round, debates: debates ?? [] };
 }
 
-function RoundWinnerPick({ tournamentId, market, existingPayload, onPayloadChange }: PickerProps) {
-  const [debateId, setDebateId] = useState<string | null>(
-    existingPayload?.debate_id ? String(existingPayload.debate_id) : null
-  );
-  const [teamId, setTeamId] = useState<number | null>(
-    typeof existingPayload?.team_id === "number" ? existingPayload.team_id : null
-  );
+/** For multi-entity bet types, look up whether the user already has an OPEN/settled
+ * prediction matching a given entity_key -- used to show "ya apostado $X" hints and, for
+ * top_speaker_position, to actually lock an already-assigned slot. */
+function findByEntityKey(
+  myPredictions: Prediction[],
+  betType: BetType,
+  key: string
+): Prediction | undefined {
+  return myPredictions.find((p) => entityKeyForPayload(betType, p.payload) === key);
+}
+
+function RoundWinnerPick({
+  tournamentId,
+  market,
+  myPredictions,
+  onPayloadChange,
+}: PickerProps) {
+  const [debateId, setDebateId] = useState<string | null>(null);
+  const [teamId, setTeamId] = useState<number | null>(null);
   const { round, debates } = useRoundDebates(tournamentId, market);
   const selectedDebate = debates.find((d) => String(d.id) === debateId);
+  const existingForDebate = debateId
+    ? findByEntityKey(myPredictions, "round_winner", `debate:${debateId}`)
+    : undefined;
 
   if (!market.target_round_id) {
     return <p className="text-xs text-muted-foreground">Este mercado no tiene ronda asignada.</p>;
@@ -395,22 +444,36 @@ function RoundWinnerPick({ tournamentId, market, existingPayload, onPayloadChang
   return (
     <div className="flex flex-col gap-3">
       <p className="text-xs text-muted-foreground">
-        Elegí el debate de <span className="font-medium text-foreground">{round?.name ?? "esta ronda"}</span>.
+        Elegí el debate de <span className="font-medium text-foreground">{round?.name ?? "esta ronda"}</span> —
+        podés apostar en varias salas de esta ronda, una apuesta por sala.
       </p>
       <OptionPicker
-        options={debates.map((d) => ({
-          value: String(d.id),
-          label: d.room?.name ? `Sala ${d.room.name}` : `Debate #${d.id}`,
-          hint: d.teams.map((t) => t.team.name).join(" · "),
-        }))}
+        options={debates.map((d) => {
+          const existing = findByEntityKey(myPredictions, "round_winner", `debate:${d.id}`);
+          return {
+            value: String(d.id),
+            label: d.room?.name ? `Sala ${d.room.name}` : `Debate #${d.id}`,
+            hint:
+              d.teams.map((t) => t.team.name).join(" · ") +
+              (existing ? ` · ya apostaste $${existing.stake_amount}` : ""),
+          };
+        })}
         value={debateId}
         onChange={(v) => {
           setDebateId(v);
+          setTeamId(null);
           onPayloadChange(null);
         }}
         placeholder="Buscar sala o equipo…"
         maxHeight="max-h-40"
       />
+
+      {existingForDebate && (
+        <p className="text-xs text-muted-foreground">
+          Ya tenés ${existingForDebate.stake_amount} apostados en esta sala — elegir de nuevo
+          reemplaza esa apuesta.
+        </p>
+      )}
 
       {selectedDebate && (
         <div className="flex flex-wrap items-center gap-2">
@@ -442,35 +505,37 @@ function RoundWinnerPick({ tournamentId, market, existingPayload, onPayloadChang
 function RoundFullCallPick({
   tournamentId,
   market,
-  existingPayload,
+  myPredictions,
   onPayloadChange,
 }: PickerProps) {
-  const existingDebateId = existingPayload?.debate_id ? String(existingPayload.debate_id) : null;
-  const [debateId, setDebateId] = useState<string | null>(existingDebateId);
+  const [debateId, setDebateId] = useState<string | null>(null);
   const { round, debates } = useRoundDebates(tournamentId, market);
   const selectedDebate = debates.find((d) => String(d.id) === debateId);
+  const existingForDebate = debateId
+    ? findByEntityKey(myPredictions, "round_full_call", `debate:${debateId}`)
+    : undefined;
 
   if (!market.target_round_id) {
     return <p className="text-xs text-muted-foreground">Este mercado no tiene ronda asignada.</p>;
   }
 
-  const existingIds =
-    existingPayload?.debate_id === Number(debateId) && Array.isArray(existingPayload?.team_ids)
-      ? (existingPayload.team_ids as number[]).map(String)
-      : [];
-
   return (
     <div className="flex flex-col gap-3">
       <p className="text-xs text-muted-foreground">
         Elegí el debate de <span className="font-medium text-foreground">{round?.name ?? "esta ronda"}</span>{" "}
-        y ordená los 4 equipos de 1º a 4º.
+        y ordená los 4 equipos de 1º a 4º — podés apostar en varias salas, una apuesta por sala.
       </p>
       <OptionPicker
-        options={debates.map((d) => ({
-          value: String(d.id),
-          label: d.room?.name ? `Sala ${d.room.name}` : `Debate #${d.id}`,
-          hint: d.teams.map((t) => t.team.name).join(" · "),
-        }))}
+        options={debates.map((d) => {
+          const existing = findByEntityKey(myPredictions, "round_full_call", `debate:${d.id}`);
+          return {
+            value: String(d.id),
+            label: d.room?.name ? `Sala ${d.room.name}` : `Debate #${d.id}`,
+            hint:
+              d.teams.map((t) => t.team.name).join(" · ") +
+              (existing ? ` · ya apostaste $${existing.stake_amount}` : ""),
+          };
+        })}
         value={debateId}
         onChange={(v) => {
           setDebateId(v);
@@ -480,6 +545,13 @@ function RoundFullCallPick({
         maxHeight="max-h-40"
       />
 
+      {existingForDebate && (
+        <p className="text-xs text-muted-foreground">
+          Ya tenés ${existingForDebate.stake_amount} apostados en esta sala — elegir de nuevo
+          reemplaza esa apuesta.
+        </p>
+      )}
+
       {selectedDebate && (
         <OrderedPick
           key={debateId}
@@ -488,7 +560,7 @@ function RoundFullCallPick({
             label: dt.team.name,
             emoji: dt.team.emoji,
           }))}
-          existingIds={existingIds}
+          existingIds={[]}
           itemLabel="equipo"
           labels={FULL_CALL_RANK_LABELS}
           onChange={(ids) =>
@@ -500,12 +572,15 @@ function RoundFullCallPick({
   );
 }
 
-function SpeakerPositionPick({ speakers, existingPayload, onPayloadChange }: PickerProps) {
-  const [speakerId, setSpeakerId] = useState<string | null>(
-    existingPayload?.speaker_id ? String(existingPayload.speaker_id) : null
-  );
-  const [position, setPosition] = useState<number | null>(
-    typeof existingPayload?.position === "number" ? existingPayload.position : null
+function SpeakerPositionPick({ speakers, myPredictions, onPayloadChange }: PickerProps) {
+  const [speakerId, setSpeakerId] = useState<string | null>(null);
+  const [position, setPosition] = useState<number | null>(null);
+
+  const usedByPosition = new Map(
+    [1, 2, 3].map((p) => [
+      p,
+      findByEntityKey(myPredictions, "top_speaker_position", `position:${p}`),
+    ])
   );
 
   function emit(nextSpeakerId: string | null, nextPosition: number | null) {
@@ -529,32 +604,42 @@ function SpeakerPositionPick({ speakers, existingPayload, onPayloadChange }: Pic
         columns={2}
       />
       {speakerId && (
-        <div className="flex items-center gap-2">
-          <span className="text-xs text-muted-foreground">¿En qué puesto del top 3 termina?</span>
-          {[1, 2, 3].map((p) => (
-            <Button
-              key={p}
-              type="button"
-              size="sm"
-              variant={position === p ? "default" : "outline"}
-              onClick={() => {
-                setPosition(p);
-                emit(speakerId, p);
-              }}
-            >
-              {p}º
-            </Button>
-          ))}
+        <div className="flex flex-col gap-1.5">
+          <span className="text-xs text-muted-foreground">
+            ¿En qué puesto del top 3 termina? Cada puesto se asigna una sola vez.
+          </span>
+          <div className="flex flex-wrap items-center gap-2">
+            {[1, 2, 3].map((p) => {
+              const usedBy = usedByPosition.get(p);
+              const usedByName = speakers.find(
+                (s) => s.id === (usedBy?.payload.speaker_id as number | undefined)
+              )?.name;
+              return (
+                <Button
+                  key={p}
+                  type="button"
+                  size="sm"
+                  disabled={!!usedBy}
+                  variant={position === p ? "default" : "outline"}
+                  onClick={() => {
+                    setPosition(p);
+                    emit(speakerId, p);
+                  }}
+                  title={usedBy ? `Ya asignaste ${usedByName ?? "un orador"} a ${p}º` : undefined}
+                >
+                  {p}º{usedBy ? ` — ${usedByName ?? "asignado"}` : ""}
+                </Button>
+              );
+            })}
+          </div>
         </div>
       )}
     </div>
   );
 }
 
-function TeamBreakPick({ tournamentId, market, existingPayload, onPayloadChange }: PickerProps) {
-  const [teamId, setTeamId] = useState<string | null>(
-    existingPayload?.team_id ? String(existingPayload.team_id) : null
-  );
+function TeamBreakPick({ tournamentId, market, myPredictions, onPayloadChange }: PickerProps) {
+  const [teamId, setTeamId] = useState<string | null>(null);
   const categoryId = market.target_break_category_id;
   const { data: predictions } = useQuery({
     queryKey: queryKeys.breakPredictions(tournamentId, categoryId ?? "none"),
@@ -571,25 +656,42 @@ function TeamBreakPick({ tournamentId, market, existingPayload, onPayloadChange 
     );
   }
 
-  const options = (predictions ?? []).map((p) => ({
-    value: String(p.team.id),
-    label: p.team.name,
-    emoji: p.team.emoji,
-    hint: `${Math.round(p.probability * 100)}% de romper ahora mismo`,
-  }));
+  const existingForTeam = teamId
+    ? findByEntityKey(myPredictions, "team_break", `team:${teamId}`)
+    : undefined;
+
+  const options = (predictions ?? []).map((p) => {
+    const existing = findByEntityKey(myPredictions, "team_break", `team:${p.team.id}`);
+    return {
+      value: String(p.team.id),
+      label: p.team.name,
+      emoji: p.team.emoji,
+      hint:
+        `${Math.round(p.probability * 100)}% de romper ahora mismo` +
+        (existing ? ` · ya apostaste $${existing.stake_amount}` : ""),
+    };
+  });
 
   return (
-    <OptionPicker
-      options={options}
-      value={teamId}
-      onChange={(v) => {
-        setTeamId(v);
-        onPayloadChange({ team_id: Number(v) });
-      }}
-      placeholder="Buscar equipo…"
-      emptyLabel="Sin equipos registrados en esta categoría todavía"
-      columns={2}
-    />
+    <div className="flex flex-col gap-2">
+      <OptionPicker
+        options={options}
+        value={teamId}
+        onChange={(v) => {
+          setTeamId(v);
+          onPayloadChange(v ? { team_id: Number(v) } : null);
+        }}
+        placeholder="Buscar equipo…"
+        emptyLabel="Sin equipos registrados en esta categoría todavía"
+        columns={2}
+      />
+      {existingForTeam && (
+        <p className="text-xs text-muted-foreground">
+          Ya tenés ${existingForTeam.stake_amount} apostados a este equipo — apostar de nuevo
+          reemplaza esa apuesta.
+        </p>
+      )}
+    </div>
   );
 }
 
@@ -724,9 +826,9 @@ export function MarketCard({
   const [expanded, setExpanded] = useState(defaultExpanded);
   const [payload, setPayload] = useState<Record<string, unknown> | null>(null);
 
-  const { data: myPrediction } = useQuery({
+  const { data: myPredictions = [] } = useQuery({
     queryKey: queryKeys.myPrediction(market.id),
-    queryFn: () => api.betMarkets.myPrediction(market.id),
+    queryFn: () => api.betMarkets.myPredictions(market.id),
     enabled: isAuthenticated,
     staleTime: 10_000,
   });
@@ -754,6 +856,19 @@ export function MarketCard({
   const isPastClose = closesAt.getTime() < now;
   const isOpen = market.status === "open" && !isPastClose;
 
+  // Single-entity bet types (champion, best_institution, ...) still only ever hold one
+  // prediction, so pickers for those pre-fill from it directly.
+  const singleExistingPayload = myPredictions[0]?.payload;
+  // The prediction matching whatever entity the user is CURRENTLY configuring (a specific
+  // debate/position/team), so the stake slip shows "ya tenés X acá" for THAT entity, not just
+  // whichever prediction happens to be first.
+  const currentEntityKey = payload ? entityKeyForPayload(market.bet_type, payload) : null;
+  const existingForCurrentSelection = currentEntityKey
+    ? myPredictions.find(
+        (p) => entityKeyForPayload(market.bet_type, p.payload) === currentEntityKey
+      )
+    : undefined;
+
   const pickerProps = useMemo(
     () => ({
       tournamentId,
@@ -761,10 +876,11 @@ export function MarketCard({
       teams,
       speakers,
       institutions,
-      existingPayload: myPrediction?.payload,
+      existingPayload: singleExistingPayload,
+      myPredictions,
       onPayloadChange: setPayload,
     }),
-    [tournamentId, market, teams, speakers, institutions, myPrediction?.payload]
+    [tournamentId, market, teams, speakers, institutions, singleExistingPayload, myPredictions]
   );
 
   let picker: React.ReactNode = null;
@@ -819,10 +935,11 @@ export function MarketCard({
           </p>
         </div>
         <div className="flex shrink-0 items-center gap-2">
-          <span className="hidden text-xs text-muted-foreground sm:block">
-            {isPastClose ? "cerró" : "cierra"}{" "}
-            {formatDistanceToNow(closesAt, { addSuffix: true, locale: es })}
-          </span>
+          <CountdownBadge
+            target={market.closes_at}
+            prefix="cierra"
+            className="hidden text-xs sm:block"
+          />
           <Badge
             variant="outline"
             className={cn(
@@ -846,28 +963,38 @@ export function MarketCard({
         <div className="flex flex-col gap-4 border-t border-border/60 p-4">
           <MarketBoardTable marketId={market.id} />
 
-          {myPrediction && (
-            <p className="text-xs text-muted-foreground">
-              Tu jugada: ${myPrediction.stake_amount.toLocaleString("es")} a cuota{" "}
-              {myPrediction.odds}x
-              {myPrediction.points_awarded !== null &&
-                (myPrediction.points_awarded > 0 ? (
-                  <span className="ml-1 font-medium text-primary">
-                    → cobraste ${myPrediction.points_awarded.toLocaleString("es")}
-                  </span>
-                ) : (
-                  <span className="ml-1 font-medium text-destructive">→ perdida</span>
-                ))}
-            </p>
+          {myPredictions.length > 0 && (
+            <div className="flex flex-col gap-1 rounded-lg bg-muted/30 p-2.5">
+              <span className="text-[0.7rem] font-medium uppercase tracking-wider text-muted-foreground">
+                {myPredictions.length > 1 ? "Tus jugadas en este mercado" : "Tu jugada"}
+              </span>
+              {myPredictions.map((p) => (
+                <p key={p.id} className="text-xs text-muted-foreground">
+                  ${p.stake_amount.toLocaleString("es")} a cuota {p.odds}x
+                  {p.points_awarded !== null &&
+                    (p.points_awarded > 0 ? (
+                      <span className="ml-1 font-medium text-primary">
+                        → cobraste ${p.points_awarded.toLocaleString("es")}
+                      </span>
+                    ) : (
+                      <span className="ml-1 font-medium text-destructive">→ perdida</span>
+                    ))}
+                </p>
+              ))}
+            </div>
           )}
 
           {isOpen && isAuthenticated && (
             <>
               {picker}
               <StakeSlip
+                // Remounts (resetting the stake input) whenever the selected entity changes,
+                // e.g. switching from a debate that already has a bet to one that doesn't --
+                // otherwise the input would keep showing the PREVIOUS entity's stake.
+                key={currentEntityKey ?? "none"}
                 marketId={market.id}
                 payload={payload}
-                existing={myPrediction ?? null}
+                existing={existingForCurrentSelection ?? null}
                 isSaving={mutation.isPending}
                 onSubmit={(stakeAmount) => mutation.mutate(stakeAmount)}
               />

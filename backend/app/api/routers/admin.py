@@ -5,14 +5,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import require_admin
 from app.api.schemas.admin import (
     AdminUserUpdate,
+    HouseFinanceOut,
     ManualEliminationResultIn,
+    MarketExposureOut,
     PendingEliminationDebateOut,
     PendingEliminationTeamOut,
     ScrapeLogOut,
 )
 from app.api.schemas.auth import UserOut
 from app.db.session import get_db
-from app.models import ScrapeLog, User
+from app.models import BetMarket, ScrapeLog, User
+from app.models.enums import BetMarketStatus
+from app.services.house_finance_service import compute_house_summary, compute_market_exposure
 from app.services.manual_results_service import (
     ManualResultError,
     apply_manual_advancing_teams,
@@ -77,6 +81,46 @@ async def list_pending_elimination_results(
         )
         for item in pending
     ]
+
+
+@router.get("/house-finance", response_model=HouseFinanceOut)
+async def get_house_finance(
+    tournament_id: int | None = None, session: AsyncSession = Depends(get_db)
+) -> HouseFinanceOut:
+    """Derived house accounting (no literal fund is held anywhere -- see
+    app.services.house_finance_service's module docstring): money in vs. out, realized
+    profit/loss, and a per-market exposure projection over currently-OPEN predictions."""
+    summary = await compute_house_summary(session, tournament_id)
+
+    stmt = select(BetMarket).where(BetMarket.status == BetMarketStatus.OPEN)
+    if tournament_id is not None:
+        stmt = stmt.where(BetMarket.tournament_id == tournament_id)
+    open_markets = (await session.execute(stmt)).scalars().all()
+
+    exposures = []
+    for market in open_markets:
+        exposure = await compute_market_exposure(session, market)
+        if exposure is not None:
+            exposures.append(exposure)
+
+    return HouseFinanceOut(
+        total_staked_open=summary.total_staked_open,
+        total_staked_settled=summary.total_staked_settled,
+        total_paid_out=summary.total_paid_out,
+        realized_net_profit=summary.realized_net_profit,
+        exposure=[
+            MarketExposureOut(
+                market_id=e.market_id,
+                market_label=e.market_label,
+                pool_total=e.pool_total,
+                worst_case=e.worst_case,
+                best_case=e.best_case,
+            )
+            for e in exposures
+        ],
+        exposure_worst_case_total=sum(e.worst_case for e in exposures),
+        exposure_best_case_total=sum(e.best_case for e in exposures),
+    )
 
 
 @router.post("/debates/{debate_id}/manual-result")

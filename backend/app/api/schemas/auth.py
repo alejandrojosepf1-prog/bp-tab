@@ -29,6 +29,11 @@ class MyPredictionOut(BaseModel):
     market_status: str
     tournament_id: int
     tournament_name: str
+    # Human-readable description of what was picked, e.g. "Marce Gómez — 2º" or
+    # "Ceviche de Falacias → Mystical Poke → ..." -- see
+    # app.services.odds_service.format_payload_label. Replaces rendering raw payload fields
+    # (which used to show as a bare "@" odds suffix with no selection context).
+    selection_label: str
     status: str
     stake_amount: float
     odds: float

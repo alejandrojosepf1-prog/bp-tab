@@ -298,12 +298,35 @@ export interface MyPrediction {
   market_status: string;
   tournament_id: number;
   tournament_name: string;
+  // Human-readable description of the pick, e.g. "Marce Gómez — 2º" or team/champion name --
+  // replaces rendering raw payload fields.
+  selection_label: string;
   status: string;
   stake_amount: number;
   odds: number;
   potential_payout: number;
   points_awarded: number | null;
   created_at: string;
+}
+
+// ---------- Admin: Finanzas de la Casa ----------
+
+export interface MarketExposure {
+  market_id: number;
+  market_label: string;
+  pool_total: number;
+  worst_case: number;
+  best_case: number;
+}
+
+export interface HouseFinance {
+  total_staked_open: number;
+  total_staked_settled: number;
+  total_paid_out: number;
+  realized_net_profit: number;
+  exposure: MarketExposure[];
+  exposure_worst_case_total: number;
+  exposure_best_case_total: number;
 }
 
 // ---------- Leaderboard ----------

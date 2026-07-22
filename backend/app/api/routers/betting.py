@@ -219,18 +219,21 @@ async def quote_bet_market_odds(
     return OddsQuoteOut(odds=odds)
 
 
-@router.get("/bet-markets/{market_id}/predictions/me", response_model=PredictionOut | None)
-async def get_my_prediction(
+@router.get("/bet-markets/{market_id}/predictions/me", response_model=list[PredictionOut])
+async def get_my_predictions(
     market_id: int,
     session: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
-) -> PredictionOut | None:
+) -> list[PredictionOut]:
+    """Every OPEN-or-settled prediction this user holds on this market -- a list, not a single
+    row, since a user can hold one per entity_key (one per debate/slot/team) rather than one
+    per market as a whole. Empty list if they haven't bet on this market at all."""
     await _get_market_or_404(session, market_id)
     stmt = select(Prediction).where(
         Prediction.bet_market_id == market_id, Prediction.user_id == current_user.id
     )
-    prediction = (await session.execute(stmt)).scalar_one_or_none()
-    return _to_prediction_out(prediction) if prediction else None
+    predictions = (await session.execute(stmt)).scalars().all()
+    return [_to_prediction_out(p) for p in predictions]
 
 
 @router.post(

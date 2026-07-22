@@ -173,6 +173,7 @@ async def test_scrape_tournament_async_settles_a_champion_market_once_resolvable
             Prediction(
                 bet_market_id=market.id,
                 user_id=user.id,
+                entity_key="__market__",
                 payload={"team_id": pucp_fm.id},
                 locked_at=datetime.now(timezone.utc),
                 stake_amount=10.0,

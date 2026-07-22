@@ -117,12 +117,14 @@ async def test_full_champion_market_lifecycle_settles_and_updates_leaderboard(
     )
     assert bob_prediction.status_code == 201
 
-    # /predictions/me reflects what each user just submitted.
+    # /predictions/me returns a list now (a user can hold one OPEN prediction per entity within
+    # a market, not just one per market) -- reflects what each user just submitted.
     me_response = await client.get(
         f"/api/v1/bet-markets/{market_id}/predictions/me", headers=auth_headers(alice)
     )
     assert me_response.status_code == 200
-    assert me_response.json()["payload"] == {"team_id": team.id}
+    assert len(me_response.json()) == 1
+    assert me_response.json()[0]["payload"] == {"team_id": team.id}
 
     # Re-submitting updates the same row rather than creating a second one (unique constraint).
     alice_resubmit = await client.post(
@@ -155,14 +157,14 @@ async def test_full_champion_market_lifecycle_settles_and_updates_leaderboard(
     alice_after = await client.get(
         f"/api/v1/bet-markets/{market_id}/predictions/me", headers=auth_headers(alice)
     )
-    assert alice_after.json()["status"] == "settled"
-    assert alice_after.json()["odds"] == 2.34
-    assert alice_after.json()["points_awarded"] == 234.0
+    assert alice_after.json()[0]["status"] == "settled"
+    assert alice_after.json()[0]["odds"] == 2.34
+    assert alice_after.json()[0]["points_awarded"] == 234.0
 
     bob_after = await client.get(
         f"/api/v1/bet-markets/{market_id}/predictions/me", headers=auth_headers(bob)
     )
-    assert bob_after.json()["points_awarded"] == 0.0
+    assert bob_after.json()[0]["points_awarded"] == 0.0
 
     leaderboard_response = await client.get(f"/api/v1/tournaments/{tournament.id}/leaderboard")
     assert leaderboard_response.status_code == 200

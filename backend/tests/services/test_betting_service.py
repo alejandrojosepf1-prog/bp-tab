@@ -31,12 +31,31 @@ from app.models.enums import (
 )
 from app.services.betting_service import (
     MarketCreationError,
+    _entity_key,
     auto_close_pretournament_markets,
     settle_market,
     validate_market_creation,
 )
 
 NOW = datetime.datetime(2026, 1, 1, tzinfo=datetime.timezone.utc)
+
+
+def _prediction(
+    bet_type: BetType, *, market_id: int, user_id: int, payload: dict, **kwargs
+) -> Prediction:
+    """Builds a Prediction the way place_prediction would -- entity_key computed the same way
+    -- for tests that construct rows directly (bypassing the service) to exercise settlement in
+    isolation."""
+    kwargs.setdefault("locked_at", NOW)
+    kwargs.setdefault("stake_amount", 10.0)
+    kwargs.setdefault("odds", 2.0)
+    return Prediction(
+        bet_market_id=market_id,
+        user_id=user_id,
+        entity_key=_entity_key(bet_type, payload),
+        payload=payload,
+        **kwargs,
+    )
 
 
 async def _make_tournament(db_session, **kwargs) -> Tournament:
@@ -90,21 +109,21 @@ async def test_settle_market_champion_scores_and_updates_leaderboard(db_session)
     bob = await _make_user(db_session, "bob@example.com")
 
     db_session.add(
-        Prediction(
-            bet_market_id=market.id,
+        _prediction(
+            BetType.CHAMPION,
+            market_id=market.id,
             user_id=alice.id,
             payload={"team_id": team.id},
-            locked_at=NOW,
             stake_amount=100.0,
             odds=2.0,
         )
     )
     db_session.add(
-        Prediction(
-            bet_market_id=market.id,
+        _prediction(
+            BetType.CHAMPION,
+            market_id=market.id,
             user_id=bob.id,
             payload={"team_id": 999},
-            locked_at=NOW,
             stake_amount=50.0,
             odds=3.0,
         )
@@ -184,12 +203,11 @@ async def test_settle_market_top_n_break(db_session) -> None:
     )
     alice = await _make_user(db_session, "alice@example.com")
     db_session.add(
-        Prediction(
-            bet_market_id=market.id,
+        _prediction(
+            BetType.TOP_N_BREAK,
+            market_id=market.id,
             user_id=alice.id,
             payload={"team_ids": [team_1.id, team_2.id]},
-            locked_at=NOW,
-            stake_amount=10.0,
             odds=5.0,
         )
     )
@@ -243,16 +261,15 @@ async def test_settle_market_head_to_head_is_per_prediction(db_session) -> None:
     market = await _make_market(db_session, tournament, BetType.HEAD_TO_HEAD)
     alice = await _make_user(db_session, "alice@example.com")
     db_session.add(
-        Prediction(
-            bet_market_id=market.id,
+        _prediction(
+            BetType.HEAD_TO_HEAD,
+            market_id=market.id,
             user_id=alice.id,
             payload={
                 "team_a_id": team_a.id,
                 "team_b_id": team_b.id,
                 "predicted_winner_id": team_a.id,
             },
-            locked_at=NOW,
-            stake_amount=10.0,
             odds=4.0,
         )
     )
@@ -274,12 +291,11 @@ async def test_settle_market_breakout_team_requires_manual_outcome(db_session) -
     market = await _make_market(db_session, tournament, BetType.BREAKOUT_TEAM)
     alice = await _make_user(db_session, "alice@example.com")
     db_session.add(
-        Prediction(
-            bet_market_id=market.id,
+        _prediction(
+            BetType.BREAKOUT_TEAM,
+            market_id=market.id,
             user_id=alice.id,
             payload={"team_id": team.id},
-            locked_at=NOW,
-            stake_amount=10.0,
             odds=4.0,
         )
     )
@@ -340,22 +356,20 @@ async def test_settle_market_round_full_call_exact_order_wins(db_session) -> Non
     exact_order = [teams[2].id, teams[0].id, teams[3].id, teams[1].id]
     wrong_order = [teams[0].id, teams[2].id, teams[3].id, teams[1].id]
     db_session.add(
-        Prediction(
-            bet_market_id=market.id,
+        _prediction(
+            BetType.ROUND_FULL_CALL,
+            market_id=market.id,
             user_id=alice.id,
             payload={"debate_id": debate.id, "team_ids": exact_order},
-            locked_at=NOW,
-            stake_amount=10.0,
             odds=8.0,
         )
     )
     db_session.add(
-        Prediction(
-            bet_market_id=market.id,
+        _prediction(
+            BetType.ROUND_FULL_CALL,
+            market_id=market.id,
             user_id=bob.id,
             payload={"debate_id": debate.id, "team_ids": wrong_order},
-            locked_at=NOW,
-            stake_amount=10.0,
             odds=8.0,
         )
     )
@@ -423,23 +437,21 @@ async def test_settle_market_top_speaker_position(db_session) -> None:
     alice = await _make_user(db_session, "alice@example.com")
     bob = await _make_user(db_session, "bob@example.com")
     db_session.add(
-        Prediction(
-            bet_market_id=market.id,
+        _prediction(
+            BetType.TOP_SPEAKER_POSITION,
+            market_id=market.id,
             user_id=alice.id,
             payload={"speaker_id": speakers[1].id, "position": 2},
-            locked_at=NOW,
-            stake_amount=10.0,
             odds=6.0,
         )
     )
     db_session.add(
-        Prediction(
-            bet_market_id=market.id,
+        _prediction(
+            BetType.TOP_SPEAKER_POSITION,
+            market_id=market.id,
             user_id=bob.id,
             # Right speaker, wrong slot -- speaker 2 actually finishes 2nd, not 1st.
             payload={"speaker_id": speakers[1].id, "position": 1},
-            locked_at=NOW,
-            stake_amount=10.0,
             odds=6.0,
         )
     )
@@ -486,23 +498,19 @@ async def test_settle_market_team_break_is_membership_not_exact_order(db_session
     alice = await _make_user(db_session, "alice@example.com")
     bob = await _make_user(db_session, "bob@example.com")
     db_session.add(
-        Prediction(
-            bet_market_id=market.id,
+        _prediction(
+            BetType.TEAM_BREAK,
+            market_id=market.id,
             user_id=alice.id,
             payload={"team_id": team_1.id},
-            locked_at=NOW,
-            stake_amount=10.0,
-            odds=2.0,
         )
     )
     db_session.add(
-        Prediction(
-            bet_market_id=market.id,
+        _prediction(
+            BetType.TEAM_BREAK,
+            market_id=market.id,
             user_id=bob.id,
             payload={"team_id": team_3.id},  # never breaks
-            locked_at=NOW,
-            stake_amount=10.0,
-            odds=2.0,
         )
     )
     await db_session.commit()
@@ -603,3 +611,170 @@ async def test_auto_close_pretournament_markets_closes_open_champion_once_starte
 
     # Idempotent: nothing left open to close on a second call.
     assert await auto_close_pretournament_markets(db_session, tournament) == 0
+
+
+# --- place_prediction: one open bet per entity, not per market ---------------------------
+
+
+async def _make_round_with_two_debates(db_session, tournament):
+    round_1 = Round(
+        tournament_id=tournament.id, seq=1, name="Round 1", stage=RoundStage.PRELIMINARY,
+        status=RoundStatus.RELEASED,
+    )
+    db_session.add(round_1)
+    await db_session.flush()
+    teams = [
+        Team(tournament_id=tournament.id, external_id=i, name=f"Team {i}") for i in range(1, 5)
+    ]
+    db_session.add_all(teams)
+    await db_session.flush()
+    debate_a = Debate(tournament_id=tournament.id, round_id=round_1.id, external_id=1)
+    debate_b = Debate(tournament_id=tournament.id, round_id=round_1.id, external_id=2)
+    db_session.add_all([debate_a, debate_b])
+    await db_session.flush()
+    for debate, pair in ((debate_a, teams[:2]), (debate_b, teams[2:])):
+        for team, position in zip(
+            pair, (BPPosition.OPENING_GOVERNMENT, BPPosition.OPENING_OPPOSITION), strict=True
+        ):
+            db_session.add(DebateTeam(debate_id=debate.id, team_id=team.id, position=position))
+    await db_session.flush()
+    return round_1, debate_a, debate_b, teams
+
+
+async def test_place_prediction_allows_one_bet_per_debate_in_a_round_market(db_session) -> None:
+    from app.services.betting_service import place_prediction
+
+    tournament = await _make_tournament(db_session)
+    round_1, debate_a, debate_b, teams = await _make_round_with_two_debates(db_session, tournament)
+    market = await _make_market(
+        db_session, tournament, BetType.ROUND_WINNER, target_round_id=round_1.id
+    )
+    alice = await _make_user(db_session, "alice@example.com")
+    await db_session.commit()
+
+    await place_prediction(
+        db_session, market, alice, {"debate_id": debate_a.id, "team_id": teams[0].id}, 10.0
+    )
+    await db_session.commit()
+    await place_prediction(
+        db_session, market, alice, {"debate_id": debate_b.id, "team_id": teams[2].id}, 10.0
+    )
+    await db_session.commit()
+
+    predictions = (
+        (
+            await db_session.execute(
+                select(Prediction).where(
+                    Prediction.bet_market_id == market.id, Prediction.user_id == alice.id
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert len(predictions) == 2  # one sala bet per debate -- NOT collapsed into one
+    assert {p.entity_key for p in predictions} == {f"debate:{debate_a.id}", f"debate:{debate_b.id}"}
+
+
+async def test_place_prediction_same_debate_replaces_not_duplicates(db_session) -> None:
+    from app.services.betting_service import place_prediction
+
+    tournament = await _make_tournament(db_session)
+    round_1, debate_a, _debate_b, teams = await _make_round_with_two_debates(db_session, tournament)
+    market = await _make_market(
+        db_session, tournament, BetType.ROUND_WINNER, target_round_id=round_1.id
+    )
+    alice = await _make_user(db_session, "alice@example.com")
+    await db_session.commit()
+    balance_before = alice.balance
+
+    await place_prediction(
+        db_session, market, alice, {"debate_id": debate_a.id, "team_id": teams[0].id}, 10.0
+    )
+    await db_session.commit()
+    # Same debate, different pick and stake -- must REPLACE, not create a second row, and must
+    # refund the first stake before charging the new one (no double-charge).
+    await place_prediction(
+        db_session, market, alice, {"debate_id": debate_a.id, "team_id": teams[1].id}, 25.0
+    )
+    await db_session.commit()
+
+    predictions = (
+        (
+            await db_session.execute(
+                select(Prediction).where(
+                    Prediction.bet_market_id == market.id, Prediction.user_id == alice.id
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert len(predictions) == 1
+    assert predictions[0].payload == {"debate_id": debate_a.id, "team_id": teams[1].id}
+    assert predictions[0].stake_amount == 25.0
+    await db_session.refresh(alice)
+    assert alice.balance == balance_before - 25.0
+
+
+async def test_place_prediction_speaker_positions_are_independent_slots(db_session) -> None:
+    from app.services.betting_service import place_prediction
+
+    tournament = await _make_tournament(db_session)
+    team = Team(tournament_id=tournament.id, external_id=1, name="Team A")
+    db_session.add(team)
+    await db_session.flush()
+    speakers = [
+        Speaker(tournament_id=tournament.id, team_id=team.id, name=f"Speaker {i}")
+        for i in range(1, 3)
+    ]
+    db_session.add_all(speakers)
+    await db_session.flush()
+    market = await _make_market(db_session, tournament, BetType.TOP_SPEAKER_POSITION)
+    alice = await _make_user(db_session, "alice@example.com")
+    await db_session.commit()
+
+    # Position 1 -> speaker A, position 2 -> speaker B: two INDEPENDENT open predictions.
+    await place_prediction(
+        db_session, market, alice, {"speaker_id": speakers[0].id, "position": 1}, 5.0
+    )
+    await db_session.commit()
+    await place_prediction(
+        db_session, market, alice, {"speaker_id": speakers[1].id, "position": 2}, 5.0
+    )
+    await db_session.commit()
+
+    predictions = (
+        (
+            await db_session.execute(
+                select(Prediction).where(
+                    Prediction.bet_market_id == market.id, Prediction.user_id == alice.id
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert len(predictions) == 2
+    assert {p.entity_key for p in predictions} == {"position:1", "position:2"}
+
+    # Re-picking position 1 with a DIFFERENT speaker replaces that slot's bet, not a new row.
+    await place_prediction(
+        db_session, market, alice, {"speaker_id": speakers[1].id, "position": 1}, 8.0
+    )
+    await db_session.commit()
+    predictions_after = (
+        (
+            await db_session.execute(
+                select(Prediction).where(
+                    Prediction.bet_market_id == market.id, Prediction.user_id == alice.id
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert len(predictions_after) == 2
+    by_key = {p.entity_key: p for p in predictions_after}
+    assert by_key["position:1"].payload["speaker_id"] == speakers[1].id
+    assert by_key["position:1"].stake_amount == 8.0

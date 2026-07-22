@@ -107,6 +107,31 @@ async def auto_close_pretournament_markets(session: AsyncSession, tournament: To
     return len(markets)
 
 
+def _entity_key(bet_type: BetType, payload: dict) -> str:
+    """What a prediction competes against for uniqueness within (market, user) -- see
+    `Prediction.entity_key`'s docstring. Single-choice bet types (you pick exactly one
+    mutually-exclusive winner for the whole market) share one sentinel key, so a second bet
+    still replaces the first exactly like before this concept existed. Bet types whose payload
+    names a specific sub-entity (a debate, a top-3 slot, an independent team) get one key per
+    distinct value of that field, so a user can hold one open prediction PER debate/slot/team
+    instead of one per market.
+
+    Raises KeyError if the payload is missing the field this bet_type keys on -- callers
+    already validate payload shape via `quote_odds` before this runs, so that should never
+    happen in practice; this is deliberately not more defensive than that.
+    """
+    if bet_type in (BetType.ROUND_WINNER, BetType.ROUND_FULL_CALL):
+        return f"debate:{payload['debate_id']}"
+    if bet_type == BetType.TOP_SPEAKER_POSITION:
+        return f"position:{payload['position']}"
+    if bet_type == BetType.TEAM_BREAK:
+        return f"team:{payload['team_id']}"
+    if bet_type == BetType.HEAD_TO_HEAD:
+        a, b = sorted([payload["team_a_id"], payload["team_b_id"]])
+        return f"pair:{a}:{b}"
+    return "__market__"
+
+
 async def place_prediction(
     session: AsyncSession,
     bet_market: BetMarket,
@@ -117,20 +142,26 @@ async def place_prediction(
     """Prices `payload` via `odds_service.quote_odds`, charges `stake_amount` against
     `user.balance`, and upserts the Prediction row with odds locked in at this moment.
 
-    If the user already has an OPEN prediction on this market (they're changing their pick
-    before it closes), that prior stake is refunded first so editing a bet never double-charges
-    them. Raises InsufficientBalanceError if the balance (after any refund) can't cover the new
-    stake -- callers should not commit the session in that case.
+    A user can hold one OPEN prediction per (market, entity_key) -- see `_entity_key` -- so
+    betting on a different debate/slot/team within the same market creates a SEPARATE
+    prediction rather than overwriting the last one; only re-submitting the SAME entity_key
+    edits it. If the user already has an OPEN prediction for that entity_key (they're changing
+    their pick before it closes), that prior stake is refunded first so editing a bet never
+    double-charges them. Raises InsufficientBalanceError if the balance (after any refund)
+    can't cover the new stake -- callers should not commit the session in that case.
     """
     if stake_amount <= 0:
         raise ValueError("stake_amount must be positive")
 
     odds = await quote_odds(session, bet_market, payload, exclude_user_id=user.id)
+    entity_key = _entity_key(bet_market.bet_type, payload)
 
     existing = (
         await session.execute(
             select(Prediction).where(
-                Prediction.bet_market_id == bet_market.id, Prediction.user_id == user.id
+                Prediction.bet_market_id == bet_market.id,
+                Prediction.user_id == user.id,
+                Prediction.entity_key == entity_key,
             )
         )
     ).scalar_one_or_none()
@@ -147,7 +178,7 @@ async def place_prediction(
     result = await upsert_by_natural_key(
         session,
         Prediction,
-        lookup={"bet_market_id": bet_market.id, "user_id": user.id},
+        lookup={"bet_market_id": bet_market.id, "user_id": user.id, "entity_key": entity_key},
         values={
             "payload": payload,
             "locked_at": now,

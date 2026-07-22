@@ -566,6 +566,55 @@ class MarketBoard:
 
 _BOARD_MAX_UNSTAKED_OPTIONS = 12
 
+_POSITION_LABELS = {1: "1º", 2: "2º", 3: "3º"}
+
+
+def format_payload_label(
+    bet_type: BetType,
+    payload: dict,
+    *,
+    team_names: dict[int, tuple[str, str | None]],
+    speaker_names: dict[int, str],
+) -> tuple[str, str | None]:
+    """Human-readable (label, emoji) for a prediction's payload, given already-fetched
+    tournament-wide team/speaker name maps (no DB access here -- purely string formatting, so
+    it's cheap to call once per prediction). Shared by `market_board`'s per-payload option rows
+    and the user's bet-history endpoint (`GET /auth/me/predictions`, see
+    `app.api.routers.auth.my_predictions`), so the two surfaces never drift out of sync."""
+
+    def team(tid: object) -> tuple[str, str | None]:
+        return team_names.get(tid, (f"Equipo {tid}", None))  # type: ignore[arg-type]
+
+    if bet_type in (BetType.CHAMPION, BetType.BREAKOUT_TEAM):
+        return team(payload.get("team_id"))
+    if bet_type == BetType.TEAM_BREAK:
+        name, emoji = team(payload.get("team_id"))
+        return f"{name} rompe", emoji
+    if bet_type == BetType.BEST_INSTITUTION:
+        return payload.get("institution_code") or "—", None
+    if bet_type == BetType.HEAD_TO_HEAD:
+        winner, emoji = team(payload.get("predicted_winner_id"))
+        a, _ = team(payload.get("team_a_id"))
+        b, _ = team(payload.get("team_b_id"))
+        return f"{winner} gana ({a} vs. {b})", emoji
+    if bet_type == BetType.ROUND_WINNER:
+        name, emoji = team(payload.get("team_id"))
+        return f"{name} gana su debate", emoji
+    if bet_type in (BetType.TOP_N_BREAK, BetType.ROUND_FULL_CALL):
+        names = " → ".join(team(tid)[0] for tid in payload.get("team_ids", []))
+        return names or "—", None
+    if bet_type == BetType.TOP_N_SPEAKERS:
+        names = " → ".join(
+            speaker_names.get(sid, f"Speaker {sid}") for sid in payload.get("speaker_ids", [])
+        )
+        return names or "—", None
+    if bet_type == BetType.TOP_SPEAKER_POSITION:
+        speaker_id = payload.get("speaker_id")
+        name = speaker_names.get(speaker_id, f"Speaker {speaker_id}")
+        position_label = _POSITION_LABELS.get(payload.get("position"), "—")
+        return f"{name} — {position_label}", None
+    return "|".join(f"{k}={payload[k]}" for k in sorted(payload)) or "—", None
+
 
 async def market_board(session: AsyncSession, bet_market: BetMarket) -> MarketBoard:
     rows = (
@@ -711,46 +760,14 @@ async def market_board(session: AsyncSession, bet_market: BetMarket) -> MarketBo
         ).scalars()
     }
 
-    def _label(payload: dict) -> tuple[str, str | None]:
-        def team(tid):  # noqa: ANN001 - tiny local helper
-            name, emoji = team_names.get(tid, (f"Equipo {tid}", None))
-            return name, emoji
-
-        if bet_type == BetType.HEAD_TO_HEAD:
-            winner, emoji = team(payload.get("predicted_winner_id"))
-            a, _ = team(payload.get("team_a_id"))
-            b, _ = team(payload.get("team_b_id"))
-            return f"{winner} gana ({a} vs. {b})", emoji
-        if bet_type == BetType.ROUND_WINNER:
-            name, emoji = team(payload.get("team_id"))
-            return f"{name} gana su debate", emoji
-        if bet_type == BetType.BREAKOUT_TEAM:
-            name, emoji = team(payload.get("team_id"))
-            return name, emoji
-        if bet_type == BetType.TOP_N_BREAK:
-            names = " → ".join(team(tid)[0] for tid in payload.get("team_ids", []))
-            return names or "—", None
-        if bet_type == BetType.TOP_N_SPEAKERS:
-            names = " → ".join(
-                speaker_names.get(sid, f"Speaker {sid}") for sid in payload.get("speaker_ids", [])
-            )
-            return names or "—", None
-        if bet_type == BetType.ROUND_FULL_CALL:
-            names = " → ".join(team(tid)[0] for tid in payload.get("team_ids", []))
-            return names or "—", None
-        if bet_type == BetType.TOP_SPEAKER_POSITION:
-            speaker_id = payload.get("speaker_id")
-            name = speaker_names.get(speaker_id, f"Speaker {speaker_id}")
-            position_label = {1: "1º", 2: "2º", 3: "3º"}.get(payload.get("position"), "—")
-            return f"{name} — {position_label}", None
-        return _payload_key(payload), None
-
     for key, payload in payload_by_key.items():
         try:
             odds = await quote_odds(session, bet_market, payload)
         except (UnpriceableMarketError, KeyError, ValueError):
             continue
-        label, emoji = _label(payload)
+        label, emoji = format_payload_label(
+            bet_type, payload, team_names=team_names, speaker_names=speaker_names
+        )
         options.append(
             MarketBoardOption(
                 key=key,

@@ -10,6 +10,7 @@ const TITLES: Record<string, string> = {
   "/admin/results": "Resultados manuales",
   "/admin/users": "Usuarios",
   "/admin/scraping": "Scraping",
+  "/admin/finance": "Finanzas de la casa",
 };
 
 export default function AdminLayout({ children }: { children: React.ReactNode }) {
