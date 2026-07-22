@@ -20,7 +20,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.odds import (
     adaptive_temperature,
+    decimal_odds_from_probability,
     pari_mutuel_odds,
+    positional_probabilities,
     sequence_probability,
     softmax_probabilities,
 )
@@ -37,6 +39,7 @@ from app.models import (
     TeamBreakCategory,
 )
 from app.models.enums import BetType, PredictionStatus, RoundStage
+from app.services.break_service import team_break_probability
 from app.services.ranking_service import get_standings
 
 SPEAKER_POINTS_WEIGHT = 0.02  # total_speaker_points are ~10-30x team_points in magnitude
@@ -144,6 +147,70 @@ async def _debate_pool(
             continue
         total += stake
         if payload.get("team_id") == team_id:
+            candidate_stake += stake
+    return candidate_stake, total
+
+
+async def _require_debate_in_round(
+    session: AsyncSession, debate_id: int, target_round_id: int | None
+) -> None:
+    """Round-scoped markets (`round_winner`, `round_full_call`) are created against one specific
+    round via `target_round_id` -- this stops a payload from naming a debate out of a different
+    round entirely. Skipped for `target_round_id is None` so markets created before this field
+    was required (or before this constraint existed) keep working unmodified."""
+    if target_round_id is None:
+        return
+    round_id = (
+        await session.execute(select(Debate.round_id).where(Debate.id == debate_id))
+    ).scalar_one_or_none()
+    if round_id != target_round_id:
+        raise ValueError("ese debate no pertenece a la ronda de este mercado")
+
+
+async def _debate_sequence_pool(
+    session: AsyncSession,
+    market_id: int,
+    debate_id: int,
+    team_ids: list[int],
+    *,
+    exclude_user_id: int | None,
+) -> tuple[float, float]:
+    """Like `_debate_pool` (compartment = this one debate's money, since a `round_full_call`
+    market can span every debate in a round) combined with `_sequence_pool`'s exact-match
+    candidate rule (many different orderings can be guessed for the same debate)."""
+    target = tuple(team_ids)
+    candidate_stake = 0.0
+    total = 0.0
+    for payload, stake in await _open_stakes(session, market_id, exclude_user_id=exclude_user_id):
+        if payload.get("debate_id") != debate_id:
+            continue
+        ids = payload.get("team_ids")
+        if not ids:
+            continue
+        total += stake
+        if tuple(ids) == target:
+            candidate_stake += stake
+    return candidate_stake, total
+
+
+async def _speaker_position_pool(
+    session: AsyncSession,
+    market_id: int,
+    position: int,
+    speaker_id: int,
+    *,
+    exclude_user_id: int | None,
+) -> tuple[float, float]:
+    """Compartment = money staked on THIS position (position 1/2/3 are independent coin-flips,
+    not one shared 3-way pool -- see `top_speaker_position` in `quote_odds`), candidate = stakes
+    naming this exact speaker for it."""
+    candidate_stake = 0.0
+    total = 0.0
+    for payload, stake in await _open_stakes(session, market_id, exclude_user_id=exclude_user_id):
+        if payload.get("position") != position:
+            continue
+        total += stake
+        if payload.get("speaker_id") == speaker_id:
             candidate_stake += stake
     return candidate_stake, total
 
@@ -335,8 +402,9 @@ async def quote_odds(
         return pari_mutuel_odds(candidate_stake, pair_stake, prior)
 
     if bet_type == BetType.ROUND_WINNER:
-        power = await compute_team_power_ratings(session, bet_market.tournament_id)
         debate_id = payload["debate_id"]
+        await _require_debate_in_round(session, debate_id, bet_market.target_round_id)
+        power = await compute_team_power_ratings(session, bet_market.tournament_id)
         debate_team_ids = (
             (
                 await session.execute(
@@ -358,6 +426,72 @@ async def quote_odds(
             session, bet_market.id, debate_id, team_id, exclude_user_id=exclude_user_id
         )
         return pari_mutuel_odds(candidate_stake, debate_stake, prior)
+
+    if bet_type == BetType.ROUND_FULL_CALL:
+        debate_id = payload["debate_id"]
+        await _require_debate_in_round(session, debate_id, bet_market.target_round_id)
+        power = await compute_team_power_ratings(session, bet_market.tournament_id)
+        debate_team_ids = (
+            (
+                await session.execute(
+                    select(DebateTeam.team_id).where(DebateTeam.debate_id == debate_id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        debate_power = {t: power[t] for t in debate_team_ids if t in power}
+        if len(debate_power) < len(debate_team_ids) or len(debate_power) < 2:
+            raise UnpriceableMarketError("not enough priced teams in this debate yet")
+        team_ids = list(payload["team_ids"])
+        if set(team_ids) != set(debate_team_ids):
+            raise ValueError("team_ids must name exactly this debate's teams, each once")
+        # Same tournament-wide-spread reasoning as ROUND_WINNER; sequence_probability applies
+        # the Plackett-Luce "pick, remove, repeat" model across the debate's own 4 teams, giving
+        # the exact 1st-2nd-3rd-4th ordering's probability.
+        temperature = adaptive_temperature(power.values())
+        prior = sequence_probability(debate_power, team_ids, temperature=temperature)
+        candidate_stake, debate_stake = await _debate_sequence_pool(
+            session, bet_market.id, debate_id, team_ids, exclude_user_id=exclude_user_id
+        )
+        return pari_mutuel_odds(candidate_stake, debate_stake, prior)
+
+    if bet_type == BetType.TOP_SPEAKER_POSITION:
+        power = await compute_speaker_power_ratings(session, bet_market.tournament_id)
+        if not power:
+            raise UnpriceableMarketError("no speaker scores yet to price this market from")
+        speaker_id = payload["speaker_id"]
+        position = payload["position"]
+        if position not in (1, 2, 3):
+            raise ValueError("position must be 1, 2, or 3")
+        if speaker_id not in power:
+            raise KeyError(speaker_id)
+        temperature = adaptive_temperature(power.values())
+        probabilities = positional_probabilities(power, position, temperature=temperature)
+        prior = probabilities[speaker_id]
+        candidate_stake, compartment_stake = await _speaker_position_pool(
+            session, bet_market.id, position, speaker_id, exclude_user_id=exclude_user_id
+        )
+        return pari_mutuel_odds(candidate_stake, compartment_stake, prior)
+
+    if bet_type == BetType.TEAM_BREAK:
+        # Independent, non-mutually-exclusive proposition ("does THIS team break", where
+        # several teams break simultaneously) -- unlike every other bet type here, priced
+        # straight from that team's own break probability with NO pari-mutuel pool blending.
+        # Pool-blending assumes competing candidates' priors sum to 1 across a shared
+        # compartment (true for "who wins" markets); it would be actively wrong here, since
+        # heavy betting on one team breaking says nothing about any other team's chances.
+        if bet_market.target_break_category_id is None:
+            raise UnpriceableMarketError("this market has no break category configured")
+        probabilities = await team_break_probability(
+            session, bet_market.tournament_id, bet_market.target_break_category_id
+        )
+        if not probabilities:
+            raise UnpriceableMarketError("no teams registered in this break category yet")
+        team_id = payload["team_id"]
+        if team_id not in probabilities:
+            raise KeyError(team_id)
+        return decimal_odds_from_probability(probabilities[team_id])
 
     if bet_type == BetType.BEST_INSTITUTION:
         institution_power = await compute_institution_power_ratings(
@@ -517,6 +651,38 @@ async def market_board(session: AsyncSession, bet_market: BetMarket) -> MarketBo
             )
         return MarketBoard(pool_total=pool_total, bettors=bettors, options=options[:20])
 
+    if bet_type == BetType.TEAM_BREAK:
+        if bet_market.target_break_category_id is None:
+            return MarketBoard(pool_total=pool_total, bettors=bettors, options=[])
+        probabilities = await team_break_probability(
+            session, bet_market.tournament_id, bet_market.target_break_category_id
+        )
+        if not probabilities:
+            return MarketBoard(pool_total=pool_total, bettors=bettors, options=[])
+        stake_by, backers_by = _stakes_by(lambda p: p.get("team_id"))
+        teams = {
+            t.id: t
+            for t in (
+                await session.execute(select(Team).where(Team.id.in_(probabilities.keys())))
+            ).scalars()
+        }
+        for tid in sorted(probabilities, key=lambda t: -probabilities[t]):
+            team = teams.get(tid)
+            if team is None:
+                continue
+            options.append(
+                MarketBoardOption(
+                    key=f"team:{tid}",
+                    label=team.name,
+                    emoji=team.emoji,
+                    stake=round(stake_by.get(tid, 0.0), 2),
+                    backers=backers_by.get(tid, 0),
+                    # No pool blending here -- see the matching comment in quote_odds.
+                    odds=decimal_odds_from_probability(probabilities[tid]),
+                )
+            )
+        return MarketBoard(pool_total=pool_total, bettors=bettors, options=options)
+
     # Remaining bet types have no enumerable candidate field (their options are whatever
     # payload combinations people actually staked), so the board lists the staked picks and
     # prices each through the same quote path a new bet would use.
@@ -569,6 +735,14 @@ async def market_board(session: AsyncSession, bet_market: BetMarket) -> MarketBo
                 speaker_names.get(sid, f"Speaker {sid}") for sid in payload.get("speaker_ids", [])
             )
             return names or "—", None
+        if bet_type == BetType.ROUND_FULL_CALL:
+            names = " → ".join(team(tid)[0] for tid in payload.get("team_ids", []))
+            return names or "—", None
+        if bet_type == BetType.TOP_SPEAKER_POSITION:
+            speaker_id = payload.get("speaker_id")
+            name = speaker_names.get(speaker_id, f"Speaker {speaker_id}")
+            position_label = {1: "1º", 2: "2º", 3: "3º"}.get(payload.get("position"), "—")
+            return f"{name} — {position_label}", None
         return _payload_key(payload), None
 
     for key, payload in payload_by_key.items():

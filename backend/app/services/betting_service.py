@@ -3,13 +3,18 @@ and refreshes the tournament's leaderboard.
 
 Most bet types have ONE outcome shared by every prediction on the market (who's champion,
 who broke, who topped the speaker tab, ...) and are resolved by `build_market_outcome`.
-Two bet types are inherently per-prediction because the user's own payload picks *which*
-debate or *which* pair of teams they're predicting on (``ROUND_WINNER``, ``HEAD_TO_HEAD``) --
-those go through `build_prediction_specific_outcome` instead, once per prediction.
+A handful are inherently per-prediction because the user's own payload picks *which* debate
+they're predicting on (``ROUND_WINNER``, ``ROUND_FULL_CALL``) or *which* pair of teams
+(``HEAD_TO_HEAD``, retired) -- those go through `build_prediction_specific_outcome` instead,
+once per prediction.
 
-``BREAKOUT_TEAM`` ("equipo revelación") has no mechanically derivable outcome at all -- it's a
-qualitative admin judgment call about which team most exceeded expectations -- so it can only
-be settled by passing `manual_outcome` explicitly (normally triggered from the admin panel).
+``BREAKOUT_TEAM`` (retired) has no mechanically derivable outcome at all -- it's a qualitative
+admin judgment call about which team most exceeded expectations -- so it can only be settled by
+passing `manual_outcome` explicitly (normally triggered from the admin panel).
+
+This module also owns the creation-time rules for the five bet types the admin panel actually
+offers (`CREATABLE_BET_TYPES`, `validate_market_creation`) and the one that auto-expires on its
+own schedule rather than by admin action (`CHAMPION` -- see `auto_close_pretournament_markets`).
 """
 
 import datetime
@@ -31,16 +36,75 @@ from app.models import (
     User,
 )
 from app.models.betting import BetMarket
-from app.models.enums import BetMarketStatus, BetType, PredictionStatus
+from app.models.enums import BetMarketStatus, BetType, PredictionStatus, TournamentStatus
 from app.repositories.upsert import upsert_by_natural_key
 from app.services.odds_service import quote_odds
 from app.services.ranking_service import get_standings
 
-_PER_PREDICTION_BET_TYPES = {BetType.HEAD_TO_HEAD, BetType.ROUND_WINNER}
+_PER_PREDICTION_BET_TYPES = {BetType.HEAD_TO_HEAD, BetType.ROUND_WINNER, BetType.ROUND_FULL_CALL}
+
+# Bet types still creatable from the admin panel -- see app.models.enums.BetType for why
+# top_n_break/top_n_speakers/head_to_head/breakout_team/best_institution are no longer here.
+CREATABLE_BET_TYPES = (
+    BetType.CHAMPION,
+    BetType.ROUND_WINNER,
+    BetType.ROUND_FULL_CALL,
+    BetType.TOP_SPEAKER_POSITION,
+    BetType.TEAM_BREAK,
+)
+
+_ROUND_SCOPED_BET_TYPES = {BetType.ROUND_WINNER, BetType.ROUND_FULL_CALL}
 
 
 class InsufficientBalanceError(Exception):
     """Raised when a user's balance can't cover a stake -- the router maps this to a 400."""
+
+
+class MarketCreationError(Exception):
+    """Raised when a market can't be created against this tournament's/payload's current
+    state -- the router maps this to a 400."""
+
+
+def validate_market_creation(
+    tournament: Tournament,
+    bet_type: BetType,
+    *,
+    target_round_id: int | None,
+    target_break_category_id: int | None,
+) -> None:
+    """Enforces the creation-time constraints for each of the five creatable bet types (see
+    `CREATABLE_BET_TYPES`). Called before a BetMarket row is even constructed -- nothing here
+    touches the database itself."""
+    if bet_type not in CREATABLE_BET_TYPES:
+        raise MarketCreationError(
+            f"'{bet_type.value}' ya no se puede crear desde el panel de admin."
+        )
+    if bet_type == BetType.CHAMPION and tournament.status != TournamentStatus.UPCOMING:
+        raise MarketCreationError(
+            "El mercado de campeón solo se puede crear antes de que arranque el torneo."
+        )
+    if bet_type in _ROUND_SCOPED_BET_TYPES and target_round_id is None:
+        raise MarketCreationError("Este tipo de mercado requiere elegir una ronda.")
+    if bet_type == BetType.TEAM_BREAK and target_break_category_id is None:
+        raise MarketCreationError("Este tipo de mercado requiere elegir una categoría de break.")
+
+
+async def auto_close_pretournament_markets(session: AsyncSession, tournament: Tournament) -> int:
+    """Once a tournament leaves UPCOMING (any preliminary result is in), any still-OPEN
+    CHAMPION market for it must stop taking new bets -- "solo se puede apostar antes del
+    torneo". Called every scrape cycle, right after `tournament_service.refresh_tournament_status`
+    -- see `app.tasks.scrape_tasks`. Returns how many markets were closed (0 most cycles)."""
+    if tournament.status == TournamentStatus.UPCOMING:
+        return 0
+    stmt = select(BetMarket).where(
+        BetMarket.tournament_id == tournament.id,
+        BetMarket.bet_type == BetType.CHAMPION,
+        BetMarket.status == BetMarketStatus.OPEN,
+    )
+    markets = (await session.execute(stmt)).scalars().all()
+    for market in markets:
+        market.status = BetMarketStatus.CLOSED
+    return len(markets)
 
 
 async def place_prediction(
@@ -137,8 +201,32 @@ async def build_market_outcome(session: AsyncSession, bet_market: BetMarket) -> 
         institution = await session.get(Institution, top_team.institution_id)
         return {"institution_code": institution.code} if institution else None
 
+    if bet_market.bet_type == BetType.TOP_SPEAKER_POSITION:
+        speaker_ids = await _get_final_speaker_ranking(session, bet_market.tournament_id)
+        if len(speaker_ids) < 3:
+            return None
+        return {"position_winners": {1: speaker_ids[0], 2: speaker_ids[1], 3: speaker_ids[2]}}
+
+    if bet_market.bet_type == BetType.TEAM_BREAK:
+        if bet_market.target_break_category_id is None:
+            return None
+        team_ids = (
+            (
+                await session.execute(
+                    select(Break.team_id).where(
+                        Break.tournament_id == bet_market.tournament_id,
+                        Break.break_category_id == bet_market.target_break_category_id,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        return {"breaking_team_ids": list(team_ids)} if team_ids else None
+
     return (
-        None  # BREAKOUT_TEAM needs a manual outcome; HEAD_TO_HEAD/ROUND_WINNER are per-prediction
+        None  # BREAKOUT_TEAM needs a manual outcome; HEAD_TO_HEAD/ROUND_WINNER/ROUND_FULL_CALL
+        # are per-prediction (see build_prediction_specific_outcome)
     )
 
 
@@ -170,6 +258,23 @@ async def build_prediction_specific_outcome(
         if winner_team_id is None:
             return None
         return {"debate_id": debate_id, "winning_team_id": winner_team_id}
+
+    if bet_market.bet_type == BetType.ROUND_FULL_CALL:
+        debate_id = payload.get("debate_id")
+        if debate_id is None:
+            return None
+        rows = (
+            await session.execute(
+                select(DebateTeam.team_id, DebateTeam.rank_in_debate).where(
+                    DebateTeam.debate_id == debate_id
+                )
+            )
+        ).all()
+        ranked = [(team_id, rank) for team_id, rank in rows if rank is not None]
+        if len(ranked) < 4:
+            return None
+        ranked.sort(key=lambda entry: entry[1])
+        return {"debate_id": debate_id, "actual_order": [team_id for team_id, _ in ranked]}
 
     return None
 

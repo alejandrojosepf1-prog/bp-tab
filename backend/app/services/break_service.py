@@ -10,7 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.break_predictor import BreakAssessment, build_break_report
-from app.models import BreakCategory, BreakPrediction, Round
+from app.models import BreakCategory, BreakPrediction, Round, TeamBreakCategory
 from app.models.enums import RoundStage
 from app.repositories.upsert import upsert_by_natural_key
 from app.services.ranking_service import (
@@ -86,3 +86,41 @@ async def recompute_break_predictions(
         )
 
     return report
+
+
+async def team_break_probability(
+    session: AsyncSession, tournament_id: int, break_category_id: int
+) -> dict[int, float]:
+    """P(this team makes the break), for pricing `team_break` bets -- one entry per team
+    currently registered in the category, including 0.0/1.0 for already-eliminated/safe teams.
+
+    Before Round 1 has been judged, `recompute_break_predictions` returns `[]` (there's no
+    standings signal at all yet), but the whole point of a "before the tournament" break market
+    is to be priceable with zero data -- so this falls back to the naive base rate
+    break_size/num_teams for every registered team, the same "graceful uniform prior before
+    data exists" pattern `odds_service.compute_team_power_ratings` already uses elsewhere. Once
+    a round is judged, the real simulated probabilities take over automatically.
+    """
+    category = await session.get(BreakCategory, break_category_id)
+    if category is None or category.break_size is None:
+        return {}
+
+    report = await recompute_break_predictions(session, tournament_id, break_category_id)
+    if report:
+        return {assessment.team_id: assessment.probability for assessment in report}
+
+    team_ids = (
+        (
+            await session.execute(
+                select(TeamBreakCategory.team_id).where(
+                    TeamBreakCategory.break_category_id == break_category_id
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if not team_ids:
+        return {}
+    base_rate = min(1.0, category.break_size / len(team_ids))
+    return {team_id: base_rate for team_id in team_ids}

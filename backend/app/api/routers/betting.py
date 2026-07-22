@@ -23,9 +23,11 @@ from app.models import BetMarket, Prediction, Tournament, User
 from app.models.enums import BetMarketStatus
 from app.services.betting_service import (
     InsufficientBalanceError,
+    MarketCreationError,
     place_prediction,
     set_bet_market_status,
     settle_market,
+    validate_market_creation,
 )
 from app.services.odds_service import UnpriceableMarketError, market_board, quote_odds
 
@@ -109,7 +111,16 @@ async def create_bet_market(
     session: AsyncSession = Depends(get_db),
     _admin: User = Depends(require_admin),
 ) -> BetMarketOut:
-    await _get_tournament_or_404(session, tournament_id)
+    tournament = await _get_tournament_or_404(session, tournament_id)
+    try:
+        validate_market_creation(
+            tournament,
+            payload.bet_type,
+            target_round_id=payload.target_round_id,
+            target_break_category_id=payload.target_break_category_id,
+        )
+    except MarketCreationError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     market = BetMarket(
         tournament_id=tournament_id,
         bet_type=payload.bet_type,

@@ -65,9 +65,17 @@ class UserRole(str, enum.Enum):
 
 class BetType(str, enum.Enum):
     CHAMPION = "champion"
+    ROUND_WINNER = "round_winner"
+    ROUND_FULL_CALL = "round_full_call"
+    TOP_SPEAKER_POSITION = "top_speaker_position"
+    TEAM_BREAK = "team_break"
+
+    # Retired from the admin "create market" UI in favor of the five types above, but kept as
+    # valid enum members -- and their pricing/settlement code kept working -- so any market of
+    # these types created before the redesign (and its predictions) keeps resolving correctly.
+    # Never offered for NEW markets going forward.
     TOP_N_BREAK = "top_n_break"
     TOP_N_SPEAKERS = "top_n_speakers"
-    ROUND_WINNER = "round_winner"
     HEAD_TO_HEAD = "head_to_head"
     BREAKOUT_TEAM = "breakout_team"
     BEST_INSTITUTION = "best_institution"

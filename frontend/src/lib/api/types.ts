@@ -185,9 +185,14 @@ export interface BreakEntry {
 
 export type BetType =
   | "champion"
+  | "round_winner"
+  | "round_full_call"
+  | "top_speaker_position"
+  | "team_break"
+  // Retired from the admin "create market" UI (see backend app.models.enums.BetType) but kept
+  // here since a market created before the redesign could still be open/settled.
   | "top_n_break"
   | "top_n_speakers"
-  | "round_winner"
   | "head_to_head"
   | "breakout_team"
   | "best_institution";

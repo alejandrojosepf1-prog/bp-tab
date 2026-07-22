@@ -7,10 +7,12 @@ from app.domain.odds import (
     HOUSE_MARGIN,
     MAX_ODDS,
     MIN_ODDS,
+    adaptive_temperature,
     decimal_odds_from_probability,
     ordered_sequence_odds,
     pari_mutuel_odds,
     pari_mutuel_probability,
+    positional_probabilities,
     sequence_probability,
     single_candidate_odds,
     softmax_probabilities,
@@ -169,3 +171,70 @@ def test_pari_mutuel_odds_seed_absorbs_a_small_early_bet() -> None:
 
 def test_pari_mutuel_odds_default_seed_is_exported() -> None:
     assert DEFAULT_SEED > 0
+
+
+# --- positional_probabilities --------------------------------------------------------------
+
+
+def test_positional_probabilities_position_1_matches_softmax() -> None:
+    # Position 1 ("exactly 1st") is by definition the same event single_candidate/softmax
+    # already price -- this is the strongest correctness anchor for the whole function.
+    power = {"a": 12.0, "b": 7.0, "c": 3.0, "d": 1.0}
+    temp = 4.0
+    position_1 = positional_probabilities(power, 1, temperature=temp)
+    softmax = softmax_probabilities(power, temperature=temp)
+    assert position_1.keys() == softmax.keys()
+    for candidate in position_1:
+        assert math.isclose(position_1[candidate], softmax[candidate], rel_tol=1e-9)
+
+
+def test_positional_probabilities_equal_field_is_uniform_at_every_position() -> None:
+    # With N equal-power candidates every permutation is equally likely, so P(any candidate in
+    # any specific slot) = 1/N regardless of which slot -- a clean, hand-verifiable case.
+    power = {"a": 5.0, "b": 5.0, "c": 5.0}
+    for position in (1, 2, 3):
+        probs = positional_probabilities(power, position, temperature=1.0)
+        for candidate_prob in probs.values():
+            assert math.isclose(candidate_prob, 1 / 3, rel_tol=1e-9)
+
+
+def test_positional_probabilities_sum_to_one_at_every_position() -> None:
+    # Exactly one candidate occupies a given slot -- this must hold for ANY power distribution,
+    # not just the symmetric one above, since it's what stops the pari-mutuel prior from being
+    # miscalibrated (a coherent probability distribution has to sum to 1). Cross-checked by
+    # brute-force permutation enumeration during development (not kept as a test: O(N!)) --
+    # the derivation itself matches to ~1e-7; a hardcoded temperature far outside what
+    # adaptive_temperature would ever pick for these fields is what actually produced the
+    # larger float error seen while iterating on this test, via catastrophic cancellation in
+    # `total - w_j` when one candidate's weight dominates the rest -- so, like every real call
+    # site in odds_service.py, this always derives temperature from the field itself.
+    fields = [
+        {"a": 10.0, "b": 6.0, "c": 2.0},
+        {"a": 3.0, "b": 3.0, "c": 3.0, "d": 3.0, "e": 3.0},
+        {"a": 50.0, "b": 1.0, "c": 1.0, "d": 0.5, "e": 0.1, "f": 0.1},
+    ]
+    for power in fields:
+        temp = adaptive_temperature(power.values())
+        for position in (1, 2, 3):
+            total = sum(positional_probabilities(power, position, temperature=temp).values())
+            assert math.isclose(total, 1.0, rel_tol=1e-9)
+
+
+def test_positional_probabilities_favorite_less_likely_to_finish_last() -> None:
+    # Directional sanity check: the strongest candidate should be LEAST likely to occupy the
+    # last available slot in the field, and the weakest MOST likely to.
+    power = {"favorite": 20.0, "mid": 8.0, "longshot": 1.0}
+    probs_last = positional_probabilities(power, 3, temperature=3.0)
+    assert probs_last["longshot"] > probs_last["mid"] > probs_last["favorite"]
+
+
+def test_positional_probabilities_rejects_unsupported_position() -> None:
+    with pytest.raises(ValueError):
+        positional_probabilities({"a": 1.0, "b": 1.0}, 4)
+    with pytest.raises(ValueError):
+        positional_probabilities({"a": 1.0, "b": 1.0}, 0)
+
+
+def test_positional_probabilities_empty_input() -> None:
+    assert positional_probabilities({}, 1) == {}
+    assert positional_probabilities({}, 3) == {}

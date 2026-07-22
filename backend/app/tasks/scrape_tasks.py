@@ -22,7 +22,7 @@ from app.models import BreakCategory, Debate, Tournament
 from app.models.betting import BetMarket
 from app.models.enums import BetMarketStatus
 from app.scraper.orchestrator import TournamentScraper
-from app.services.betting_service import settle_market
+from app.services.betting_service import auto_close_pretournament_markets, settle_market
 from app.services.break_service import recompute_break_predictions
 from app.services.ingestion import IngestionService
 from app.services.tournament_service import refresh_tournament_status
@@ -60,6 +60,7 @@ async def scrape_tournament_async(
 
         log = await IngestionService(session).ingest(tournament, snapshot)
         await refresh_tournament_status(session, tournament)
+        await auto_close_pretournament_markets(session, tournament)
         await _recompute_break_predictions_for_tournament(session, tournament.id)
         await _settle_resolvable_markets(session, tournament.id)
 

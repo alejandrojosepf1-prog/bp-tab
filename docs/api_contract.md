@@ -90,6 +90,36 @@ otherwise be invisible everywhere in the app.
 
 ## Betting
 
+**Bet types offered by the admin panel (`CREATABLE_BET_TYPES` in `app.services.betting_service`):**
+`champion | round_winner | round_full_call | top_speaker_position | team_break`. The older
+`top_n_break | top_n_speakers | head_to_head | breakout_team | best_institution` remain valid
+`BetType` enum members (a market/prediction of one of these created before this list existed
+still prices and settles exactly as before) but are no longer offered for NEW markets.
+
+- `champion`: `{team_id}`. **Only creatable while `Tournament.status == "upcoming"`** (400
+  otherwise) -- `validate_market_creation` enforces this at creation, and
+  `auto_close_pretournament_markets` (called every scrape cycle, right after
+  `refresh_tournament_status`) force-closes any still-OPEN champion market the moment the
+  tournament leaves `upcoming`.
+- `round_winner`: `{debate_id, team_id}` (who wins one specific debate). Requires
+  `target_round_id` at creation (400 otherwise); the debate named in a payload must belong to
+  that round (422 otherwise).
+- `round_full_call`: `{debate_id, team_ids: [4 team ids, predicted 1st->4th order]}` -- the
+  FULL finishing order of one debate (BP debates always have exactly 4 teams), not just the
+  winner. Same `target_round_id` requirement/validation as `round_winner`. Priced via
+  Plackett-Luce `sequence_probability` restricted to the debate's 4 teams.
+- `top_speaker_position`: `{speaker_id, position}` (`position`: `1|2|3`) -- does this speaker
+  finish in EXACTLY this slot of the final top-3 speaker ranking (not "top 3 overall"). Priced
+  via `app.domain.odds.positional_probabilities`, a marginal Plackett-Luce probability; each
+  position is its own independent pari-mutuel compartment (position 1/2/3 don't share a pool).
+- `team_break`: `{team_id}`. Requires `target_break_category_id` at creation (400 otherwise).
+  An INDEPENDENT, non-mutually-exclusive proposition (several teams break simultaneously) --
+  unlike every other bet type, priced directly from that team's own break probability
+  (`app.services.break_service.team_break_probability`, reusing the Break Predictor simulation
+  once a round is judged, else a naive `break_size/num_teams` base rate) with **no pari-mutuel
+  pool blending**: pool-blending assumes competing candidates' priors sum to 1 across a shared
+  compartment, which holds for "exactly one winner" markets but would be wrong here.
+
 **Unit convention:** every dollar amount below (`User.balance`, `Prediction.stake_amount`,
 `potential_payout`, `points_awarded`, `LeaderboardEntry.total_points`, `BetMarket.pool_total`)
 is denominated in **fictional USD** ("dólares apostados"), not abstract points -- there is no
@@ -110,10 +140,13 @@ stat) -- they're just not retroactive for bets already placed.
 
 - `GET /tournaments/{id}/bet-markets` -> `BetMarket[]`
   `{id, bet_type, label, description, opens_at, closes_at, status, target_round_id, target_break_category_id, pool_total, bettors_count}`
-  (`bet_type`: `champion|top_n_break|top_n_speakers|round_winner|head_to_head|breakout_team|best_institution`)
+  (`bet_type`: see the creatable set above; a legacy market can also carry
+  `top_n_break|top_n_speakers|head_to_head|breakout_team|best_institution`)
   (`status`: `open|closed|settled`)
 - `POST /tournaments/{id}/bet-markets` **(admin)** `{bet_type, label, description?, opens_at, closes_at, points_rule?, target_round_id?, target_break_category_id?}` -> `BetMarket`
-  (`points_rule` is now only used by `breakout_team`, e.g. `{"odds": 4.0}` -- every other bet_type is priced automatically)
+  (validated by `validate_market_creation` per bet_type -- see the creatable set above for what
+  each one requires; `points_rule` is now only used by the legacy `breakout_team`, e.g.
+  `{"odds": 4.0}` -- every creatable bet_type is priced automatically)
 - `PATCH /bet-markets/{market_id}` **(admin)** `{status?}` (only `open<->closed` transitions; `settled` is set by the system)
 - `POST /bet-markets/{market_id}/settle` **(admin)** `{manual_outcome?: object}` -> `{settled: bool}`
 - `GET /bet-markets/{market_id}/board` **(public)** -> `MarketBoardOut`
@@ -139,12 +172,14 @@ while still open)
 ### Payload shape per bet_type (both request body when creating and what's stored)
 
 - `champion`: `{team_id}`
-- `top_n_break`: `{team_ids: number[]}` (ordered guess)
-- `top_n_speakers`: `{speaker_ids: number[]}` (ordered guess)
 - `round_winner`: `{debate_id, team_id}`
-- `head_to_head`: `{team_a_id, team_b_id, predicted_winner_id}`
-- `breakout_team`: `{team_id}`
-- `best_institution`: `{institution_code}`
+- `round_full_call`: `{debate_id, team_ids: number[]}` (exactly the debate's 4 teams, 1st->4th)
+- `top_speaker_position`: `{speaker_id, position}` (`position`: `1|2|3`)
+- `team_break`: `{team_id}`
+- Legacy (still valid on an existing market/prediction, not creatable anymore): `top_n_break`
+  `{team_ids: number[]}`, `top_n_speakers` `{speaker_ids: number[]}`, `head_to_head`
+  `{team_a_id, team_b_id, predicted_winner_id}`, `breakout_team` `{team_id}`, `best_institution`
+  `{institution_code}`
 
 ## Leaderboard
 

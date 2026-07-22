@@ -73,6 +73,30 @@ def _best_institution(payload: dict, outcome: dict) -> bool:
     return predicted.strip().casefold() == actual.strip().casefold()
 
 
+def _round_full_call(payload: dict, outcome: dict) -> bool:
+    if payload.get("debate_id") is None or not payload.get("team_ids"):
+        return False
+    return (
+        outcome.get("debate_id") == payload["debate_id"]
+        and list(payload["team_ids"]) == outcome.get("actual_order")
+    )
+
+
+def _top_speaker_position(payload: dict, outcome: dict) -> bool:
+    speaker_id = payload.get("speaker_id")
+    position = payload.get("position")
+    if speaker_id is None or position is None:
+        return False
+    return outcome.get("position_winners", {}).get(position) == speaker_id
+
+
+def _team_break(payload: dict, outcome: dict) -> bool:
+    team_id = payload.get("team_id")
+    if team_id is None:
+        return False
+    return team_id in (outcome.get("breaking_team_ids") or [])
+
+
 _STRATEGIES: dict[BetType, Callable[[dict, dict], bool]] = {
     BetType.CHAMPION: _champion,
     BetType.TOP_N_BREAK: _top_n_break,
@@ -81,6 +105,9 @@ _STRATEGIES: dict[BetType, Callable[[dict, dict], bool]] = {
     BetType.HEAD_TO_HEAD: _head_to_head,
     BetType.BREAKOUT_TEAM: _breakout_team,
     BetType.BEST_INSTITUTION: _best_institution,
+    BetType.ROUND_FULL_CALL: _round_full_call,
+    BetType.TOP_SPEAKER_POSITION: _top_speaker_position,
+    BetType.TEAM_BREAK: _team_break,
 }
 
 

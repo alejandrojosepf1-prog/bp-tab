@@ -27,9 +27,13 @@ import type {
 
 export const BET_TYPE_LABELS: Record<string, string> = {
   champion: "Campeón del torneo",
+  round_winner: "Ganador de debate",
+  round_full_call: "Call completo de un debate",
+  top_speaker_position: "Posición en el top 3 de oradores",
+  team_break: "Equipo que hace break",
+  // Retirados de la creación de mercados, pero un mercado viejo todavía podría existir.
   top_n_break: "Top 3 equipos que rompen (en orden)",
   top_n_speakers: "Top 3 speakers (en orden)",
-  round_winner: "Ganador de un debate",
   head_to_head: "Cara a cara entre equipos",
   breakout_team: "Equipo revelación",
   best_institution: "Mejor institución",
@@ -115,6 +119,7 @@ function MarketBoardTable({ marketId }: { marketId: number }) {
 
 interface PickerProps {
   tournamentId: string;
+  market: BetMarket;
   teams: Team[];
   speakers: Speaker[];
   institutions: Institution[];
@@ -179,30 +184,29 @@ function InstitutionPick({ institutions, existingPayload, onPayloadChange }: Pic
 }
 
 const RANK_LABELS = ["1º", "2º", "3º"];
+const FULL_CALL_RANK_LABELS = ["1º", "2º", "3º", "4º"];
 
 function OrderedPick({
   options,
   existingIds,
   onChange,
   itemLabel,
+  labels = RANK_LABELS,
 }: {
   options: { value: string; label: string; emoji?: string | null; hint?: string }[];
   existingIds: string[];
   onChange: (ids: string[] | null) => void;
   itemLabel: string;
+  labels?: string[];
 }) {
-  const [picks, setPicks] = useState<string[]>([
-    existingIds[0] ?? "",
-    existingIds[1] ?? "",
-    existingIds[2] ?? "",
-  ]);
+  const [picks, setPicks] = useState<string[]>(labels.map((_, i) => existingIds[i] ?? ""));
   const [slot, setSlot] = useState(0);
 
   function setPick(value: string) {
     const next = picks.map((p, i) => (i === slot ? value : p));
     setPicks(next);
     onChange(next.every(Boolean) ? next : null);
-    if (slot < 2) setSlot(slot + 1);
+    if (slot < labels.length - 1) setSlot(slot + 1);
   }
 
   const available = options.filter(
@@ -212,7 +216,7 @@ function OrderedPick({
   return (
     <div className="flex flex-col gap-2">
       <div className="flex flex-wrap items-center gap-1.5">
-        {RANK_LABELS.map((label, i) => {
+        {labels.map((label, i) => {
           const picked = options.find((o) => o.value === picks[i]);
           return (
             <button
@@ -242,7 +246,7 @@ function OrderedPick({
         options={available}
         value={picks[slot] || null}
         onChange={setPick}
-        placeholder={`Buscar ${itemLabel} para el puesto ${RANK_LABELS[slot]}…`}
+        placeholder={`Buscar ${itemLabel} para el puesto ${labels[slot]}…`}
         columns={2}
       />
     </div>
@@ -354,74 +358,59 @@ function HeadToHeadPick({ teams, existingPayload, onPayloadChange }: PickerProps
   );
 }
 
-function RoundWinnerPick({ tournamentId, existingPayload, onPayloadChange }: PickerProps) {
-  const [roundId, setRoundId] = useState<string | null>(null);
-  const [debateId, setDebateId] = useState<string | null>(
-    existingPayload?.debate_id ? String(existingPayload.debate_id) : null
-  );
-  const [teamId, setTeamId] = useState<number | null>(
-    typeof existingPayload?.team_id === "number" ? existingPayload.team_id : null
-  );
-
-  const { data: rounds } = useQuery({
+/** Shared by RoundWinnerPick/RoundFullCallPick: a round market is always scoped to ONE round
+ * via market.target_round_id (required at creation), so betting UI jumps straight to that
+ * round's debates instead of letting the user free-pick any round. */
+function useRoundDebates(tournamentId: string, market: BetMarket) {
+  const roundId = market.target_round_id ? String(market.target_round_id) : null;
+  const { data: round } = useQuery({
     queryKey: queryKeys.rounds(tournamentId),
     queryFn: () => api.rounds.list(tournamentId),
     staleTime: 60_000,
+    select: (rounds: Round[]) => rounds.find((r) => String(r.id) === roundId),
   });
-
   const { data: debates } = useQuery({
     queryKey: queryKeys.roundDebates(tournamentId, roundId ?? "none"),
     queryFn: () => api.rounds.debates(tournamentId, roundId!),
     enabled: !!roundId,
     staleTime: 30_000,
   });
+  return { round, debates: debates ?? [] };
+}
 
-  const selectedDebate = debates?.find((d) => String(d.id) === debateId);
-  const playable = (rounds ?? []).filter((r: Round) => r.status !== "draft");
+function RoundWinnerPick({ tournamentId, market, existingPayload, onPayloadChange }: PickerProps) {
+  const [debateId, setDebateId] = useState<string | null>(
+    existingPayload?.debate_id ? String(existingPayload.debate_id) : null
+  );
+  const [teamId, setTeamId] = useState<number | null>(
+    typeof existingPayload?.team_id === "number" ? existingPayload.team_id : null
+  );
+  const { round, debates } = useRoundDebates(tournamentId, market);
+  const selectedDebate = debates.find((d) => String(d.id) === debateId);
+
+  if (!market.target_round_id) {
+    return <p className="text-xs text-muted-foreground">Este mercado no tiene ronda asignada.</p>;
+  }
 
   return (
     <div className="flex flex-col gap-3">
-      <div className="flex flex-wrap gap-1.5">
-        {playable.map((r: Round) => (
-          <button
-            key={r.id}
-            type="button"
-            onClick={() => {
-              setRoundId(String(r.id));
-              setDebateId(null);
-              onPayloadChange(null);
-            }}
-            className={cn(
-              "rounded-lg border px-3 py-1.5 text-sm transition-colors",
-              roundId === String(r.id)
-                ? "border-primary/50 bg-primary/10 text-primary"
-                : "border-border bg-card hover:bg-accent"
-            )}
-          >
-            {r.name}
-          </button>
-        ))}
-        {!playable.length && (
-          <p className="text-xs text-muted-foreground">Todavía no hay rondas sorteadas.</p>
-        )}
-      </div>
-
-      {roundId && (
-        <OptionPicker
-          options={(debates ?? []).map((d) => ({
-            value: String(d.id),
-            label: d.room?.name ? `Sala ${d.room.name}` : `Debate #${d.id}`,
-            hint: d.teams.map((t) => t.team.name).join(" · "),
-          }))}
-          value={debateId}
-          onChange={(v) => {
-            setDebateId(v);
-            onPayloadChange(null);
-          }}
-          placeholder="Buscar sala o equipo…"
-          maxHeight="max-h-40"
-        />
-      )}
+      <p className="text-xs text-muted-foreground">
+        Elegí el debate de <span className="font-medium text-foreground">{round?.name ?? "esta ronda"}</span>.
+      </p>
+      <OptionPicker
+        options={debates.map((d) => ({
+          value: String(d.id),
+          label: d.room?.name ? `Sala ${d.room.name}` : `Debate #${d.id}`,
+          hint: d.teams.map((t) => t.team.name).join(" · "),
+        }))}
+        value={debateId}
+        onChange={(v) => {
+          setDebateId(v);
+          onPayloadChange(null);
+        }}
+        placeholder="Buscar sala o equipo…"
+        maxHeight="max-h-40"
+      />
 
       {selectedDebate && (
         <div className="flex flex-wrap items-center gap-2">
@@ -447,6 +436,160 @@ function RoundWinnerPick({ tournamentId, existingPayload, onPayloadChange }: Pic
         </div>
       )}
     </div>
+  );
+}
+
+function RoundFullCallPick({
+  tournamentId,
+  market,
+  existingPayload,
+  onPayloadChange,
+}: PickerProps) {
+  const existingDebateId = existingPayload?.debate_id ? String(existingPayload.debate_id) : null;
+  const [debateId, setDebateId] = useState<string | null>(existingDebateId);
+  const { round, debates } = useRoundDebates(tournamentId, market);
+  const selectedDebate = debates.find((d) => String(d.id) === debateId);
+
+  if (!market.target_round_id) {
+    return <p className="text-xs text-muted-foreground">Este mercado no tiene ronda asignada.</p>;
+  }
+
+  const existingIds =
+    existingPayload?.debate_id === Number(debateId) && Array.isArray(existingPayload?.team_ids)
+      ? (existingPayload.team_ids as number[]).map(String)
+      : [];
+
+  return (
+    <div className="flex flex-col gap-3">
+      <p className="text-xs text-muted-foreground">
+        Elegí el debate de <span className="font-medium text-foreground">{round?.name ?? "esta ronda"}</span>{" "}
+        y ordená los 4 equipos de 1º a 4º.
+      </p>
+      <OptionPicker
+        options={debates.map((d) => ({
+          value: String(d.id),
+          label: d.room?.name ? `Sala ${d.room.name}` : `Debate #${d.id}`,
+          hint: d.teams.map((t) => t.team.name).join(" · "),
+        }))}
+        value={debateId}
+        onChange={(v) => {
+          setDebateId(v);
+          onPayloadChange(null);
+        }}
+        placeholder="Buscar sala o equipo…"
+        maxHeight="max-h-40"
+      />
+
+      {selectedDebate && (
+        <OrderedPick
+          key={debateId}
+          options={selectedDebate.teams.map((dt) => ({
+            value: String(dt.team.id),
+            label: dt.team.name,
+            emoji: dt.team.emoji,
+          }))}
+          existingIds={existingIds}
+          itemLabel="equipo"
+          labels={FULL_CALL_RANK_LABELS}
+          onChange={(ids) =>
+            onPayloadChange(ids ? { debate_id: Number(debateId), team_ids: ids.map(Number) } : null)
+          }
+        />
+      )}
+    </div>
+  );
+}
+
+function SpeakerPositionPick({ speakers, existingPayload, onPayloadChange }: PickerProps) {
+  const [speakerId, setSpeakerId] = useState<string | null>(
+    existingPayload?.speaker_id ? String(existingPayload.speaker_id) : null
+  );
+  const [position, setPosition] = useState<number | null>(
+    typeof existingPayload?.position === "number" ? existingPayload.position : null
+  );
+
+  function emit(nextSpeakerId: string | null, nextPosition: number | null) {
+    onPayloadChange(
+      nextSpeakerId && nextPosition
+        ? { speaker_id: Number(nextSpeakerId), position: nextPosition }
+        : null
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-3">
+      <OptionPicker
+        options={speakers.map((s) => ({ value: String(s.id), label: s.name }))}
+        value={speakerId}
+        onChange={(v) => {
+          setSpeakerId(v);
+          emit(v, position);
+        }}
+        placeholder="Buscar orador…"
+        columns={2}
+      />
+      {speakerId && (
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-muted-foreground">¿En qué puesto del top 3 termina?</span>
+          {[1, 2, 3].map((p) => (
+            <Button
+              key={p}
+              type="button"
+              size="sm"
+              variant={position === p ? "default" : "outline"}
+              onClick={() => {
+                setPosition(p);
+                emit(speakerId, p);
+              }}
+            >
+              {p}º
+            </Button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function TeamBreakPick({ tournamentId, market, existingPayload, onPayloadChange }: PickerProps) {
+  const [teamId, setTeamId] = useState<string | null>(
+    existingPayload?.team_id ? String(existingPayload.team_id) : null
+  );
+  const categoryId = market.target_break_category_id;
+  const { data: predictions } = useQuery({
+    queryKey: queryKeys.breakPredictions(tournamentId, categoryId ?? "none"),
+    queryFn: () => api.breakCategories.predictions(tournamentId, categoryId!),
+    enabled: !!categoryId,
+    staleTime: 30_000,
+  });
+
+  if (!categoryId) {
+    return (
+      <p className="text-xs text-muted-foreground">
+        Este mercado no tiene categoría de break asignada.
+      </p>
+    );
+  }
+
+  const options = (predictions ?? []).map((p) => ({
+    value: String(p.team.id),
+    label: p.team.name,
+    emoji: p.team.emoji,
+    hint: `${Math.round(p.probability * 100)}% de romper ahora mismo`,
+  }));
+
+  return (
+    <OptionPicker
+      options={options}
+      value={teamId}
+      onChange={(v) => {
+        setTeamId(v);
+        onPayloadChange({ team_id: Number(v) });
+      }}
+      placeholder="Buscar equipo…"
+      emptyLabel="Sin equipos registrados en esta categoría todavía"
+      columns={2}
+    />
   );
 }
 
@@ -614,13 +757,14 @@ export function MarketCard({
   const pickerProps = useMemo(
     () => ({
       tournamentId,
+      market,
       teams,
       speakers,
       institutions,
       existingPayload: myPrediction?.payload,
       onPayloadChange: setPayload,
     }),
-    [tournamentId, teams, speakers, institutions, myPrediction?.payload]
+    [tournamentId, market, teams, speakers, institutions, myPrediction?.payload]
   );
 
   let picker: React.ReactNode = null;
@@ -643,6 +787,15 @@ export function MarketCard({
       break;
     case "round_winner":
       picker = <RoundWinnerPick {...pickerProps} />;
+      break;
+    case "round_full_call":
+      picker = <RoundFullCallPick {...pickerProps} />;
+      break;
+    case "top_speaker_position":
+      picker = <SpeakerPositionPick {...pickerProps} />;
+      break;
+    case "team_break":
+      picker = <TeamBreakPick {...pickerProps} />;
       break;
   }
 

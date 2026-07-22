@@ -5,7 +5,19 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { formatDistanceToNow } from "date-fns";
 import { es } from "date-fns/locale";
 import { toast } from "sonner";
-import { AlertCircle, CheckCircle2, Coins, Eye, Loader2, PlusCircle, Users } from "lucide-react";
+import {
+  AlertCircle,
+  Award,
+  CheckCircle2,
+  Coins,
+  Eye,
+  Loader2,
+  Mic2,
+  PlusCircle,
+  Swords,
+  Trophy,
+  Users,
+} from "lucide-react";
 import { api, ApiError } from "@/lib/api/client";
 import { queryKeys } from "@/lib/api/query-keys";
 import { Button } from "@/components/ui/button";
@@ -19,14 +31,51 @@ import { BET_TYPE_LABELS } from "@/components/betting/market-card";
 import { cn } from "@/lib/utils";
 import type { BetType } from "@/lib/api/types";
 
-const BET_TYPES: { value: BetType; label: string; hint: string }[] = [
-  { value: "champion", label: "Campeón", hint: "Quién gana el torneo" },
-  { value: "top_n_break", label: "Top 3 break", hint: "Los 3 primeros del break, en orden" },
-  { value: "top_n_speakers", label: "Top 3 speakers", hint: "Los 3 mejores oradores, en orden" },
-  { value: "round_winner", label: "Ganador de debate", hint: "Quién gana una sala concreta" },
-  { value: "head_to_head", label: "Cara a cara", hint: "Cuál de dos equipos termina mejor" },
-  { value: "breakout_team", label: "Equipo revelación", hint: "Juicio del admin al final" },
-  { value: "best_institution", label: "Mejor institución", hint: "Por suma de sus equipos" },
+interface BetTypeOption {
+  value: BetType;
+  label: string;
+  hint: string;
+  icon: typeof Trophy;
+  needsRound?: boolean;
+  needsBreakCategory?: boolean;
+  requiresUpcoming?: boolean;
+}
+
+const BET_TYPES: BetTypeOption[] = [
+  {
+    value: "champion",
+    label: "Campeón del torneo",
+    hint: "Quién sale campeón — solo se puede abrir antes de que arranque el torneo",
+    icon: Trophy,
+    requiresUpcoming: true,
+  },
+  {
+    value: "round_winner",
+    label: "Ganador de debate (por ronda)",
+    hint: "Quién gana una sala concreta",
+    icon: Swords,
+    needsRound: true,
+  },
+  {
+    value: "round_full_call",
+    label: "Call completo (por ronda)",
+    hint: "Orden exacto 1º-2º-3º-4º de una sala",
+    icon: Swords,
+    needsRound: true,
+  },
+  {
+    value: "top_speaker_position",
+    label: "Tabla de oradores",
+    hint: "Un orador, en qué puesto del top 3 termina",
+    icon: Mic2,
+  },
+  {
+    value: "team_break",
+    label: "Equipos que hacen break",
+    hint: "Apuesta independiente por equipo (varios pueden romper a la vez)",
+    icon: Award,
+    needsBreakCategory: true,
+  },
 ];
 
 interface MarketForm {
@@ -35,6 +84,8 @@ interface MarketForm {
   description: string;
   opens_at: string;
   closes_at: string;
+  target_round_id: string;
+  target_break_category_id: string;
 }
 
 const EMPTY_FORM: MarketForm = {
@@ -43,10 +94,13 @@ const EMPTY_FORM: MarketForm = {
   description: "",
   opens_at: "",
   closes_at: "",
+  target_round_id: "",
+  target_break_category_id: "",
 };
 
-function validate(form: MarketForm): Record<string, string> {
+function validate(form: MarketForm, tournamentStatus: string | undefined): Record<string, string> {
   const errors: Record<string, string> = {};
+  const selected = BET_TYPES.find((bt) => bt.value === form.bet_type);
   if (form.label.trim().length < 5) {
     errors.label = "La etiqueta necesita al menos 5 caracteres.";
   }
@@ -57,6 +111,15 @@ function validate(form: MarketForm): Record<string, string> {
   }
   if (form.closes_at && new Date(form.closes_at) <= new Date()) {
     errors.closes_at = "El cierre tiene que estar en el futuro.";
+  }
+  if (selected?.requiresUpcoming && tournamentStatus !== "upcoming") {
+    errors.bet_type = "El torneo ya arrancó — este mercado solo se puede abrir antes.";
+  }
+  if (selected?.needsRound && !form.target_round_id) {
+    errors.target_round_id = "Elegí una ronda.";
+  }
+  if (selected?.needsBreakCategory && !form.target_break_category_id) {
+    errors.target_break_category_id = "Elegí una categoría de break.";
   }
   return errors;
 }
@@ -85,8 +148,17 @@ function Field({
   );
 }
 
-function MarketPreview({ form }: { form: MarketForm }) {
+function MarketPreview({
+  form,
+  roundName,
+  categoryName,
+}: {
+  form: MarketForm;
+  roundName?: string;
+  categoryName?: string;
+}) {
   const closes = form.closes_at ? new Date(form.closes_at) : null;
+  const scope = roundName ? `Ronda: ${roundName}` : categoryName ? `Categoría: ${categoryName}` : null;
   return (
     <div className="flex flex-col gap-2 rounded-xl border border-dashed border-primary/40 bg-primary/4 p-4">
       <p className="flex items-center gap-1.5 text-[0.7rem] font-semibold uppercase tracking-widest text-primary/80">
@@ -100,6 +172,7 @@ function MarketPreview({ form }: { form: MarketForm }) {
             </p>
             <p className="truncate text-xs text-muted-foreground">
               {BET_TYPE_LABELS[form.bet_type]}
+              {scope ? ` · ${scope}` : ""}
               {form.description.trim() ? ` · ${form.description.trim()}` : ""}
             </p>
           </div>
@@ -124,8 +197,10 @@ function MarketPreview({ form }: { form: MarketForm }) {
         </div>
       </div>
       <p className="text-xs text-muted-foreground">
-        Las cuotas arrancan desde el modelo de fuerza (softmax sembrado) y se mueven con el pool
-        real. Margen de la casa: 7%, cuotas entre 1.05x y 20x.
+        Las cuotas arrancan desde el modelo de fuerza (pari-mutuel sembrado) y se mueven con el
+        pool real. Margen de la casa: 7%, cuotas entre 1.05x y 20x.{" "}
+        {form.bet_type === "team_break" &&
+          "Excepción: equipos que rompen se cotiza directo desde su probabilidad de break, sin pool compartido — romper no es excluyente entre equipos."}
       </p>
     </div>
   );
@@ -230,7 +305,27 @@ export default function AdminMarketsPage() {
   const [form, setForm] = useState<MarketForm>(EMPTY_FORM);
   const [touched, setTouched] = useState(false);
 
-  const errors = useMemo(() => validate(form), [form]);
+  const { data: tournament } = useQuery({
+    queryKey: queryKeys.tournament(tournamentId ?? "none"),
+    queryFn: () => api.tournaments.get(tournamentId!),
+    enabled: !!tournamentId,
+  });
+  const { data: rounds } = useQuery({
+    queryKey: queryKeys.rounds(tournamentId ?? "none"),
+    queryFn: () => api.rounds.list(tournamentId!),
+    enabled: !!tournamentId,
+  });
+  const { data: breakCategories } = useQuery({
+    queryKey: queryKeys.breakCategories(tournamentId ?? "none"),
+    queryFn: () => api.breakCategories.list(tournamentId!),
+    enabled: !!tournamentId,
+  });
+
+  const selectedType = BET_TYPES.find((bt) => bt.value === form.bet_type);
+  const errors = useMemo(
+    () => validate(form, tournament?.status),
+    [form, tournament?.status]
+  );
   const isValid = Object.keys(errors).length === 0;
 
   const createMutation = useMutation({
@@ -241,6 +336,10 @@ export default function AdminMarketsPage() {
         description: form.description.trim() || undefined,
         opens_at: new Date(form.opens_at).toISOString(),
         closes_at: new Date(form.closes_at).toISOString(),
+        target_round_id: form.target_round_id ? Number(form.target_round_id) : undefined,
+        target_break_category_id: form.target_break_category_id
+          ? Number(form.target_break_category_id)
+          : undefined,
       }),
     onSuccess: () => {
       toast.success("Mercado publicado");
@@ -257,6 +356,11 @@ export default function AdminMarketsPage() {
     setTouched(true);
     setForm((f) => ({ ...f, ...patch }));
   };
+
+  const roundName = rounds?.find((r) => String(r.id) === form.target_round_id)?.name;
+  const categoryName = breakCategories?.find(
+    (c) => String(c.id) === form.target_break_category_id
+  )?.name;
 
   return (
     <div className="flex flex-col gap-6">
@@ -279,33 +383,103 @@ export default function AdminMarketsPage() {
               <PlusCircle className="size-4 text-primary" /> Nuevo mercado
             </h2>
 
-            <Field label="Tipo de apuesta">
+            <Field label="Tipo de apuesta" error={touched ? errors.bet_type : undefined}>
               <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-2">
-                {BET_TYPES.map((bt) => (
-                  <button
-                    key={bt.value}
-                    type="button"
-                    onClick={() => set({ bet_type: bt.value })}
-                    className={cn(
-                      "flex flex-col rounded-lg border px-3 py-2 text-left transition-colors",
-                      form.bet_type === bt.value
-                        ? "border-primary/50 bg-primary/10"
-                        : "border-border bg-background/40 hover:bg-accent"
-                    )}
-                  >
-                    <span
+                {BET_TYPES.map((bt) => {
+                  const disabled = bt.requiresUpcoming && tournament?.status !== "upcoming";
+                  const Icon = bt.icon;
+                  return (
+                    <button
+                      key={bt.value}
+                      type="button"
+                      disabled={disabled}
+                      onClick={() =>
+                        set({
+                          bet_type: bt.value,
+                          target_round_id: "",
+                          target_break_category_id: "",
+                        })
+                      }
                       className={cn(
-                        "text-sm font-medium",
-                        form.bet_type === bt.value && "text-primary"
+                        "flex flex-col rounded-lg border px-3 py-2 text-left transition-colors",
+                        disabled && "cursor-not-allowed opacity-50",
+                        !disabled && form.bet_type === bt.value
+                          ? "border-primary/50 bg-primary/10"
+                          : "border-border bg-background/40",
+                        !disabled && form.bet_type !== bt.value && "hover:bg-accent"
                       )}
                     >
-                      {bt.label}
-                    </span>
-                    <span className="text-xs text-muted-foreground">{bt.hint}</span>
-                  </button>
-                ))}
+                      <span
+                        className={cn(
+                          "flex items-center gap-1.5 text-sm font-medium",
+                          !disabled && form.bet_type === bt.value && "text-primary"
+                        )}
+                      >
+                        <Icon className="size-3.5" /> {bt.label}
+                      </span>
+                      <span className="text-xs text-muted-foreground">{bt.hint}</span>
+                    </button>
+                  );
+                })}
               </div>
             </Field>
+
+            {selectedType?.needsRound && (
+              <Field label="Ronda" error={touched ? errors.target_round_id : undefined}>
+                <div className="flex flex-wrap gap-1.5">
+                  {(rounds ?? []).map((r) => (
+                    <button
+                      key={r.id}
+                      type="button"
+                      onClick={() => set({ target_round_id: String(r.id) })}
+                      className={cn(
+                        "rounded-lg border px-3 py-1.5 text-sm transition-colors",
+                        form.target_round_id === String(r.id)
+                          ? "border-primary/50 bg-primary/10 text-primary"
+                          : "border-border bg-card hover:bg-accent"
+                      )}
+                    >
+                      {r.name}
+                    </button>
+                  ))}
+                  {!rounds?.length && (
+                    <p className="text-xs text-muted-foreground">
+                      Este torneo todavía no tiene rondas.
+                    </p>
+                  )}
+                </div>
+              </Field>
+            )}
+
+            {selectedType?.needsBreakCategory && (
+              <Field
+                label="Categoría de break"
+                error={touched ? errors.target_break_category_id : undefined}
+              >
+                <div className="flex flex-wrap gap-1.5">
+                  {(breakCategories ?? []).map((c) => (
+                    <button
+                      key={c.id}
+                      type="button"
+                      onClick={() => set({ target_break_category_id: String(c.id) })}
+                      className={cn(
+                        "rounded-lg border px-3 py-1.5 text-sm transition-colors",
+                        form.target_break_category_id === String(c.id)
+                          ? "border-primary/50 bg-primary/10 text-primary"
+                          : "border-border bg-card hover:bg-accent"
+                      )}
+                    >
+                      {c.name}
+                    </button>
+                  ))}
+                  {!breakCategories?.length && (
+                    <p className="text-xs text-muted-foreground">
+                      Este torneo todavía no tiene categorías de break.
+                    </p>
+                  )}
+                </div>
+              </Field>
+            )}
 
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
               <Field label="Etiqueta" error={touched ? errors.label : undefined}>
@@ -339,7 +513,7 @@ export default function AdminMarketsPage() {
               </Field>
             </div>
 
-            <MarketPreview form={form} />
+            <MarketPreview form={form} roundName={roundName} categoryName={categoryName} />
 
             <div className="flex items-center gap-3">
               <Button type="submit" disabled={createMutation.isPending || (touched && !isValid)}>

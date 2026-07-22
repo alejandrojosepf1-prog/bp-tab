@@ -111,6 +111,87 @@ def adaptive_temperature(power_values: Iterable[float]) -> float:
     return max(MIN_TEMPERATURE, math.sqrt(variance))
 
 
+def positional_probabilities(
+    power_by_candidate: dict[CandidateT, float], position: int, *, temperature: float | None = None
+) -> dict[CandidateT, float]:
+    """Marginal Plackett-Luce probability that EACH candidate finishes EXACTLY at `position`
+    (1-indexed) in the eventual full ranking -- e.g. "P(this speaker is exactly 2nd)", not
+    "P(this speaker is top-3)". Supports `position` in {1, 2, 3} only: this domain's one use
+    case is "top 3, which exact slot" markets (see `top_speaker_position` in
+    `app.services.odds_service`), so a general N-deep version isn't implemented.
+
+    Derived by explicit recursive expansion over who occupies the earlier slots, e.g. for
+    position 3: P(i is 3rd) = sum over every ordered pair of distinct others (j, k) of
+    P(j is 1st) * P(k is 1st | j removed) * P(i is 1st | j, k removed) -- summing over all
+    ordered pairs enumerates every way two other candidates could occupy 1st/2nd before i takes
+    3rd, mirroring the same sequential "pick, remove, repeat" process `sequence_probability`
+    already uses for full-sequence pricing. As a sanity check, summing the returned dict's
+    values is always ~1.0 (with N candidates and N >= position, exactly one of them occupies
+    that slot), which the domain test suite verifies numerically.
+
+    O(N) for position 1, O(N^2) for position 2, O(N^3) for position 3 -- fine for this app's
+    realistic field sizes (at most a few hundred speakers), deliberately not optimized further
+    since a closed-form (Newton's-identities-style) reduction would meaningfully complicate the
+    code for a market that's rarely priced more than a few times a minute.
+    """
+    if position not in (1, 2, 3):
+        raise ValueError("positional_probabilities only supports position 1, 2, or 3")
+    if not power_by_candidate:
+        return {}
+
+    temp = temperature if temperature is not None else adaptive_temperature(
+        power_by_candidate.values()
+    )
+    max_power = max(power_by_candidate.values())
+    weights = {
+        candidate: math.exp((power - max_power) / temp)
+        for candidate, power in power_by_candidate.items()
+    }
+    total = sum(weights.values())
+
+    if position == 1:
+        return {candidate: w / total for candidate, w in weights.items()}
+
+    items = list(weights.items())
+
+    if position == 2:
+        result = {}
+        for i, w_i in items:
+            acc = 0.0
+            for j, w_j in items:
+                if j == i:
+                    continue
+                remaining = total - w_j
+                if remaining <= 0:
+                    continue
+                acc += (w_j / total) * (w_i / remaining)
+            result[i] = acc
+        return result
+
+    # position == 3
+    result = {}
+    for i, w_i in items:
+        acc = 0.0
+        for j, w_j in items:
+            if j == i:
+                continue
+            remaining_after_j = total - w_j
+            if remaining_after_j <= 0:
+                continue
+            p_j_first = w_j / total
+            for k, w_k in items:
+                if k in (i, j):
+                    continue
+                remaining_after_jk = remaining_after_j - w_k
+                if remaining_after_jk <= 0:
+                    continue
+                p_k_second_given_j = w_k / remaining_after_j
+                p_i_third = w_i / remaining_after_jk
+                acc += p_j_first * p_k_second_given_j * p_i_third
+        result[i] = acc
+    return result
+
+
 def decimal_odds_from_probability(probability: float) -> float:
     """"Pays 1.85x"-style decimal odds: stake * odds = total returned (including the stake
     itself) if the bet wins.
