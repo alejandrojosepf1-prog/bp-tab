@@ -53,13 +53,19 @@ async def make_user(
     display_name: str = "Test User",
     role: UserRole = UserRole.USER,
     is_active: bool = True,
+    balance: float | None = None,
 ) -> User:
+    """`balance=None` uses the real STARTING_BALANCE grant a new account gets. Pass an explicit
+    value only for tests that need to stake more than that (e.g. pool-dynamics tests where the
+    point is large stakes overwhelming the seed), so the grant itself can change freely without
+    silently turning those into insufficient-balance failures."""
     user = User(
         email=email,
         password_hash=hash_password(password),
         display_name=display_name,
         role=role,
         is_active=is_active,
+        **({} if balance is None else {"balance": balance}),
     )
     db_session.add(user)
     await db_session.commit()

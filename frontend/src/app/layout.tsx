@@ -22,7 +22,7 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: "Claim — apuestas de torneo",
   description:
-    "Claim: mercados de predicción en vivo sobre torneos de debate BP. Dólares ficticios, cero dinero real.",
+    "Claim: mercados de predicción en vivo sobre torneos de debate BP. Se juega con tokens, cero dinero real.",
 };
 
 export default function RootLayout({

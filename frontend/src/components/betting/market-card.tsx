@@ -795,7 +795,7 @@ function StakeSlip({
       )}
       {overBalance && (
         <p className="text-xs text-destructive">
-          No te alcanza el bankroll (${user?.balance.toLocaleString("es")}).
+          No te alcanzan los tokens (${user?.balance.toLocaleString("es")}).
         </p>
       )}
     </div>

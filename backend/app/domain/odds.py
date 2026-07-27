@@ -1,10 +1,10 @@
 """Pari-mutuel-with-seed odds for bet markets.
 
-There's no house bankroll behind this app (see `services.betting_service`'s settlement, which
-credits winners without any pool constraining it) -- payouts are only meaningful, and only
-sustainable long-term, if the crowd's own money is what prices the market. That's the classic
-pari-mutuel setup: everyone's stakes on a given outcome go into a shared pot, and the odds fall
-out of how that pot splits, rather than a bookmaker unilaterally setting a price.
+There's no house behind this app at all -- no operator, no bankroll, no commission (see
+`services.betting_service`'s settlement, which credits winners without any pool constraining it)
+-- so payouts are only meaningful if the crowd's own tokens are what price the market. That's the
+classic pari-mutuel setup: everyone's stakes on a given outcome go into a shared pot, and the odds
+fall out of how that pot splits, rather than a bookmaker unilaterally setting a price.
 
 A pure pari-mutuel pool breaks down with only a handful of bettors, though: the very first
 person to bet on a market has no pool to read a price from, and one $5 bet on a longshot in a
@@ -16,10 +16,10 @@ exists yet). With an empty pool the price is exactly the prior; as real stakes a
 progressively take over, and once total stakes on a market pass the seed, the crowd is what's
 actually setting the odds -- the model just breaks the ice.
 
-A house margin ("vig"/overround) is still applied on top (`HOUSE_MARGIN`), and offered odds are
-clamped to a realistic `[MIN_ODDS, MAX_ODDS]` band -- a near-certainty still pays a little more
-than the stake back, and a wide-open field (e.g. "any of 40 untested speakers") can't produce an
-absurd four/five-figure multiplier just because nobody's bet on it yet.
+No margin is taken on top: prices are the fair 1/p, clamped to `[MIN_ODDS, MAX_ODDS]` purely as a
+readability guard -- a near-certainty still pays a little more than the stake back, and a
+wide-open field (e.g. "any of 40 untested speakers") can't produce an absurd four/five-figure
+multiplier just because nobody's bet on it yet.
 
 Two prior shapes cover every bet type in `app.models.enums.BetType`:
   - `softmax_probabilities` -- "who wins among this candidate set" (champion, head_to_head,
@@ -44,21 +44,21 @@ CandidateT = TypeVar("CandidateT")
 DEFAULT_TEMPERATURE = 1.0
 MIN_TEMPERATURE = 1.0
 
-# --- House economics -------------------------------------------------------------------------
-# Unlike a play-money predictions game, a real book has to hold an edge. We inflate the implied
-# probability by HOUSE_MARGIN (equivalently: divide the fair 1/p odds by 1 + HOUSE_MARGIN) so
-# the offered prices across a market sum to an implied probability >1.0 -- the "overround" that
-# guarantees the house a positive expected margin regardless of who wins. 0.07 = a 7% hold,
-# squarely in real-sportsbook territory (typically 5-10%).
-HOUSE_MARGIN = 0.07
+# --- Fair book, no house edge ------------------------------------------------------------------
+# Claim is a for-fun, play-token game: there is no house, no operator, and nothing to fund. Every
+# token in play came from a player, so taking a cut would only drain the group's collective
+# balance for no one's benefit. Odds are therefore the FAIR price, 1/p exactly, with no vig /
+# overround / commission applied on top -- the offered prices across a market sum to an implied
+# probability of exactly 1.0.
 
-# Realistic decimal-odds band. A real book never offers a five-figure multiplier (it caps
-# longshots to bound its liability) and never prices a near-certainty at ~1.00 (no action /
-# boring). MAX_ODDS = 20.0 keeps even a wide-open, zero-data field ("any of 40 untested
-# speakers") from paying an exaggerated multiplier; MIN_ODDS keeps favorites paying a little
-# more than the stake back.
-MIN_ODDS = 1.05
-MAX_ODDS = 20.0
+# Sanity band on the decimal odds. This is NOT house-liability protection (there's no house to
+# protect) -- it's purely to keep the game readable and the leaderboard meaningful. Without an
+# upper bound, a wide-open zero-data field (e.g. "which of 200 untested speakers is exactly 2nd")
+# prices at a four-figure multiplier, so one lucky token would dwarf every skilled call ever made.
+# The lower bound keeps a near-certainty paying at least a little more than the stake back, so a
+# "free money" pick is never literally free.
+MIN_ODDS = 1.01
+MAX_ODDS = 50.0
 
 # Dollars of phantom liquidity seeded into every market's pari-mutuel pool, split according to
 # the prior probability (see module docstring). Sized to roughly 10x a typical stake so a single
@@ -196,15 +196,12 @@ def decimal_odds_from_probability(probability: float) -> float:
     """"Pays 1.85x"-style decimal odds: stake * odds = total returned (including the stake
     itself) if the bet wins.
 
-    The fair 1/p price is divided by (1 + HOUSE_MARGIN) so the book holds ~HOUSE_MARGIN in
-    expectation on every outcome (this is what makes it a profitable book, not a break-even
-    one), then clamped to [MIN_ODDS, MAX_ODDS] so a near-certainty still pays a little and an
-    extreme longshot can't produce an absurd/unbounded payout."""
+    This is the fair price, 1/p exactly -- no house margin is taken (see the "Fair book" note
+    above) -- clamped to [MIN_ODDS, MAX_ODDS] as a readability guard only."""
     p = min(max(probability, 0.0), 1.0)
     if p <= 0.0:
         return MAX_ODDS
-    offered = (1.0 / p) / (1.0 + HOUSE_MARGIN)
-    return round(min(max(offered, MIN_ODDS), MAX_ODDS), 2)
+    return round(min(max(1.0 / p, MIN_ODDS), MAX_ODDS), 2)
 
 
 def single_candidate_odds(

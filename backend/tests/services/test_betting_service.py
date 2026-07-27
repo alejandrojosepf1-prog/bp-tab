@@ -778,3 +778,89 @@ async def test_place_prediction_speaker_positions_are_independent_slots(db_sessi
     by_key = {p.entity_key: p for p in predictions_after}
     assert by_key["position:1"].payload["speaker_id"] == speakers[1].id
     assert by_key["position:1"].stake_amount == 8.0
+
+
+async def _make_round_market_with_one_resolved_debate(db_session):
+    """A round_winner market over two debates where only debate A has a published result --
+    the exact mid-round state a scrape cycle sees while the rest of the round is still being
+    judged."""
+    tournament = await _make_tournament(db_session)
+    round_1, debate_a, debate_b, teams = await _make_round_with_two_debates(db_session, tournament)
+    # Debate A's ballot is in; debate B's is not.
+    debate_a_teams = (
+        (
+            await db_session.execute(
+                select(DebateTeam).where(DebateTeam.debate_id == debate_a.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    for rank, debate_team in enumerate(debate_a_teams, start=1):
+        debate_team.rank_in_debate = rank
+    await db_session.flush()
+
+    market = await _make_market(
+        db_session, tournament, BetType.ROUND_WINNER, target_round_id=round_1.id
+    )
+    return market, debate_a, debate_b, teams, debate_a_teams
+
+
+async def test_settle_market_never_re_credits_an_already_settled_prediction(db_session) -> None:
+    """Regression: a per-prediction market stays un-SETTLED while any of its debates is still
+    unresolved, so every later scrape cycle revisits it. Re-scoring the predictions that already
+    resolved would credit their payout again on each cycle, minting balance from nothing."""
+    market, debate_a, debate_b, teams, debate_a_teams = (
+        await _make_round_market_with_one_resolved_debate(db_session)
+    )
+    winner_team_id = debate_a_teams[0].team_id
+
+    alice = await _make_user(db_session, "alice@example.com")
+    bob = await _make_user(db_session, "bob@example.com")
+    alice.balance = 0.0
+    db_session.add_all(
+        [
+            _prediction(
+                BetType.ROUND_WINNER,
+                market_id=market.id,
+                user_id=alice.id,
+                payload={"debate_id": debate_a.id, "team_id": winner_team_id},
+            ),
+            # Bob's debate has no result yet, so the market can't finish settling.
+            _prediction(
+                BetType.ROUND_WINNER,
+                market_id=market.id,
+                user_id=bob.id,
+                payload={"debate_id": debate_b.id, "team_id": teams[2].id},
+            ),
+        ]
+    )
+    await db_session.commit()
+
+    assert await settle_market(db_session, market) is False
+    await db_session.commit()
+    balance_after_first_cycle = alice.balance
+    assert balance_after_first_cycle == 20.0  # stake 10.0 * odds 2.0
+
+    # Two more scrape cycles while debate B is still pending.
+    for _ in range(2):
+        assert await settle_market(db_session, market) is False
+        await db_session.commit()
+
+    assert alice.balance == balance_after_first_cycle
+    assert market.status != BetMarketStatus.SETTLED
+
+
+async def test_settle_market_leaves_an_open_market_with_no_bets_alone(db_session) -> None:
+    """Regression: `all([])` is vacuously true, so an OPEN round market nobody has bet on yet
+    must not be swept into SETTLED by the next scrape cycle before anyone can play it."""
+    market, _debate_a, _debate_b, _teams, _dt = (
+        await _make_round_market_with_one_resolved_debate(db_session)
+    )
+    await db_session.commit()
+    assert market.status == BetMarketStatus.OPEN
+
+    assert await settle_market(db_session, market) is False
+    await db_session.commit()
+
+    assert market.status == BetMarketStatus.OPEN

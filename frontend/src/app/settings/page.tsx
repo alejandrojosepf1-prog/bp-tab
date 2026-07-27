@@ -62,7 +62,7 @@ export default function SettingsPage() {
       <Row
         icon={Info}
         title="Acerca de Claim"
-        description="Mercados de predicción sobre torneos de debate BP con dólares 100% ficticios. Los datos del torneo se sincronizan automáticamente desde el tab público (CalicoTab). No existe dinero real en ninguna parte del sistema."
+        description="Mercados de predicción sobre torneos de debate BP. Cada cuenta arranca con 100 tokens de juego: no se compran, no se retiran y no existe dinero real en ninguna parte del sistema. Los datos del torneo se sincronizan automáticamente desde el tab público (CalicoTab)."
       />
     </div>
   );

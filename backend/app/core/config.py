@@ -27,7 +27,17 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = 60 * 12
 
     # --- Scraper ---
-    scrape_interval_seconds: int = 60
+    # How often active tournaments are re-scraped. 180s keeps markets and settlement fresh (a
+    # debate round takes far longer than that to produce results) without hammering someone
+    # else's Tabbycat instance.
+    scrape_interval_seconds: int = 180
+    # Run the in-process periodic scraper (app.tasks.autoscrape) from the API process itself.
+    # This is what makes auto-updating work on the Render+Neon deployment, which has no Celery
+    # broker -- set to false if a real Celery beat process is ever deployed, so the two can't
+    # both scrape the same tournament.
+    autoscrape_enabled: bool = True
+    # Grace period before the first cycle, so a deploy/cold-start doesn't immediately re-scrape.
+    autoscrape_startup_delay_seconds: int = 20
     scraper_user_agent: str = "BPTabBettingBot/0.1 (+https://github.com/; contact: admin)"
     scraper_request_timeout_seconds: float = 15.0
     scraper_min_delay_seconds: float = 0.5

@@ -17,6 +17,12 @@ from app.db.base import Base
 from app.models.enums import BetMarketStatus, BetType, PredictionStatus, UserRole
 from app.models.mixins import TimestampMixin, TournamentScopedMixin
 
+# One-time grant of play tokens every new account starts with. Claim is a for-fun platform --
+# these are not dollars, are never bought or cashed out, and no real money exists anywhere in the
+# system. The constant is referenced by the register endpoint and the balance column default so
+# the two can never drift apart.
+STARTING_BALANCE = 100.0
+
 
 class User(Base, TimestampMixin):
     __tablename__ = "users"
@@ -27,10 +33,9 @@ class User(Base, TimestampMixin):
     display_name: Mapped[str] = mapped_column(String(100), nullable=False)
     role: Mapped[UserRole] = mapped_column(default=UserRole.USER, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
-    # Fictional USD bankroll -- goes up and down as the user places/wins/loses bets (see
-    # services/betting_service.py). STARTING_BALANCE is the one-time grant a brand new user
-    # gets; there is no real money anywhere in this platform.
-    balance: Mapped[float] = mapped_column(Float, default=1000.0, nullable=False)
+    # Play-token balance -- goes up and down as the user places/wins/loses bets (see
+    # services/betting_service.py). Every new account is granted STARTING_BALANCE tokens.
+    balance: Mapped[float] = mapped_column(Float, default=STARTING_BALANCE, nullable=False)
 
 
 class BetMarket(Base, TournamentScopedMixin, TimestampMixin):

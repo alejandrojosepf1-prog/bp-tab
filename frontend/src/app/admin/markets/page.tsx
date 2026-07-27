@@ -198,7 +198,7 @@ function MarketPreview({
       </div>
       <p className="text-xs text-muted-foreground">
         Las cuotas arrancan desde el modelo de fuerza (pari-mutuel sembrado) y se mueven con el
-        pool real. Margen de la casa: 7%, cuotas entre 1.05x y 20x.{" "}
+        pool real. Cuota justa, sin comisión: la casa no se lleva nada. Rango 1.01x – 50x.{" "}
         {form.bet_type === "team_break" &&
           "Excepción: equipos que rompen se cotiza directo desde su probabilidad de break, sin pool compartido — romper no es excluyente entre equipos."}
       </p>

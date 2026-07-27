@@ -122,7 +122,7 @@ function SidebarBody({ onNavigate }: { onNavigate?: () => void }) {
 
       <div className="mt-auto flex flex-col gap-2">
         <p className="px-2 text-[0.65rem] leading-snug text-muted-foreground">
-          Dólares 100% ficticios. Nunca hay dinero real en juego.
+          Se juega con tokens. Nunca hay dinero real en juego.
         </p>
         {isAuthenticated ? (
           <div className="flex flex-col gap-2 rounded-xl border border-border bg-card/60 p-3">
@@ -146,7 +146,7 @@ function SidebarBody({ onNavigate }: { onNavigate?: () => void }) {
             </div>
             <div className="flex items-baseline justify-between rounded-lg bg-primary/10 px-2.5 py-1.5">
               <span className="text-[0.7rem] uppercase tracking-wider text-primary/80">
-                Bankroll
+                Tokens
               </span>
               <span className="font-mono text-sm font-semibold text-primary">
                 ${user?.balance?.toLocaleString("es") ?? "0"}

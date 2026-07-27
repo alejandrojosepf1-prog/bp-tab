@@ -4,7 +4,6 @@ import pytest
 
 from app.domain.odds import (
     DEFAULT_SEED,
-    HOUSE_MARGIN,
     MAX_ODDS,
     MIN_ODDS,
     adaptive_temperature,
@@ -45,11 +44,11 @@ def test_softmax_probabilities_rejects_nonpositive_temperature() -> None:
         softmax_probabilities({"a": 1.0}, temperature=0)
 
 
-def test_decimal_odds_applies_house_margin() -> None:
-    # The fair 1/p price is shaved by the house margin so the book holds an edge:
-    # 1/0.5 = 2.0 -> 2.0 / 1.07 = 1.87; 1/0.4 = 2.5 -> 2.5 / 1.07 = 2.34.
-    assert decimal_odds_from_probability(0.5) == round(2.0 / (1.0 + HOUSE_MARGIN), 2)
-    assert decimal_odds_from_probability(0.4) == round(2.5 / (1.0 + HOUSE_MARGIN), 2)
+def test_decimal_odds_is_the_fair_price_with_no_margin() -> None:
+    # Claim takes no cut: the offered price is exactly 1/p, not shaved by any vig.
+    assert decimal_odds_from_probability(0.5) == 2.0
+    assert decimal_odds_from_probability(0.4) == 2.5
+    assert decimal_odds_from_probability(0.25) == 4.0
 
 
 def test_decimal_odds_clamped_to_realistic_band() -> None:
@@ -60,11 +59,14 @@ def test_decimal_odds_clamped_to_realistic_band() -> None:
     assert decimal_odds_from_probability(0.0) == decimal_odds_from_probability(0.0001)
 
 
-def test_decimal_odds_never_below_a_fair_book() -> None:
-    # For any mid-range probability the offered odds must be strictly below the fair 1/p price
-    # (that gap IS the house edge).
-    for p in (0.2, 0.35, 0.5, 0.7):
-        assert decimal_odds_from_probability(p) < 1.0 / p
+def test_decimal_odds_book_sums_to_exactly_one() -> None:
+    # The defining property of a no-vig book: implied probabilities across a market's mutually
+    # exclusive outcomes sum to 1.0, not to 1.0 + margin. Any overround would show up here.
+    # Uses a tight field on purpose so no price hits the MIN/MAX_ODDS band -- clamping a genuine
+    # longshot legitimately breaks the sum, and that's a readability guard, not a margin.
+    probs = softmax_probabilities({"a": 1.0, "b": 0.5, "c": 0.0})
+    implied = sum(1.0 / decimal_odds_from_probability(p) for p in probs.values())
+    assert math.isclose(implied, 1.0, rel_tol=0.01)
 
 
 def test_single_candidate_odds_favorite_pays_less_than_underdog() -> None:
@@ -76,10 +78,10 @@ def test_single_candidate_odds_favorite_pays_less_than_underdog() -> None:
     assert favorite_odds > 1.0  # never literally break-even/free money
 
 
-def test_single_candidate_odds_two_equal_candidates_reflects_margin() -> None:
-    # Two equal candidates are a fair coin toss (2.0 each); after the house margin, ~1.87.
+def test_single_candidate_odds_two_equal_candidates_is_an_even_coin_toss() -> None:
+    # Two equal candidates are a fair coin toss, and with no margin taken that's exactly 2.0.
     odds = single_candidate_odds({"a": 10.0, "b": 10.0}, "a")
-    assert math.isclose(odds, round(2.0 / (1.0 + HOUSE_MARGIN), 2), rel_tol=0.01)
+    assert math.isclose(odds, 2.0, rel_tol=0.01)
 
 
 def test_single_candidate_odds_unknown_candidate_raises() -> None:
@@ -98,9 +100,9 @@ def test_ordered_sequence_odds_higher_than_any_single_leg() -> None:
 def test_ordered_sequence_odds_matches_manual_plackett_luce_calc() -> None:
     power = {"a": 10.0, "b": 10.0, "c": 10.0}
     # All equal power -> P(a first) = 1/3, P(b second | a picked) = 1/2, P(c third) = 1 -> 1/6,
-    # i.e. fair odds of 6.0, shaved by the house margin to 6.0 / 1.07 ~= 5.61.
+    # i.e. fair odds of exactly 6.0 with no margin taken out.
     combined = ordered_sequence_odds(power, ["a", "b", "c"])
-    assert math.isclose(combined, round(6.0 / (1.0 + HOUSE_MARGIN), 2), rel_tol=0.01)
+    assert math.isclose(combined, 6.0, rel_tol=0.01)
 
 
 def test_ordered_sequence_odds_rejects_empty_sequence() -> None:
@@ -152,12 +154,13 @@ def test_pari_mutuel_probability_rejects_invalid_inputs() -> None:
         pari_mutuel_probability(20.0, 10.0, 0.5)  # candidate can't exceed compartment total
 
 
-def test_pari_mutuel_odds_wide_open_field_stays_within_the_realistic_band() -> None:
-    # A 40-way uniform prior (nobody's bet on anything yet) is exactly the "any of 40 untested
-    # speakers" scenario that used to price at an absurd multiplier -- must now clamp to MAX_ODDS.
-    prior = 1 / 40
-    odds = pari_mutuel_odds(0.0, 0.0, prior)
-    assert odds == MAX_ODDS
+def test_pari_mutuel_odds_prices_a_wide_field_fairly_and_clamps_only_the_absurd() -> None:
+    # With no house liability left to bound (see odds.py's "Fair book" note), a genuine longshot
+    # now pays its real price rather than being cut off early: a 40-way uniform field prices at
+    # the fair 40x, comfortably inside the band.
+    assert pari_mutuel_odds(0.0, 0.0, 1 / 40) == 40.0
+    # Only a truly absurd field (a 500-way toss-up would pay 500x) still hits the readability cap.
+    assert pari_mutuel_odds(0.0, 0.0, 1 / 500) == MAX_ODDS
 
 
 def test_pari_mutuel_odds_seed_absorbs_a_small_early_bet() -> None:

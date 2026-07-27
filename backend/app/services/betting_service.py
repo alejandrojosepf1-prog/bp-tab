@@ -346,6 +346,14 @@ async def settle_market(
 
     any_settled = False
     for prediction in predictions:
+        # Never re-score an already-settled prediction. A per-prediction market stays un-SETTLED
+        # (returns False below) while ANY of its debates is still unresolved, so this same market
+        # is revisited on every subsequent scrape cycle -- without this guard the predictions
+        # that DID already resolve would have their payout credited to User.balance again on
+        # every single cycle, minting balance out of nothing until the last debate resolved.
+        if prediction.status == PredictionStatus.SETTLED:
+            continue
+
         outcome = shared_outcome
         if per_prediction:
             outcome = await build_prediction_specific_outcome(
@@ -365,6 +373,13 @@ async def settle_market(
             user = await session.get(User, prediction.user_id)
             if user is not None:
                 user.balance += payout
+
+    # An OPEN market nobody has bet on yet must never be auto-settled: with no predictions the
+    # `all(...)` check below is vacuously true, so a freshly-created round market would be marked
+    # SETTLED by the very next scrape cycle -- killing it before anyone could place a bet. Once
+    # an admin closes it (or it auto-closes), settling an empty market is just tidying up.
+    if not predictions and bet_market.status == BetMarketStatus.OPEN:
+        return False
 
     if per_prediction and not all(p.status == PredictionStatus.SETTLED for p in predictions):
         return (

@@ -1,4 +1,8 @@
+import asyncio
+import contextlib
 import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -17,13 +21,36 @@ from app.api.routers import (
     tournaments,
 )
 from app.core.config import get_settings
+from app.tasks.autoscrape import autoscrape_loop
 
 settings = get_settings()
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    """Owns the in-process periodic scraper (see app.tasks.autoscrape for why it lives in the
+    API process rather than in Celery). Cancelled cleanly on shutdown so a reload/redeploy
+    doesn't leave a half-finished scrape holding a database session."""
+    task: asyncio.Task | None = None
+    if settings.autoscrape_enabled:
+        task = asyncio.create_task(autoscrape_loop())
+        logging.getLogger(__name__).info(
+            "autoscrape enabled: every %ss", settings.scrape_interval_seconds
+        )
+    try:
+        yield
+    finally:
+        if task is not None:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
 
 app = FastAPI(
     title=settings.app_name,
     version="0.1.0",
-    description="API for the BP debate tournament friendly-betting platform.",
+    description="API for the Claim debate tournament friendly-betting platform.",
+    lifespan=lifespan,
 )
 
 app.add_middleware(

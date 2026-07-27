@@ -111,7 +111,7 @@ function AccountContent() {
         <div className="flex gap-3">
           <div className="rounded-xl bg-primary/10 px-4 py-2 text-right">
             <p className="flex items-center gap-1 text-[0.7rem] uppercase tracking-wider text-primary/80">
-              <Wallet className="size-3" /> Bankroll
+              <Wallet className="size-3" /> Tokens
             </p>
             <p className="font-mono text-xl font-bold text-primary">
               ${user.balance.toLocaleString("es")}

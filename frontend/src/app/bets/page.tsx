@@ -128,7 +128,7 @@ export default function BetsPage() {
           <Ticket className="size-6 text-primary" /> Apuestas
         </h1>
         <p className="text-sm text-muted-foreground">
-          Pool total, apostadores, cuotas y pagos en tiempo real. Dólares ficticios — nunca hay
+          Pool total, apostadores, cuotas y pagos en tiempo real. Se juega con tokens — nunca hay
           dinero real de por medio.
         </p>
       </div>

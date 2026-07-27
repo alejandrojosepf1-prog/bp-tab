@@ -13,7 +13,8 @@ export interface User {
   display_name: string;
   role: Role;
   is_active: boolean;
-  // Fictional USD bankroll -- goes up and down as bets are placed/won/lost. No real money.
+  // Play-token balance -- goes up and down as bets are placed/won/lost. Never real money;
+  // every account starts with a fixed grant (see backend app.models.betting.STARTING_BALANCE).
   balance: number;
   created_at: string;
 }

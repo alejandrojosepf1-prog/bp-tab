@@ -1,11 +1,22 @@
-# Render Blueprint for the free-tier deployment of BP$.
+# Render Blueprint for the free-tier deployment of Claim.
 #
 # This intentionally does NOT include Postgres or Redis/Celery services: Postgres is provided
 # by a free Neon project instead (paste its connection string as DATABASE_URL when Render asks
-# for the unset env vars during blueprint setup), and Celery is skipped entirely -- the backend
-# already has a Celery-independent scraping path (`POST /tournaments/{id}/scrape` via FastAPI
-# BackgroundTasks, see app/api/routers/tournaments.py) built for exactly this "no guaranteed
-# broker" scenario, so no worker/beat service is needed for a friends-scale free deployment.
+# for the unset env vars during blueprint setup), and Celery is skipped entirely.
+#
+# Scraping without Celery happens two ways, neither of which needs a broker:
+#   - Periodic/automatic: `app/tasks/autoscrape.py` runs an asyncio loop inside the API process
+#     itself, owned by the FastAPI lifespan, re-scraping every active tournament on
+#     SCRAPE_INTERVAL_SECONDS. This is what keeps markets fresh and settles finished rounds with
+#     no admin action. Set AUTOSCRAPE_ENABLED=false if a real Celery beat is ever deployed.
+#   - On demand: `POST /tournaments/{id}/scrape` via FastAPI BackgroundTasks (the admin panel's
+#     "Forzar scraping" button).
+#
+# NOTE on the free plan: Render spins a free web service down after ~15 minutes with no inbound
+# requests, and the autoscrape loop is suspended along with the process. It resumes on the next
+# request that wakes the service. For a live tournament that's fine (people are using the app);
+# if you need guaranteed round-the-clock scraping, either upgrade off the free plan or point an
+# external uptime pinger at /health.
 #
 # Both services build directly from the existing Dockerfiles (backend/Dockerfile,
 # frontend/Dockerfile) used by docker-compose.yml for local development -- no separate
