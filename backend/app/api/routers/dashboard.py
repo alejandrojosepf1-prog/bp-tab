@@ -1,7 +1,8 @@
+import datetime
+
 from fastapi import APIRouter, Depends
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
 
 from app.api.deps import get_current_user_optional
 from app.api.routers.betting import to_bet_market_out
@@ -10,8 +11,9 @@ from app.api.schemas.dashboard import ChangeEventOut, DashboardOut
 from app.api.schemas.leaderboard import LeaderboardEntryOut, LeaderboardUserOut
 from app.api.schemas.rounds import RoundOut
 from app.db.session import get_db
-from app.models import BetMarket, ChangeEvent, LeaderboardEntry, Prediction, Round, User
+from app.models import BetMarket, ChangeEvent, Prediction, Round, User
 from app.models.enums import BetMarketStatus
+from app.services.leaderboard_service import compute_leaderboard
 from app.services.tournament_service import get_current_round
 
 router = APIRouter(prefix="/tournaments/{tournament_id}", tags=["dashboard"])
@@ -51,19 +53,7 @@ async def get_dashboard(
         .all()
     )
 
-    leaderboard_top = (
-        (
-            await session.execute(
-                select(LeaderboardEntry)
-                .where(LeaderboardEntry.tournament_id == tournament_id)
-                .options(selectinload(LeaderboardEntry.user))
-                .order_by(LeaderboardEntry.rank)
-                .limit(5)
-            )
-        )
-        .scalars()
-        .all()
-    )
+    leaderboard_top = (await compute_leaderboard(session, tournament_id=tournament_id))[:5]
 
     open_bet_markets = (
         (
@@ -97,6 +87,7 @@ async def get_dashboard(
         my_predictions = [PredictionOut.model_validate(p) for p in predictions]
 
     current_round_out = RoundOut.model_validate(current_round) if current_round else None
+    now = datetime.datetime.now(datetime.timezone.utc)
     return DashboardOut(
         current_round=current_round_out,
         latest_round=current_round_out,
@@ -104,12 +95,12 @@ async def get_dashboard(
         recent_changes=[ChangeEventOut.model_validate(c) for c in recent_changes],
         leaderboard_top=[
             LeaderboardEntryOut(
-                user=LeaderboardUserOut(id=e.user.id, display_name=e.user.display_name),
-                total_points=e.total_points,
-                rank=e.rank,
-                computed_at=e.computed_at,
+                user=LeaderboardUserOut(id=row.user_id, display_name=row.display_name),
+                total_points=row.total_points,
+                rank=i + 1,
+                computed_at=now,
             )
-            for e in leaderboard_top
+            for i, row in enumerate(leaderboard_top)
         ],
         my_predictions=my_predictions,
         open_bet_markets=[await to_bet_market_out(session, m) for m in open_bet_markets],
