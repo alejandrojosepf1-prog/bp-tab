@@ -3,7 +3,7 @@ import datetime
 from app.models import Tournament, User
 from app.models.betting import BetMarket, Prediction
 from app.models.enums import BetMarketStatus, BetType, PredictionStatus, TournamentStatus, UserRole
-from app.services.house_finance_service import compute_house_summary, compute_market_exposure
+from app.services.game_economy_service import compute_game_economy, compute_market_payout_spread
 
 NOW = datetime.datetime(2026, 1, 1, tzinfo=datetime.timezone.utc)
 
@@ -21,8 +21,9 @@ async def _make_tournament(db_session) -> Tournament:
     return tournament
 
 
-async def _make_user(db_session, email: str) -> User:
-    user = User(email=email, password_hash="x", display_name=email, role=UserRole.USER)
+async def _make_user(db_session, email: str, *, balance: float = 100.0) -> User:
+    user = User(email=email, password_hash="x", display_name=email, role=UserRole.USER,
+                balance=balance)
     db_session.add(user)
     await db_session.flush()
     return user
@@ -58,11 +59,11 @@ def _prediction(market, user, *, entity_key, payload, stake, odds, status, point
     )
 
 
-async def test_compute_house_summary_separates_open_and_settled(db_session) -> None:
+async def test_compute_game_economy_separates_open_and_settled(db_session) -> None:
     tournament = await _make_tournament(db_session)
     market = await _make_market(db_session, tournament, BetType.CHAMPION)
-    alice = await _make_user(db_session, "alice@example.com")
-    bob = await _make_user(db_session, "bob@example.com")
+    alice = await _make_user(db_session, "alice@example.com", balance=200.0)
+    bob = await _make_user(db_session, "bob@example.com", balance=70.0)
 
     db_session.add_all(
         [
@@ -79,22 +80,27 @@ async def test_compute_house_summary_separates_open_and_settled(db_session) -> N
     )
     await db_session.commit()
 
-    summary = await compute_house_summary(db_session, tournament.id)
+    summary = await compute_game_economy(db_session, tournament.id)
     assert summary.total_staked_settled == 80.0
     assert summary.total_paid_out == 150.0
-    assert summary.realized_net_profit == 80.0 - 150.0  # house lost 70 on this round
+    # 150 paid out on 80 staked settled -- the platform net-minted 70 tokens on this round.
+    assert summary.net_token_inflation == 150.0 - 80.0
     assert summary.total_staked_open == 0.0
+    assert summary.settled_predictions_count == 2
+    assert summary.open_predictions_count == 0
+    assert summary.active_bettors_count == 2
+    assert summary.tokens_in_circulation == 270.0  # 200 + 70, NOT scoped by tournament_id
 
 
-async def test_compute_market_exposure_mutually_exclusive_bounds(db_session) -> None:
+async def test_compute_market_payout_spread_mutually_exclusive_bounds(db_session) -> None:
     tournament = await _make_tournament(db_session)
     market = await _make_market(db_session, tournament, BetType.CHAMPION)
     alice = await _make_user(db_session, "alice@example.com")
     bob = await _make_user(db_session, "bob@example.com")
 
-    # Pool = 100. If team 1 wins: house pays 50*3=150, nets 100-150=-50 (worst case).
-    # If team 2 wins: house pays 50*2=100, nets 100-100=0.
-    # If neither wins (someone else does): house keeps the full pool, nets +100 (best case).
+    # Pool = 100. If team 1 wins: 50*3=150 paid out, nets 100-150=-50 (worst case, net token
+    # destruction of 50). If team 2 wins: 50*2=100 paid out, nets 100-100=0. If neither wins,
+    # nothing is paid out: nets +100 (best case).
     db_session.add_all(
         [
             _prediction(
@@ -109,14 +115,14 @@ async def test_compute_market_exposure_mutually_exclusive_bounds(db_session) -> 
     )
     await db_session.commit()
 
-    exposure = await compute_market_exposure(db_session, market)
-    assert exposure is not None
-    assert exposure.pool_total == 100.0
-    assert exposure.worst_case == -50.0
-    assert exposure.best_case == 100.0
+    spread = await compute_market_payout_spread(db_session, market)
+    assert spread is not None
+    assert spread.pool_total == 100.0
+    assert spread.worst_case == -50.0
+    assert spread.best_case == 100.0
 
 
-async def test_compute_market_exposure_team_break_independent_bounds(db_session) -> None:
+async def test_compute_market_payout_spread_team_break_independent_bounds(db_session) -> None:
     tournament = await _make_tournament(db_session)
     category_market = await _make_market(
         db_session, tournament, BetType.TEAM_BREAK, target_break_category_id=1
@@ -124,8 +130,8 @@ async def test_compute_market_exposure_team_break_independent_bounds(db_session)
     alice = await _make_user(db_session, "alice@example.com")
     bob = await _make_user(db_session, "bob@example.com")
 
-    # Pool = 30. Independent props: if BOTH backed teams break, house pays 10*2 + 20*2 = 60,
-    # nets 30-60=-30 (worst case). If NEITHER breaks, house keeps the pool: +30 (best case).
+    # Pool = 30. Independent props: if BOTH backed teams break, 10*2 + 20*2 = 60 paid out,
+    # nets 30-60=-30 (worst case). If NEITHER breaks, nothing paid out: +30 (best case).
     db_session.add_all(
         [
             _prediction(
@@ -140,16 +146,16 @@ async def test_compute_market_exposure_team_break_independent_bounds(db_session)
     )
     await db_session.commit()
 
-    exposure = await compute_market_exposure(db_session, category_market)
-    assert exposure is not None
-    assert exposure.pool_total == 30.0
-    assert exposure.worst_case == -30.0
-    assert exposure.best_case == 30.0
+    spread = await compute_market_payout_spread(db_session, category_market)
+    assert spread is not None
+    assert spread.pool_total == 30.0
+    assert spread.worst_case == -30.0
+    assert spread.best_case == 30.0
 
 
-async def test_compute_market_exposure_none_when_no_open_predictions(db_session) -> None:
+async def test_compute_market_payout_spread_none_when_no_open_predictions(db_session) -> None:
     tournament = await _make_tournament(db_session)
     market = await _make_market(db_session, tournament, BetType.CHAMPION)
     await db_session.commit()
 
-    assert await compute_market_exposure(db_session, market) is None
+    assert await compute_market_payout_spread(db_session, market) is None

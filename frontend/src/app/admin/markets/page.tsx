@@ -25,11 +25,20 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { TournamentChips } from "@/components/admin/tournament-chips";
 import { LoadingState, EmptyState } from "@/components/query-state";
 import { BET_TYPE_LABELS } from "@/components/betting/market-card";
 import { cn } from "@/lib/utils";
-import type { BetType } from "@/lib/api/types";
+import { formatTokens } from "@/lib/format";
+import type { BetMarket, BetType } from "@/lib/api/types";
 
 interface BetTypeOption {
   value: BetType;
@@ -189,7 +198,7 @@ function MarketPreview({
         </div>
         <div className="mt-2 flex gap-2 text-xs text-muted-foreground">
           <span className="flex items-center gap-1 rounded-md bg-primary/10 px-2 py-1 text-primary">
-            <Coins className="size-3" /> Pool $0
+            <Coins className="size-3" /> Pool 0 tokens
           </span>
           <span className="flex items-center gap-1 rounded-md bg-muted px-2 py-1">
             <Users className="size-3" /> 0 apostadores
@@ -206,19 +215,33 @@ function MarketPreview({
   );
 }
 
+/** Local datetime-input default: 1h from now, formatted for <input type="datetime-local">
+ * (no timezone suffix, minute precision) -- mirrors the create-market form's own convention. */
+function defaultReopenClosesAt(): string {
+  const d = new Date(Date.now() + 60 * 60 * 1000);
+  d.setSeconds(0, 0);
+  return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+}
+
 function ManageMarkets({ tournamentId }: { tournamentId: string }) {
   const queryClient = useQueryClient();
   const { data: markets, isLoading } = useQuery({
     queryKey: queryKeys.betMarkets(tournamentId),
     queryFn: () => api.betMarkets.list(tournamentId),
   });
+  const [reopenTarget, setReopenTarget] = useState<BetMarket | null>(null);
+  const [reopenClosesAt, setReopenClosesAt] = useState("");
 
   const patchMutation = useMutation({
-    mutationFn: (vars: { id: number; status: "open" | "closed" }) =>
-      api.betMarkets.update(vars.id, { status: vars.status }),
+    mutationFn: (vars: { id: number; status: "open" | "closed"; closes_at?: string }) =>
+      api.betMarkets.update(vars.id, {
+        status: vars.status,
+        ...(vars.closes_at ? { closes_at: new Date(vars.closes_at).toISOString() } : {}),
+      }),
     onSuccess: () => {
       toast.success("Mercado actualizado");
       queryClient.invalidateQueries({ queryKey: queryKeys.betMarkets(tournamentId) });
+      setReopenTarget(null);
     },
     onError: (err) =>
       toast.error(err instanceof ApiError ? err.detail : "Error al actualizar"),
@@ -250,8 +273,8 @@ function ManageMarkets({ tournamentId }: { tournamentId: string }) {
           <div className="min-w-0 flex-1">
             <p className="truncate text-sm font-medium">{m.label}</p>
             <p className="text-xs text-muted-foreground">
-              {BET_TYPE_LABELS[m.bet_type] ?? m.bet_type} · pool $
-              {m.pool_total.toLocaleString("es")} · {m.bettors_count}{" "}
+              {BET_TYPE_LABELS[m.bet_type] ?? m.bet_type} · pool{" "}
+              {formatTokens(m.pool_total)} · {m.bettors_count}{" "}
               {m.bettors_count === 1 ? "apostador" : "apostadores"}
             </p>
           </div>
@@ -279,7 +302,10 @@ function ManageMarkets({ tournamentId }: { tournamentId: string }) {
               <Button
                 size="sm"
                 variant="outline"
-                onClick={() => patchMutation.mutate({ id: m.id, status: "open" })}
+                onClick={() => {
+                  setReopenTarget(m);
+                  setReopenClosesAt(defaultReopenClosesAt());
+                }}
               >
                 Reabrir
               </Button>
@@ -295,6 +321,49 @@ function ManageMarkets({ tournamentId }: { tournamentId: string }) {
           )}
         </div>
       ))}
+
+      <Dialog
+        open={reopenTarget !== null}
+        onOpenChange={(open) => !open && setReopenTarget(null)}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Reabrir mercado</DialogTitle>
+            <DialogDescription>
+              {reopenTarget?.label} necesita una nueva fecha y hora de cierre — la anterior ya
+              pasó, así que sin esto el mercado volvería a rechazar apuestas de inmediato.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="reopen-closes-at">Nuevo cierre</Label>
+            <Input
+              id="reopen-closes-at"
+              type="datetime-local"
+              value={reopenClosesAt}
+              onChange={(e) => setReopenClosesAt(e.target.value)}
+            />
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setReopenTarget(null)}>
+              Cancelar
+            </Button>
+            <Button
+              disabled={!reopenClosesAt || patchMutation.isPending}
+              onClick={() =>
+                reopenTarget &&
+                patchMutation.mutate({
+                  id: reopenTarget.id,
+                  status: "open",
+                  closes_at: reopenClosesAt,
+                })
+              }
+            >
+              {patchMutation.isPending && <Loader2 className="size-3.5 animate-spin" />}
+              Reabrir
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

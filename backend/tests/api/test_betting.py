@@ -687,3 +687,155 @@ async def test_team_break_quote_prices_independently_per_team(
     board_body = board.json()
     assert board_body["pool_total"] == 10.0
     assert len(board_body["options"]) == 2  # both registered teams shown, staked or not
+
+
+async def test_reopening_an_expired_market_requires_a_new_closing_time(
+    client: AsyncClient, db_session: AsyncSession
+) -> None:
+    """Regression: PATCH status=open on a market whose closes_at already passed used to
+    "succeed" while leaving the market unbettable -- POST .../predictions kept rejecting every
+    bet since `now >= closes_at` still held, so the market looked reopened but wasn't."""
+    tournament, team, _other_team = await _make_tournament_with_team(db_session)
+    admin = await make_user(db_session, email="admin-reopen@example.com", role=UserRole.ADMIN)
+    bettor = await make_user(db_session, email="bettor-reopen@example.com")
+
+    create_response = await client.post(
+        f"/api/v1/tournaments/{tournament.id}/bet-markets",
+        json={
+            "bet_type": "champion",
+            "label": "Who wins it all?",
+            "opens_at": (PAST - datetime.timedelta(days=2)).isoformat(),
+            "closes_at": PAST.isoformat(),  # already in the past at creation
+        },
+        headers=auth_headers(admin),
+    )
+    market_id = create_response.json()["id"]
+
+    # The market opens as "open" by default even though its closes_at already passed -- close it
+    # first, the way an admin actually would after noticing bets are silently being rejected.
+    close_response = await client.patch(
+        f"/api/v1/bet-markets/{market_id}",
+        json={"status": "closed"},
+        headers=auth_headers(admin),
+    )
+    assert close_response.status_code == 200
+
+    # Reopening with no new closes_at is rejected outright...
+    reject_response = await client.patch(
+        f"/api/v1/bet-markets/{market_id}",
+        json={"status": "open"},
+        headers=auth_headers(admin),
+    )
+    assert reject_response.status_code == 400
+
+    # ...and a bet still can't be placed (status never actually changed).
+    still_closed = await client.get(f"/api/v1/tournaments/{tournament.id}/bet-markets")
+    assert still_closed.json()[0]["status"] == "closed"
+
+    # Reopening WITH a fresh future closes_at succeeds, and predictions work again.
+    reopen_response = await client.patch(
+        f"/api/v1/bet-markets/{market_id}",
+        json={"status": "open", "closes_at": FUTURE.isoformat()},
+        headers=auth_headers(admin),
+    )
+    assert reopen_response.status_code == 200
+    assert reopen_response.json()["status"] == "open"
+    reopened_closes_at = datetime.datetime.fromisoformat(reopen_response.json()["closes_at"])
+    if reopened_closes_at.tzinfo is None:
+        reopened_closes_at = reopened_closes_at.replace(tzinfo=datetime.timezone.utc)
+    assert reopened_closes_at == FUTURE
+
+    bet_response = await client.post(
+        f"/api/v1/bet-markets/{market_id}/predictions",
+        json={"payload": {"team_id": team.id}, "stake_amount": 10.0},
+        headers=auth_headers(bettor),
+    )
+    assert bet_response.status_code == 201
+
+
+async def _make_round_with_two_debates(
+    db_session: AsyncSession,
+) -> tuple[Tournament, Round, Debate, Debate, list[Team]]:
+    """Two 2-team debates in the same round -- enough to exercise market_board's generic
+    per-payload fallback (round_winner/round_full_call/top_speaker_position) with more than one
+    distinct payload, which is exactly the path with the N+1 characterized below."""
+    tournament, _team, _other_team = await _make_tournament_with_team(db_session)
+    round_1 = Round(
+        tournament_id=tournament.id, seq=1, name="Round 1", stage=RoundStage.PRELIMINARY,
+        status=RoundStatus.RELEASED,
+    )
+    db_session.add(round_1)
+    await db_session.flush()
+    teams = [
+        Team(tournament_id=tournament.id, external_id=200 + i, name=f"Board Team {i}")
+        for i in range(4)
+    ]
+    db_session.add_all(teams)
+    await db_session.flush()
+    debate_a = Debate(tournament_id=tournament.id, round_id=round_1.id, external_id=900)
+    debate_b = Debate(tournament_id=tournament.id, round_id=round_1.id, external_id=901)
+    db_session.add_all([debate_a, debate_b])
+    await db_session.flush()
+    for debate, pair in ((debate_a, teams[:2]), (debate_b, teams[2:])):
+        for team, position in zip(
+            pair, (BPPosition.OPENING_GOVERNMENT, BPPosition.OPENING_OPPOSITION), strict=True
+        ):
+            db_session.add(DebateTeam(debate_id=debate.id, team_id=team.id, position=position))
+    await db_session.commit()
+    await db_session.refresh(round_1)
+    await db_session.refresh(debate_a)
+    await db_session.refresh(debate_b)
+    return tournament, round_1, debate_a, debate_b, teams
+
+
+async def test_market_board_round_winner_multi_debate_characterization(
+    client: AsyncClient, db_session: AsyncSession
+) -> None:
+    """CHARACTERIZATION test, not a spec: pins market_board's exact current odds output for a
+    round_winner market spanning 2 debates with bets on each -- the generic per-payload fallback
+    path (see odds_service.market_board) that re-quotes every distinct payload from scratch.
+    Any refactor of that path (e.g. fixing its N+1 query pattern) must keep these numbers
+    IDENTICAL; if they change, the refactor introduced a behavior difference, not just a
+    performance one."""
+    tournament, round_1, debate_a, debate_b, teams = await _make_round_with_two_debates(db_session)
+    admin = await make_user(db_session, email="admin-board@example.com", role=UserRole.ADMIN)
+    alice = await make_user(db_session, email="alice-board@example.com")
+    bob = await make_user(db_session, email="bob-board@example.com")
+
+    create_response = await client.post(
+        f"/api/v1/tournaments/{tournament.id}/bet-markets",
+        json={
+            "bet_type": "round_winner",
+            "label": "Ganador de cada sala",
+            "opens_at": PAST.isoformat(),
+            "closes_at": FUTURE.isoformat(),
+            "target_round_id": round_1.id,
+        },
+        headers=auth_headers(admin),
+    )
+    market_id = create_response.json()["id"]
+
+    await client.post(
+        f"/api/v1/bet-markets/{market_id}/predictions",
+        json={"payload": {"debate_id": debate_a.id, "team_id": teams[0].id}, "stake_amount": 30.0},
+        headers=auth_headers(alice),
+    )
+    await client.post(
+        f"/api/v1/bet-markets/{market_id}/predictions",
+        json={"payload": {"debate_id": debate_b.id, "team_id": teams[2].id}, "stake_amount": 15.0},
+        headers=auth_headers(bob),
+    )
+
+    board = await client.get(f"/api/v1/bet-markets/{market_id}/board")
+    assert board.status_code == 200
+    body = board.json()
+
+    assert body["pool_total"] == 45.0
+    assert body["bettors"] == 2
+    options_by_label = {o["label"]: o for o in body["options"]}
+    assert set(options_by_label) == {"Board Team 0 gana su debate", "Board Team 2 gana su debate"}
+    assert options_by_label["Board Team 0 gana su debate"]["stake"] == 30.0
+    assert options_by_label["Board Team 0 gana su debate"]["backers"] == 1
+    assert options_by_label["Board Team 0 gana su debate"]["odds"] == 1.77
+    assert options_by_label["Board Team 2 gana su debate"]["stake"] == 15.0
+    assert options_by_label["Board Team 2 gana su debate"]["odds"] == 1.87

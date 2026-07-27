@@ -864,3 +864,54 @@ async def test_settle_market_leaves_an_open_market_with_no_bets_alone(db_session
     await db_session.commit()
 
     assert market.status == BetMarketStatus.OPEN
+
+
+def test_set_bet_market_status_reopen_requires_future_closes_at_if_expired() -> None:
+    from app.services.betting_service import set_bet_market_status
+
+    past = NOW - datetime.timedelta(hours=1)
+    market = BetMarket(
+        tournament_id=1, bet_type=BetType.CHAMPION, label="m",
+        opens_at=past, closes_at=past, points_rule={}, status=BetMarketStatus.CLOSED,
+    )
+    with pytest.raises(ValueError, match="reopening"):
+        set_bet_market_status(market, BetMarketStatus.OPEN)
+    assert market.status == BetMarketStatus.CLOSED  # unchanged
+
+
+def test_set_bet_market_status_reopen_succeeds_with_new_future_closes_at() -> None:
+    from app.services.betting_service import set_bet_market_status
+
+    past = NOW - datetime.timedelta(hours=1)
+    future = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=1)
+    market = BetMarket(
+        tournament_id=1, bet_type=BetType.CHAMPION, label="m",
+        opens_at=past, closes_at=past, points_rule={}, status=BetMarketStatus.CLOSED,
+    )
+    set_bet_market_status(market, BetMarketStatus.OPEN, new_closes_at=future)
+    assert market.status == BetMarketStatus.OPEN
+    assert market.closes_at == future
+
+
+def test_set_bet_market_status_reopen_ok_without_new_closes_at_if_still_future() -> None:
+    from app.services.betting_service import set_bet_market_status
+
+    future = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=1)
+    market = BetMarket(
+        tournament_id=1, bet_type=BetType.CHAMPION, label="m",
+        opens_at=NOW, closes_at=future, points_rule={}, status=BetMarketStatus.CLOSED,
+    )
+    set_bet_market_status(market, BetMarketStatus.OPEN)
+    assert market.status == BetMarketStatus.OPEN
+
+
+def test_set_bet_market_status_rejects_a_new_closes_at_in_the_past() -> None:
+    from app.services.betting_service import set_bet_market_status
+
+    future = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=1)
+    market = BetMarket(
+        tournament_id=1, bet_type=BetType.CHAMPION, label="m",
+        opens_at=NOW, closes_at=future, points_rule={}, status=BetMarketStatus.OPEN,
+    )
+    with pytest.raises(ValueError, match="future"):
+        set_bet_market_status(market, BetMarketStatus.OPEN, new_closes_at=NOW)

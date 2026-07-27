@@ -86,6 +86,22 @@ async def _open_stakes(
     return [(payload, float(stake)) for payload, stake in rows]
 
 
+def _field_pool_from_stakes(
+    open_stakes: list[tuple[dict, float]], field: str, candidate_value: object
+) -> tuple[float, float]:
+    """(stake on `candidate_value`, total stake across the whole market) for a market where
+    every prediction competes in one shared pool -- champion, best_institution. Pure/in-memory
+    over an already-fetched `open_stakes` list, so a caller pricing many payloads at once (see
+    `market_board`'s generic fallback) can fetch stakes ONCE instead of once per payload."""
+    candidate_stake = 0.0
+    total = 0.0
+    for payload, stake in open_stakes:
+        total += stake
+        if payload.get(field) == candidate_value:
+            candidate_stake += stake
+    return candidate_stake, total
+
+
 async def _field_pool(
     session: AsyncSession,
     market_id: int,
@@ -94,13 +110,28 @@ async def _field_pool(
     *,
     exclude_user_id: int | None,
 ) -> tuple[float, float]:
-    """(stake on `candidate_value`, total stake across the whole market) for a market where
-    every prediction competes in one shared pool -- champion, best_institution."""
+    stakes = await _open_stakes(session, market_id, exclude_user_id=exclude_user_id)
+    return _field_pool_from_stakes(stakes, field, candidate_value)
+
+
+def _pair_pool_from_stakes(
+    open_stakes: list[tuple[dict, float]],
+    team_a_id: int,
+    team_b_id: int,
+    predicted_winner_id: int,
+) -> tuple[float, float]:
+    """Same as `_field_pool_from_stakes`, but scoped to just this one head-to-head pairing -- a
+    HEAD_TO_HEAD market can host many independent pairings, so team A vs. B's money shouldn't
+    dilute or be diluted by C vs. D's."""
+    pair = {team_a_id, team_b_id}
     candidate_stake = 0.0
     total = 0.0
-    for payload, stake in await _open_stakes(session, market_id, exclude_user_id=exclude_user_id):
+    for payload, stake in open_stakes:
+        a, b = payload.get("team_a_id"), payload.get("team_b_id")
+        if a is None or b is None or {a, b} != pair:
+            continue
         total += stake
-        if payload.get(field) == candidate_value:
+        if payload.get("predicted_winner_id") == predicted_winner_id:
             candidate_stake += stake
     return candidate_stake, total
 
@@ -114,18 +145,22 @@ async def _pair_pool(
     *,
     exclude_user_id: int | None,
 ) -> tuple[float, float]:
-    """Same as `_field_pool`, but scoped to just this one head-to-head pairing -- a HEAD_TO_HEAD
-    market can host many independent pairings, so team A vs. B's money shouldn't dilute or be
-    diluted by C vs. D's."""
-    pair = {team_a_id, team_b_id}
+    stakes = await _open_stakes(session, market_id, exclude_user_id=exclude_user_id)
+    return _pair_pool_from_stakes(stakes, team_a_id, team_b_id, predicted_winner_id)
+
+
+def _debate_pool_from_stakes(
+    open_stakes: list[tuple[dict, float]], debate_id: int, team_id: int
+) -> tuple[float, float]:
+    """Same idea as `_pair_pool_from_stakes`, scoped to one debate -- a ROUND_WINNER market can
+    span many debates in a round."""
     candidate_stake = 0.0
     total = 0.0
-    for payload, stake in await _open_stakes(session, market_id, exclude_user_id=exclude_user_id):
-        a, b = payload.get("team_a_id"), payload.get("team_b_id")
-        if a is None or b is None or {a, b} != pair:
+    for payload, stake in open_stakes:
+        if payload.get("debate_id") != debate_id:
             continue
         total += stake
-        if payload.get("predicted_winner_id") == predicted_winner_id:
+        if payload.get("team_id") == team_id:
             candidate_stake += stake
     return candidate_stake, total
 
@@ -138,17 +173,8 @@ async def _debate_pool(
     *,
     exclude_user_id: int | None,
 ) -> tuple[float, float]:
-    """Same idea as `_pair_pool`, scoped to one debate -- a ROUND_WINNER market can span many
-    debates in a round."""
-    candidate_stake = 0.0
-    total = 0.0
-    for payload, stake in await _open_stakes(session, market_id, exclude_user_id=exclude_user_id):
-        if payload.get("debate_id") != debate_id:
-            continue
-        total += stake
-        if payload.get("team_id") == team_id:
-            candidate_stake += stake
-    return candidate_stake, total
+    stakes = await _open_stakes(session, market_id, exclude_user_id=exclude_user_id)
+    return _debate_pool_from_stakes(stakes, debate_id, team_id)
 
 
 async def _require_debate_in_round(
@@ -167,6 +193,28 @@ async def _require_debate_in_round(
         raise ValueError("ese debate no pertenece a la ronda de este mercado")
 
 
+def _debate_sequence_pool_from_stakes(
+    open_stakes: list[tuple[dict, float]], debate_id: int, team_ids: list[int]
+) -> tuple[float, float]:
+    """Like `_debate_pool_from_stakes` (compartment = this one debate's money, since a
+    `round_full_call` market can span every debate in a round) combined with
+    `_sequence_pool_from_stakes`'s exact-match candidate rule (many different orderings can be
+    guessed for the same debate)."""
+    target = tuple(team_ids)
+    candidate_stake = 0.0
+    total = 0.0
+    for payload, stake in open_stakes:
+        if payload.get("debate_id") != debate_id:
+            continue
+        ids = payload.get("team_ids")
+        if not ids:
+            continue
+        total += stake
+        if tuple(ids) == target:
+            candidate_stake += stake
+    return candidate_stake, total
+
+
 async def _debate_sequence_pool(
     session: AsyncSession,
     market_id: int,
@@ -175,20 +223,23 @@ async def _debate_sequence_pool(
     *,
     exclude_user_id: int | None,
 ) -> tuple[float, float]:
-    """Like `_debate_pool` (compartment = this one debate's money, since a `round_full_call`
-    market can span every debate in a round) combined with `_sequence_pool`'s exact-match
-    candidate rule (many different orderings can be guessed for the same debate)."""
-    target = tuple(team_ids)
+    stakes = await _open_stakes(session, market_id, exclude_user_id=exclude_user_id)
+    return _debate_sequence_pool_from_stakes(stakes, debate_id, team_ids)
+
+
+def _speaker_position_pool_from_stakes(
+    open_stakes: list[tuple[dict, float]], position: int, speaker_id: int
+) -> tuple[float, float]:
+    """Compartment = money staked on THIS position (position 1/2/3 are independent coin-flips,
+    not one shared 3-way pool -- see `top_speaker_position` in `quote_odds`), candidate = stakes
+    naming this exact speaker for it."""
     candidate_stake = 0.0
     total = 0.0
-    for payload, stake in await _open_stakes(session, market_id, exclude_user_id=exclude_user_id):
-        if payload.get("debate_id") != debate_id:
-            continue
-        ids = payload.get("team_ids")
-        if not ids:
+    for payload, stake in open_stakes:
+        if payload.get("position") != position:
             continue
         total += stake
-        if tuple(ids) == target:
+        if payload.get("speaker_id") == speaker_id:
             candidate_stake += stake
     return candidate_stake, total
 
@@ -201,16 +252,26 @@ async def _speaker_position_pool(
     *,
     exclude_user_id: int | None,
 ) -> tuple[float, float]:
-    """Compartment = money staked on THIS position (position 1/2/3 are independent coin-flips,
-    not one shared 3-way pool -- see `top_speaker_position` in `quote_odds`), candidate = stakes
-    naming this exact speaker for it."""
+    stakes = await _open_stakes(session, market_id, exclude_user_id=exclude_user_id)
+    return _speaker_position_pool_from_stakes(stakes, position, speaker_id)
+
+
+def _sequence_pool_from_stakes(
+    open_stakes: list[tuple[dict, float]], id_key: str, sequence: list[int]
+) -> tuple[float, float]:
+    """(stake on this exact ordered sequence, total stake across the whole market) for
+    top_n_break/top_n_speakers. In a small group most submitted sequences are unique, so this
+    usually degenerates to (0, total) -- the seeded prior still prices it sensibly (see
+    `app.domain.odds`); it only starts moving once several people converge on the same pick."""
+    target = tuple(sequence)
     candidate_stake = 0.0
     total = 0.0
-    for payload, stake in await _open_stakes(session, market_id, exclude_user_id=exclude_user_id):
-        if payload.get("position") != position:
+    for payload, stake in open_stakes:
+        ids = payload.get(id_key)
+        if not ids:
             continue
         total += stake
-        if payload.get("speaker_id") == speaker_id:
+        if tuple(ids) == target:
             candidate_stake += stake
     return candidate_stake, total
 
@@ -223,21 +284,8 @@ async def _sequence_pool(
     *,
     exclude_user_id: int | None,
 ) -> tuple[float, float]:
-    """(stake on this exact ordered sequence, total stake across the whole market) for
-    top_n_break/top_n_speakers. In a small group most submitted sequences are unique, so this
-    usually degenerates to (0, total) -- the seeded prior still prices it sensibly (see
-    `app.domain.odds`); it only starts moving once several people converge on the same pick."""
-    target = tuple(sequence)
-    candidate_stake = 0.0
-    total = 0.0
-    for payload, stake in await _open_stakes(session, market_id, exclude_user_id=exclude_user_id):
-        ids = payload.get(id_key)
-        if not ids:
-            continue
-        total += stake
-        if tuple(ids) == target:
-            candidate_stake += stake
-    return candidate_stake, total
+    stakes = await _open_stakes(session, market_id, exclude_user_id=exclude_user_id)
+    return _sequence_pool_from_stakes(stakes, id_key, sequence)
 
 
 async def compute_team_power_ratings(
@@ -616,6 +664,171 @@ def format_payload_label(
     return "|".join(f"{k}={payload[k]}" for k in sorted(payload)) or "—", None
 
 
+async def _generic_fallback_options(
+    session: AsyncSession, bet_market: BetMarket, payload_by_key: dict[str, dict]
+) -> dict[str, float]:
+    """Prices every distinct payload for the bet types `market_board` has no dedicated
+    enumerable-candidate branch for (round_winner, round_full_call, top_speaker_position,
+    head_to_head, top_n_break, top_n_speakers, breakout_team). Returns {key: odds}, omitting any
+    payload that can't be priced (mirrors `quote_odds` raising UnpriceableMarketError/KeyError/
+    ValueError for that same payload, which callers used to `continue` past).
+
+    Fetches power ratings and open stakes ONCE for the whole market, rather than calling
+    `quote_odds` once per distinct payload -- which used to redo both from scratch every time
+    (recomputing team/speaker power ratings from the full tournament's debate history, and
+    re-scanning every open prediction on the market) for EACH of a round-scoped market's
+    debates. A market with 10 debates x ~3 backed teams each meant ~30 full recomputations on
+    every `/bets` page load; this does exactly one.
+
+    The pricing math mirrors `quote_odds` exactly (same `_x_pool_from_stakes` helpers, same
+    prior-probability calls with the same temperature) -- it MUST be kept in sync if either
+    changes. `test_market_board_round_winner_multi_debate_characterization` pins the current
+    output specifically to catch that drift.
+    """
+    bet_type = bet_market.bet_type
+
+    if bet_type == BetType.BREAKOUT_TEAM:
+        # No pool blending at all for this one (see quote_odds's matching branch) -- every
+        # payload gets the same flat, admin-tunable price.
+        flat_odds = float((bet_market.points_rule or {}).get("odds", DEFAULT_BREAKOUT_TEAM_ODDS))
+        return dict.fromkeys(payload_by_key, flat_odds)
+
+    if bet_type in (
+        BetType.HEAD_TO_HEAD,
+        BetType.ROUND_WINNER,
+        BetType.ROUND_FULL_CALL,
+        BetType.TOP_N_BREAK,
+    ):
+        power = await compute_team_power_ratings(
+            session,
+            bet_market.tournament_id,
+            break_category_id=(
+                bet_market.target_break_category_id if bet_type == BetType.TOP_N_BREAK else None
+            ),
+        )
+    elif bet_type in (BetType.TOP_SPEAKER_POSITION, BetType.TOP_N_SPEAKERS):
+        power = await compute_speaker_power_ratings(session, bet_market.tournament_id)
+    else:
+        return {}
+
+    if not power:
+        return {}
+    temperature = adaptive_temperature(power.values())
+    open_stakes = await _open_stakes(session, bet_market.id)
+
+    # Batch-fetch debate -> (round_id, [team_id, ...]) once for every distinct debate these
+    # payloads reference, instead of the 2 queries per payload `quote_odds` would otherwise run
+    # (one for _require_debate_in_round, one for the debate's team list).
+    debate_ids = {
+        payload["debate_id"]
+        for payload in payload_by_key.values()
+        if bet_type in (BetType.ROUND_WINNER, BetType.ROUND_FULL_CALL)
+        and payload.get("debate_id") is not None
+    }
+    teams_by_debate: dict[int, list[int]] = defaultdict(list)
+    round_by_debate: dict[int, int | None] = {}
+    if debate_ids:
+        debate_rows = (
+            await session.execute(
+                select(DebateTeam.debate_id, DebateTeam.team_id).where(
+                    DebateTeam.debate_id.in_(debate_ids)
+                )
+            )
+        ).all()
+        for debate_id, team_id in debate_rows:
+            teams_by_debate[debate_id].append(team_id)
+        round_rows = (
+            await session.execute(
+                select(Debate.id, Debate.round_id).where(Debate.id.in_(debate_ids))
+            )
+        ).all()
+        round_by_debate = dict(round_rows)
+
+    odds_by_key: dict[str, float] = {}
+    for key, payload in payload_by_key.items():
+        try:
+            if bet_type == BetType.HEAD_TO_HEAD:
+                team_a_id, team_b_id = payload["team_a_id"], payload["team_b_id"]
+                pair_power = {t: power[t] for t in (team_a_id, team_b_id) if t in power}
+                if len(pair_power) != 2:
+                    continue
+                predicted_winner_id = payload["predicted_winner_id"]
+                prior = softmax_probabilities(pair_power, temperature=temperature)[
+                    predicted_winner_id
+                ]
+                candidate_stake, compartment_stake = _pair_pool_from_stakes(
+                    open_stakes, team_a_id, team_b_id, predicted_winner_id
+                )
+
+            elif bet_type == BetType.ROUND_WINNER:
+                debate_id = payload["debate_id"]
+                if (
+                    bet_market.target_round_id is not None
+                    and round_by_debate.get(debate_id) != bet_market.target_round_id
+                ):
+                    continue
+                debate_power = {
+                    t: power[t] for t in teams_by_debate.get(debate_id, []) if t in power
+                }
+                if len(debate_power) < 2:
+                    continue
+                team_id = payload["team_id"]
+                prior = softmax_probabilities(debate_power, temperature=temperature)[team_id]
+                candidate_stake, compartment_stake = _debate_pool_from_stakes(
+                    open_stakes, debate_id, team_id
+                )
+
+            elif bet_type == BetType.ROUND_FULL_CALL:
+                debate_id = payload["debate_id"]
+                if (
+                    bet_market.target_round_id is not None
+                    and round_by_debate.get(debate_id) != bet_market.target_round_id
+                ):
+                    continue
+                debate_team_ids = teams_by_debate.get(debate_id, [])
+                debate_power = {t: power[t] for t in debate_team_ids if t in power}
+                if len(debate_power) < len(debate_team_ids) or len(debate_power) < 2:
+                    continue
+                team_ids = list(payload["team_ids"])
+                if set(team_ids) != set(debate_team_ids):
+                    continue
+                prior = sequence_probability(debate_power, team_ids, temperature=temperature)
+                candidate_stake, compartment_stake = _debate_sequence_pool_from_stakes(
+                    open_stakes, debate_id, team_ids
+                )
+
+            elif bet_type == BetType.TOP_SPEAKER_POSITION:
+                speaker_id = payload["speaker_id"]
+                position = payload["position"]
+                if position not in (1, 2, 3) or speaker_id not in power:
+                    continue
+                probabilities = positional_probabilities(power, position, temperature=temperature)
+                prior = probabilities[speaker_id]
+                candidate_stake, compartment_stake = _speaker_position_pool_from_stakes(
+                    open_stakes, position, speaker_id
+                )
+
+            elif bet_type == BetType.TOP_N_BREAK:
+                team_ids = list(payload["team_ids"])
+                prior = sequence_probability(power, team_ids, temperature=temperature)
+                candidate_stake, compartment_stake = _sequence_pool_from_stakes(
+                    open_stakes, "team_ids", team_ids
+                )
+
+            else:  # TOP_N_SPEAKERS
+                speaker_ids = list(payload["speaker_ids"])
+                prior = sequence_probability(power, speaker_ids, temperature=temperature)
+                candidate_stake, compartment_stake = _sequence_pool_from_stakes(
+                    open_stakes, "speaker_ids", speaker_ids
+                )
+        except (KeyError, ValueError):
+            continue
+
+        odds_by_key[key] = pari_mutuel_odds(candidate_stake, compartment_stake, prior)
+
+    return odds_by_key
+
+
 async def market_board(session: AsyncSession, bet_market: BetMarket) -> MarketBoard:
     rows = (
         await session.execute(
@@ -734,7 +947,8 @@ async def market_board(session: AsyncSession, bet_market: BetMarket) -> MarketBo
 
     # Remaining bet types have no enumerable candidate field (their options are whatever
     # payload combinations people actually staked), so the board lists the staked picks and
-    # prices each through the same quote path a new bet would use.
+    # prices each one -- see `_generic_fallback_options` for how this avoids re-fetching power
+    # ratings and stakes once per distinct payload the way calling `quote_odds` in a loop would.
     def _payload_key(payload: dict) -> str:
         return "|".join(f"{k}={payload[k]}" for k in sorted(payload))
 
@@ -760,10 +974,11 @@ async def market_board(session: AsyncSession, bet_market: BetMarket) -> MarketBo
         ).scalars()
     }
 
+    odds_by_key = await _generic_fallback_options(session, bet_market, payload_by_key)
+
     for key, payload in payload_by_key.items():
-        try:
-            odds = await quote_odds(session, bet_market, payload)
-        except (UnpriceableMarketError, KeyError, ValueError):
+        odds = odds_by_key.get(key)
+        if odds is None:
             continue
         label, emoji = format_payload_label(
             bet_type, payload, team_names=team_names, speaker_names=speaker_names

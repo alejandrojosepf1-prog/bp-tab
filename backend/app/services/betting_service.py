@@ -395,17 +395,49 @@ async def settle_market(
     return True
 
 
-def set_bet_market_status(bet_market: BetMarket, new_status: BetMarketStatus) -> BetMarket:
+def _as_aware_utc(dt: datetime.datetime) -> datetime.datetime:
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=datetime.timezone.utc)
+
+
+def set_bet_market_status(
+    bet_market: BetMarket,
+    new_status: BetMarketStatus,
+    *,
+    new_closes_at: datetime.datetime | None = None,
+) -> BetMarket:
     """Applies an admin-requested `open<->closed` transition (see `PATCH /bet-markets/{id}` in
     the API contract). `settled` is never accepted here -- it's only ever set by
     `settle_market` -- and a market that's already settled can no longer be reopened/closed.
 
-    Raises `ValueError` on any disallowed transition; the router maps that to HTTP 400.
+    Reopening (closed/settled-adjacent -> open) REQUIRES the resulting `closes_at` to be in the
+    future. Without this, reopening a market whose deadline already passed left it looking open
+    in the admin panel while `POST .../predictions` kept rejecting every bet with "not open for
+    predictions" (`now >= closes_at` still held) -- the market appeared to close itself right
+    back. `new_closes_at` lets the caller supply a fresh deadline in the same request; omitting
+    it is only valid if the market's existing `closes_at` is still in the future (e.g. an admin
+    closed it early and wants to reopen with time still left on the clock).
+
+    Raises `ValueError` on any disallowed transition or a `closes_at` that isn't in the future;
+    the router maps that to HTTP 400.
     """
     if bet_market.status == BetMarketStatus.SETTLED:
         raise ValueError("a settled bet market's status can no longer be changed")
     if new_status == BetMarketStatus.SETTLED:
         raise ValueError("status can only be set to 'settled' by settling the market")
+
+    now = datetime.datetime.now(datetime.timezone.utc)
+    if new_closes_at is not None:
+        if _as_aware_utc(new_closes_at) <= now:
+            raise ValueError("closes_at must be in the future")
+        bet_market.closes_at = new_closes_at
+
+    reopening = new_status == BetMarketStatus.OPEN and bet_market.status != BetMarketStatus.OPEN
+    if reopening and _as_aware_utc(bet_market.closes_at) <= now:
+        raise ValueError(
+            "reopening this market requires setting a new closing time in the future -- "
+            "its previous deadline has already passed"
+        )
+
     bet_market.status = new_status
     return bet_market
 

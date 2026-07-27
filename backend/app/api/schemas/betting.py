@@ -54,6 +54,11 @@ class BetMarketCreate(BaseModel):
 
 class BetMarketPatch(BaseModel):
     status: BetMarketStatus | None = None
+    # Required when reopening a market whose closes_at is already in the past (see
+    # betting_service.set_bet_market_status) -- otherwise the just-reopened market immediately
+    # rejects every prediction again since `now >= closes_at` still holds. Can also be sent
+    # on its own, with no status change, to simply push a still-open market's deadline back.
+    closes_at: datetime.datetime | None = None
 
 
 class SettleRequest(BaseModel):

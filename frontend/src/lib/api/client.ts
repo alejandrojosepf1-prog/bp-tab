@@ -8,7 +8,8 @@ import type {
   Debate,
   DebateSummary,
   DashboardData,
-  HouseFinance,
+  GlobalLeaderboardEntry,
+  GameEconomy,
   Institution,
   LeaderboardEntry,
   LoginResponse,
@@ -208,8 +209,10 @@ export const api = {
         target_break_category_id?: number;
       }
     ) => post<BetMarket>(`/tournaments/${tournamentId}/bet-markets`, data),
-    update: (marketId: number | string, data: { status?: "open" | "closed" }) =>
-      patch<BetMarket>(`/bet-markets/${marketId}`, data),
+    update: (
+      marketId: number | string,
+      data: { status?: "open" | "closed"; closes_at?: string }
+    ) => patch<BetMarket>(`/bet-markets/${marketId}`, data),
     settle: (marketId: number | string, data?: { manual_outcome?: object }) =>
       post<{ settled: boolean }>(`/bet-markets/${marketId}/settle`, data ?? {}),
     board: (marketId: number | string) =>
@@ -230,6 +233,7 @@ export const api = {
   leaderboard: {
     list: (tournamentId: number | string) =>
       get<LeaderboardEntry[]>(`/tournaments/${tournamentId}/leaderboard`),
+    global: () => get<GlobalLeaderboardEntry[]>("/leaderboard/global"),
   },
 
   dashboard: {
@@ -253,8 +257,8 @@ export const api = {
       debateId: number | string,
       data: { champion_team_id: number } | { advancing_team_ids: number[] }
     ) => post<{ status: string }>(`/admin/debates/${debateId}/manual-result`, data),
-    houseFinance: (tournamentId?: number | string) =>
-      get<HouseFinance>(`/admin/house-finance${qs({ tournament_id: tournamentId })}`),
+    gameEconomy: (tournamentId?: number | string) =>
+      get<GameEconomy>(`/admin/game-economy${qs({ tournament_id: tournamentId })}`),
   },
 };
 

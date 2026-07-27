@@ -21,10 +21,12 @@ import {
 } from "lucide-react";
 import { useAuth } from "@/lib/auth/auth-context";
 import { cn } from "@/lib/utils";
+import { formatTokens } from "@/lib/format";
 
 const MAIN_ITEMS = [
   { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
   { href: "/bets", label: "Apuestas", icon: Ticket },
+  { href: "/ranking", label: "Ranking", icon: Trophy },
   { href: "/account", label: "Cuenta", icon: UserRound },
   { href: "/settings", label: "Configuración", icon: Settings },
 ];
@@ -35,7 +37,7 @@ const ADMIN_ITEMS = [
   { href: "/admin/results", label: "Resultados", icon: ClipboardCheck },
   { href: "/admin/users", label: "Usuarios", icon: Users },
   { href: "/admin/scraping", label: "Scraping", icon: Radar },
-  { href: "/admin/finance", label: "Finanzas", icon: Landmark },
+  { href: "/admin/finance", label: "Economía", icon: Landmark },
 ];
 
 function Wordmark() {
@@ -149,7 +151,7 @@ function SidebarBody({ onNavigate }: { onNavigate?: () => void }) {
                 Tokens
               </span>
               <span className="font-mono text-sm font-semibold text-primary">
-                ${user?.balance?.toLocaleString("es") ?? "0"}
+                {formatTokens(user?.balance ?? 0)}
               </span>
             </div>
           </div>

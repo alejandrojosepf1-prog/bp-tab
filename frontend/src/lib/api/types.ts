@@ -310,9 +310,11 @@ export interface MyPrediction {
   created_at: string;
 }
 
-// ---------- Admin: Finanzas de la Casa ----------
+// ---------- Admin: Economía del juego ----------
+// No hay casa (ni operador, ni banca, ni comisión) -- todo esto es una vista derivada sobre
+// Prediction/User, no un fondo real. Ver backend app.services.game_economy_service.
 
-export interface MarketExposure {
+export interface MarketPayoutSpread {
   market_id: number;
   market_label: string;
   pool_total: number;
@@ -320,14 +322,20 @@ export interface MarketExposure {
   best_case: number;
 }
 
-export interface HouseFinance {
+export interface GameEconomy {
   total_staked_open: number;
   total_staked_settled: number;
   total_paid_out: number;
-  realized_net_profit: number;
-  exposure: MarketExposure[];
-  exposure_worst_case_total: number;
-  exposure_best_case_total: number;
+  // total_paid_out - total_staked_settled: positivo = el juego emitió tokens netos (favoritos
+  // ganaron más de lo que sus cuotas implicaban); negativo = se destruyeron tokens netos.
+  net_token_inflation: number;
+  tokens_in_circulation: number;
+  open_predictions_count: number;
+  settled_predictions_count: number;
+  active_bettors_count: number;
+  payout_spread: MarketPayoutSpread[];
+  payout_spread_worst_case_total: number;
+  payout_spread_best_case_total: number;
 }
 
 // ---------- Leaderboard ----------
@@ -337,6 +345,15 @@ export interface LeaderboardEntry {
   total_points: number;
   rank: number;
   computed_at: string;
+}
+
+/** Ranking de apostadores across every tournament (GET /leaderboard/global). */
+export interface GlobalLeaderboardEntry {
+  user: { id: number; display_name: string };
+  total_points: number;
+  tournaments_played: number;
+  balance: number;
+  rank: number;
 }
 
 // ---------- Dashboard ----------

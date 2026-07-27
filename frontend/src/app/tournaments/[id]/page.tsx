@@ -20,6 +20,7 @@ import { RoundsPanel, RoundStatusBadge } from "@/components/tournament/rounds-pa
 import { TeamsPanel } from "@/components/tournament/teams-panel";
 import { MarketCard } from "@/components/betting/market-card";
 import { cn } from "@/lib/utils";
+import { formatSignedTokens } from "@/lib/format";
 
 const TOURNAMENT_STATUS_LABEL: Record<string, string> = {
   upcoming: "Próximo",
@@ -262,8 +263,7 @@ export default function TournamentPage() {
                     entry.total_points >= 0 ? "text-primary" : "text-destructive"
                   )}
                 >
-                  {entry.total_points >= 0 ? "+" : "−"}$
-                  {Math.abs(entry.total_points).toLocaleString("es")}
+                  {formatSignedTokens(entry.total_points)}
                 </span>
               </div>
             ))}

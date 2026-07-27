@@ -148,9 +148,22 @@ async def patch_bet_market(
     market = await _get_market_or_404(session, market_id)
     if payload.status is not None:
         try:
-            set_bet_market_status(market, payload.status)
+            set_bet_market_status(market, payload.status, new_closes_at=payload.closes_at)
         except ValueError as exc:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    elif payload.closes_at is not None:
+        # closes_at pushed back with no status change (e.g. extending a still-open market's
+        # deadline) -- still must land in the future, same rule as the reopening path above.
+        now = datetime.datetime.now(datetime.timezone.utc)
+        closes_at = payload.closes_at
+        closes_at_aware = (
+            closes_at if closes_at.tzinfo else closes_at.replace(tzinfo=datetime.timezone.utc)
+        )
+        if closes_at_aware <= now:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail="closes_at must be in the future"
+            )
+        market.closes_at = closes_at
     await session.commit()
     await session.refresh(market)
     return await _to_bet_market_out(session, market)

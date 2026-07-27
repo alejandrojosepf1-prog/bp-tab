@@ -14,6 +14,7 @@ import { OptionPicker } from "@/components/ui/option-picker";
 import { CountdownBadge } from "@/components/ui/countdown-badge";
 import { LoadingState } from "@/components/query-state";
 import { cn } from "@/lib/utils";
+import { formatTokens } from "@/lib/format";
 import type {
   BetMarket,
   BetType,
@@ -108,7 +109,7 @@ function MarketBoardTable({ marketId }: { marketId: number }) {
                 <th className="px-2.5 py-1.5 text-right font-medium">Apostado</th>
                 <th className="px-2.5 py-1.5 text-right font-medium">Cuota</th>
                 <th className="hidden px-2.5 py-1.5 text-right font-medium sm:table-cell">
-                  $100 pagan
+                  100 tokens pagan
                 </th>
               </tr>
             </thead>
@@ -120,7 +121,7 @@ function MarketBoardTable({ marketId }: { marketId: number }) {
                     {option.label}
                   </td>
                   <td className="px-2.5 py-1.5 text-right font-mono text-xs">
-                    ${option.stake.toLocaleString("es")}
+                    {formatTokens(option.stake)}
                     {option.backers > 0 && (
                       <span className="ml-1 text-muted-foreground">({option.backers})</span>
                     )}
@@ -129,7 +130,7 @@ function MarketBoardTable({ marketId }: { marketId: number }) {
                     {option.odds.toFixed(2)}x
                   </td>
                   <td className="hidden px-2.5 py-1.5 text-right font-mono text-xs text-muted-foreground sm:table-cell">
-                    ${Math.round(option.odds * 100).toLocaleString("es")}
+                    {formatTokens(option.odds * 100)}
                   </td>
                 </tr>
               ))}
@@ -455,7 +456,7 @@ function RoundWinnerPick({
             label: d.room?.name ? `Sala ${d.room.name}` : `Debate #${d.id}`,
             hint:
               d.teams.map((t) => t.team.name).join(" · ") +
-              (existing ? ` · ya apostaste $${existing.stake_amount}` : ""),
+              (existing ? ` · ya apostaste ${formatTokens(existing.stake_amount)}` : ""),
           };
         })}
         value={debateId}
@@ -470,8 +471,8 @@ function RoundWinnerPick({
 
       {existingForDebate && (
         <p className="text-xs text-muted-foreground">
-          Ya tenés ${existingForDebate.stake_amount} apostados en esta sala — elegir de nuevo
-          reemplaza esa apuesta.
+          Ya tenés {formatTokens(existingForDebate.stake_amount)} apostados en esta sala — elegir
+          de nuevo reemplaza esa apuesta.
         </p>
       )}
 
@@ -533,7 +534,7 @@ function RoundFullCallPick({
             label: d.room?.name ? `Sala ${d.room.name}` : `Debate #${d.id}`,
             hint:
               d.teams.map((t) => t.team.name).join(" · ") +
-              (existing ? ` · ya apostaste $${existing.stake_amount}` : ""),
+              (existing ? ` · ya apostaste ${formatTokens(existing.stake_amount)}` : ""),
           };
         })}
         value={debateId}
@@ -547,8 +548,8 @@ function RoundFullCallPick({
 
       {existingForDebate && (
         <p className="text-xs text-muted-foreground">
-          Ya tenés ${existingForDebate.stake_amount} apostados en esta sala — elegir de nuevo
-          reemplaza esa apuesta.
+          Ya tenés {formatTokens(existingForDebate.stake_amount)} apostados en esta sala — elegir
+          de nuevo reemplaza esa apuesta.
         </p>
       )}
 
@@ -668,7 +669,7 @@ function TeamBreakPick({ tournamentId, market, myPredictions, onPayloadChange }:
       emoji: p.team.emoji,
       hint:
         `${Math.round(p.probability * 100)}% de romper ahora mismo` +
-        (existing ? ` · ya apostaste $${existing.stake_amount}` : ""),
+        (existing ? ` · ya apostaste ${formatTokens(existing.stake_amount)}` : ""),
     };
   });
 
@@ -687,8 +688,8 @@ function TeamBreakPick({ tournamentId, market, myPredictions, onPayloadChange }:
       />
       {existingForTeam && (
         <p className="text-xs text-muted-foreground">
-          Ya tenés ${existingForTeam.stake_amount} apostados a este equipo — apostar de nuevo
-          reemplaza esa apuesta.
+          Ya tenés {formatTokens(existingForTeam.stake_amount)} apostados a este equipo — apostar
+          de nuevo reemplaza esa apuesta.
         </p>
       )}
     </div>
@@ -736,9 +737,8 @@ function StakeSlip({
     <div className="flex flex-col gap-2 rounded-xl border border-primary/20 bg-primary/4 p-3">
       {existing && (
         <p className="text-xs text-muted-foreground">
-          Ya tenés ${existing.stake_amount.toLocaleString("es")} a cuota {existing.odds}x en
-          este mercado — apostar de nuevo reemplaza esa jugada (se te devuelve el monto
-          anterior).
+          Ya tenés {formatTokens(existing.stake_amount)} a cuota {existing.odds}x en este
+          mercado — apostar de nuevo reemplaza esa jugada (se te devuelve el monto anterior).
         </p>
       )}
       <div className="flex flex-wrap items-end gap-3">
@@ -747,7 +747,7 @@ function StakeSlip({
             Monto
           </span>
           <div className="flex items-center gap-1.5">
-            <span className="text-sm text-muted-foreground">$</span>
+            <Coins className="size-3.5 text-muted-foreground" />
             <Input
               type="number"
               min="1"
@@ -778,7 +778,7 @@ function StakeSlip({
             Pago si acertás
           </span>
           <span className="font-mono text-lg font-semibold">
-            {potentialPayout !== null ? `$${potentialPayout.toLocaleString("es")}` : "—"}
+            {potentialPayout !== null ? formatTokens(potentialPayout) : "—"}
           </span>
         </div>
         <Button
@@ -795,7 +795,7 @@ function StakeSlip({
       )}
       {overBalance && (
         <p className="text-xs text-destructive">
-          No te alcanzan los tokens (${user?.balance.toLocaleString("es")}).
+          No te alcanzan los tokens ({formatTokens(user?.balance ?? 0)}).
         </p>
       )}
     </div>
@@ -970,11 +970,11 @@ export function MarketCard({
               </span>
               {myPredictions.map((p) => (
                 <p key={p.id} className="text-xs text-muted-foreground">
-                  ${p.stake_amount.toLocaleString("es")} a cuota {p.odds}x
+                  {formatTokens(p.stake_amount)} a cuota {p.odds}x
                   {p.points_awarded !== null &&
                     (p.points_awarded > 0 ? (
                       <span className="ml-1 font-medium text-primary">
-                        → cobraste ${p.points_awarded.toLocaleString("es")}
+                        → cobraste {formatTokens(p.points_awarded)}
                       </span>
                     ) : (
                       <span className="ml-1 font-medium text-destructive">→ perdida</span>

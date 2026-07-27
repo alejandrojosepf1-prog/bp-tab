@@ -17,3 +17,15 @@ class LeaderboardEntryOut(BaseModel):
     total_points: float
     rank: int
     computed_at: datetime.datetime
+
+
+class GlobalLeaderboardEntryOut(BaseModel):
+    user: LeaderboardUserOut
+    # Summed net profit/loss across every tournament this user has a leaderboard entry in --
+    # see app.services.global_leaderboard_service. Can go negative.
+    total_points: float
+    tournaments_played: int
+    # Current play-token wallet (User.balance) -- shown alongside net profit since a user's
+    # balance also reflects tokens still tied up in OPEN predictions, not just settled skill.
+    balance: float
+    rank: int

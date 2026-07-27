@@ -32,6 +32,7 @@ export const queryKeys = {
   myPrediction: (marketId: Id) => ["bet-markets", marketId, "predictions", "me"] as const,
 
   leaderboard: (tournamentId: Id) => ["tournaments", tournamentId, "leaderboard"] as const,
+  globalLeaderboard: ["leaderboard", "global"] as const,
   dashboard: (tournamentId: Id) => ["tournaments", tournamentId, "dashboard"] as const,
 
   me: ["auth", "me"] as const,
@@ -39,6 +40,6 @@ export const queryKeys = {
   adminScrapeLogs: (tournamentId?: Id) => ["admin", "scrape-logs", tournamentId ?? "all"] as const,
   adminPendingEliminationResults: (tournamentId?: Id) =>
     ["admin", "pending-elimination-results", tournamentId ?? "all"] as const,
-  adminHouseFinance: (tournamentId?: Id) =>
-    ["admin", "house-finance", tournamentId ?? "all"] as const,
+  adminGameEconomy: (tournamentId?: Id) =>
+    ["admin", "game-economy", tournamentId ?? "all"] as const,
 };

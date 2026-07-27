@@ -57,7 +57,7 @@ class ManualEliminationResultIn(BaseModel):
         return self
 
 
-class MarketExposureOut(BaseModel):
+class MarketPayoutSpreadOut(BaseModel):
     market_id: int
     market_label: str
     pool_total: float
@@ -65,11 +65,15 @@ class MarketExposureOut(BaseModel):
     best_case: float
 
 
-class HouseFinanceOut(BaseModel):
+class GameEconomyOut(BaseModel):
     total_staked_open: float
     total_staked_settled: float
     total_paid_out: float
-    realized_net_profit: float
-    exposure: list[MarketExposureOut]
-    exposure_worst_case_total: float
-    exposure_best_case_total: float
+    net_token_inflation: float
+    tokens_in_circulation: float
+    open_predictions_count: int
+    settled_predictions_count: int
+    active_bettors_count: int
+    payout_spread: list[MarketPayoutSpreadOut]
+    payout_spread_worst_case_total: float
+    payout_spread_best_case_total: float

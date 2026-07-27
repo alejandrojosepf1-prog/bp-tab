@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import Link from "next/link";
 import { ChevronDown, Lock, Ticket, Unlock } from "lucide-react";
@@ -16,9 +16,14 @@ import type { BetMarket, Tournament } from "@/lib/api/types";
 function TournamentMarketsGroup({
   tournament,
   statusFilter,
+  onCount,
 }: {
   tournament: Tournament;
   statusFilter: "open" | "closed";
+  /** Reports this tournament's filtered market count up to the accordion header, so "Mercados
+   * cerrados" can show a total without a separate query -- reuses the same cached
+   * queryKeys.betMarkets(id) fetch both accordion sections already share. */
+  onCount?: (tournamentId: number, count: number) => void;
 }) {
   const id = String(tournament.id);
   const { data: markets, isLoading } = useQuery({
@@ -43,11 +48,16 @@ function TournamentMarketsGroup({
     staleTime: 60_000,
   });
 
-  if (isLoading) return <LoadingState label="Cargando mercados…" />;
-
   const filtered = (markets ?? []).filter((m: BetMarket) =>
     statusFilter === "open" ? m.status === "open" : m.status !== "open"
   );
+
+  useEffect(() => {
+    if (markets) onCount?.(tournament.id, filtered.length);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [markets, filtered.length, tournament.id]);
+
+  if (isLoading) return <LoadingState label="Cargando mercados…" />;
   if (!filtered.length) return null;
 
   return (
@@ -82,11 +92,13 @@ function TournamentMarketsGroup({
 
 function AccordionSection({
   title,
+  count,
   icon: Icon,
   defaultOpen,
   children,
 }: {
   title: string;
+  count: number | null;
   icon: typeof Unlock;
   defaultOpen: boolean;
   children: React.ReactNode;
@@ -100,14 +112,48 @@ function AccordionSection({
         className="flex items-center gap-2 text-left"
       >
         <Icon className="size-4 text-primary" />
-        <h2 className="flex-1 font-heading text-lg font-bold">{title}</h2>
+        <h2 className="flex-1 font-heading text-lg font-bold">
+          {title}
+          {count !== null && (
+            <span className="ml-2 font-mono text-sm font-normal text-muted-foreground">
+              · {count}
+            </span>
+          )}
+        </h2>
         <ChevronDown
           className={cn("size-4 text-muted-foreground transition-transform", open && "rotate-180")}
         />
       </button>
-      {open && <div className="flex flex-col gap-6">{children}</div>}
+      {/* `children` stay mounted even while collapsed (just visually hidden, not unmounted) --
+          they're what reports counts via onCount and keeps refetching live, so "Mercados
+          cerrados" gets an accurate, ever-updating count without needing the section expanded
+          first. Each TournamentMarketsGroup already renders null when it has nothing to show, so
+          rendering them unconditionally alongside the empty-state message is harmless. */}
+      <div className={cn("flex flex-col gap-6", !open && "hidden")}>
+        {count === 0 && (
+          <EmptyState
+            title={`Sin ${title.toLowerCase()}`}
+            description="No hay nada acá por ahora."
+          />
+        )}
+        {children}
+      </div>
     </section>
   );
+}
+
+/** Sums per-tournament counts reported by `TournamentMarketsGroup.onCount` into a section total,
+ * or null while any tournament hasn't reported yet (so the header doesn't flash "· 0"). */
+function useSectionCount(tournamentIds: number[]) {
+  const [counts, setCounts] = useState<Record<number, number>>({});
+  const onCount = (tournamentId: number, count: number) =>
+    setCounts((prev) =>
+      prev[tournamentId] === count ? prev : { ...prev, [tournamentId]: count }
+    );
+  const total = tournamentIds.every((id) => id in counts)
+    ? tournamentIds.reduce((sum, id) => sum + (counts[id] ?? 0), 0)
+    : null;
+  return { total, onCount };
 }
 
 export default function BetsPage() {
@@ -120,6 +166,9 @@ export default function BetsPage() {
   const withMarkets = (tournaments ?? []).filter(
     (t) => t.open_markets_count > 0 || t.status !== "upcoming"
   );
+  const tournamentIds = withMarkets.map((t) => t.id);
+  const openCount = useSectionCount(tournamentIds);
+  const closedCount = useSectionCount(tournamentIds);
 
   return (
     <div className="mx-auto flex w-full max-w-4xl flex-1 flex-col gap-6 px-4 py-8">
@@ -144,14 +193,34 @@ export default function BetsPage() {
 
       {withMarkets.length > 0 && (
         <>
-          <AccordionSection title="Mercados abiertos" icon={Unlock} defaultOpen>
+          <AccordionSection
+            title="Mercados abiertos"
+            count={openCount.total}
+            icon={Unlock}
+            defaultOpen
+          >
             {withMarkets.map((t) => (
-              <TournamentMarketsGroup key={t.id} tournament={t} statusFilter="open" />
+              <TournamentMarketsGroup
+                key={t.id}
+                tournament={t}
+                statusFilter="open"
+                onCount={openCount.onCount}
+              />
             ))}
           </AccordionSection>
-          <AccordionSection title="Mercados cerrados" icon={Lock} defaultOpen={false}>
+          <AccordionSection
+            title="Mercados cerrados"
+            count={closedCount.total}
+            icon={Lock}
+            defaultOpen={false}
+          >
             {withMarkets.map((t) => (
-              <TournamentMarketsGroup key={t.id} tournament={t} statusFilter="closed" />
+              <TournamentMarketsGroup
+                key={t.id}
+                tournament={t}
+                statusFilter="closed"
+                onCount={closedCount.onCount}
+              />
             ))}
           </AccordionSection>
         </>

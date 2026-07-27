@@ -10,6 +10,7 @@ import { RequireAuth } from "@/components/auth/require-auth";
 import { LoadingState, EmptyState } from "@/components/query-state";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
+import { formatSignedTokens, formatTokens } from "@/lib/format";
 import type { MyPrediction } from "@/lib/api/types";
 
 const PREDICTION_STATUS: Record<string, { label: string; className: string }> = {
@@ -47,23 +48,23 @@ function HistoryRow({ prediction }: { prediction: MyPrediction }) {
         <span className="text-muted-foreground">
           Apostado{" "}
           <span className="font-mono font-medium text-foreground">
-            ${prediction.stake_amount.toLocaleString("es")}
+            {formatTokens(prediction.stake_amount)}
           </span>{" "}
           · cuota <span className="font-mono">{prediction.odds}x</span>
         </span>
         {settled ? (
           won ? (
             <span className="font-mono text-sm font-semibold text-primary">
-              +${(prediction.points_awarded ?? 0).toLocaleString("es")}
+              {formatSignedTokens(prediction.points_awarded ?? 0)}
             </span>
           ) : (
             <span className="font-mono text-sm font-semibold text-destructive">
-              −${prediction.stake_amount.toLocaleString("es")}
+              −{formatTokens(prediction.stake_amount)}
             </span>
           )
         ) : (
           <span className="font-mono text-xs text-muted-foreground">
-            pagaría ${prediction.potential_payout.toLocaleString("es")}
+            pagaría {formatTokens(prediction.potential_payout)}
           </span>
         )}
       </div>
@@ -114,7 +115,7 @@ function AccountContent() {
               <Wallet className="size-3" /> Tokens
             </p>
             <p className="font-mono text-xl font-bold text-primary">
-              ${user.balance.toLocaleString("es")}
+              {formatTokens(user.balance)}
             </p>
           </div>
           <div className="rounded-xl bg-muted/60 px-4 py-2 text-right">
@@ -127,7 +128,7 @@ function AccountContent() {
                 netProfit >= 0 ? "text-primary" : "text-destructive"
               )}
             >
-              {netProfit >= 0 ? "+" : "−"}${Math.abs(netProfit).toLocaleString("es")}
+              {formatSignedTokens(netProfit)}
             </p>
           </div>
         </div>

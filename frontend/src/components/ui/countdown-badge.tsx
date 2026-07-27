@@ -14,6 +14,16 @@ function formatRemaining(ms: number): string {
   return days > 0 ? `${days}d ${hh}:${mm}` : `${hh}:${mm}`;
 }
 
+const TEN_MINUTES_MS = 10 * 60_000;
+const ONE_HOUR_MS = 60 * 60_000;
+
+/** Below 10min: about to close, red. Below 1h: closing soon, amber. Otherwise: no urgency. */
+function urgencyClass(remainingMs: number): string {
+  if (remainingMs <= TEN_MINUTES_MS) return "text-destructive";
+  if (remainingMs <= ONE_HOUR_MS) return "text-amber-500 dark:text-amber-400";
+  return "text-foreground";
+}
+
 /**
  * Live-ticking "time until close" readout (HH:MM, or "Dd HH:MM" past 24h), updating client-side
  * every second with no page refresh needed. Purely a display of time-until `target` -- the
@@ -45,7 +55,7 @@ export function CountdownBadge({
     <span
       className={cn(
         "font-mono tabular-nums",
-        isPast ? "text-muted-foreground" : "text-foreground",
+        isPast ? "text-muted-foreground" : urgencyClass(remaining),
         className
       )}
     >
