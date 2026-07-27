@@ -477,8 +477,8 @@ function RoundWinnerPick({
       )}
 
       {selectedDebate && (
-        <div className="flex flex-wrap items-center gap-2">
-          <span className="text-xs text-muted-foreground">Ganador:</span>
+        <div className="flex flex-wrap items-stretch gap-2">
+          <span className="self-center text-xs text-muted-foreground">Ganador:</span>
           {selectedDebate.teams.map((dt) => (
             <button
               key={dt.team.id}
@@ -488,13 +488,20 @@ function RoundWinnerPick({
                 onPayloadChange({ debate_id: Number(debateId), team_id: dt.team.id });
               }}
               className={cn(
-                "rounded-lg border px-3 py-1.5 text-sm transition-colors",
+                "flex flex-col items-start rounded-lg border px-3 py-1.5 text-sm transition-colors",
                 teamId === dt.team.id
                   ? "border-primary/50 bg-primary/10 text-primary"
                   : "border-border bg-card hover:border-primary/50 hover:bg-primary/10"
               )}
             >
-              {dt.team.emoji} {dt.team.name}
+              <span>
+                {dt.team.emoji} {dt.team.name}
+              </span>
+              {dt.team.speakers.length > 0 && (
+                <span className="text-xs text-muted-foreground">
+                  {dt.team.speakers.map((s) => s.name).join(" · ")}
+                </span>
+              )}
             </button>
           ))}
         </div>
@@ -560,6 +567,7 @@ function RoundFullCallPick({
             value: String(dt.team.id),
             label: dt.team.name,
             emoji: dt.team.emoji,
+            hint: dt.team.speakers.map((s) => s.name).join(" · ") || undefined,
           }))}
           existingIds={[]}
           itemLabel="equipo"
@@ -663,11 +671,13 @@ function TeamBreakPick({ tournamentId, market, myPredictions, onPayloadChange }:
 
   const options = (predictions ?? []).map((p) => {
     const existing = findByEntityKey(myPredictions, "team_break", `team:${p.team.id}`);
+    const speakerNames = p.team.speakers.map((s) => s.name).join(" · ");
     return {
       value: String(p.team.id),
       label: p.team.name,
       emoji: p.team.emoji,
       hint:
+        (speakerNames ? `${speakerNames} · ` : "") +
         `${Math.round(p.probability * 100)}% de romper ahora mismo` +
         (existing ? ` · ya apostaste ${formatTokens(existing.stake_amount)}` : ""),
     };
