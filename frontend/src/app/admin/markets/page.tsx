@@ -272,7 +272,7 @@ function MarketPreview({
         Las cuotas arrancan desde el modelo de fuerza (pari-mutuel sembrado) y se mueven con el
         pool real. Cuota justa, sin comisión: la casa no se lleva nada. Rango 1.01x – 50x.{" "}
         {form.bet_type === "team_break" &&
-          "Excepción: equipos que rompen se cotiza directo desde su probabilidad de break, sin pool compartido — romper no es excluyente entre equipos."}
+          "Excepción: cada equipo se cotiza desde su propia probabilidad de break (Monte Carlo) mezclada con SU PROPIA plata apostada — no comparten pool entre sí, porque romper no es excluyente entre equipos."}
         {form.bet_type === "round_head_to_head" &&
           "Cada apuesta puede incluir opcionalmente la diferencia exacta de puestos entre los dos equipos — es todo o nada: si esa parte falla, se pierde la apuesta completa aunque el equipo elegido sí haya quedado arriba."}
       </p>

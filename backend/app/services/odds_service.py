@@ -586,11 +586,17 @@ async def quote_odds(
 
     if bet_type == BetType.TEAM_BREAK:
         # Independent, non-mutually-exclusive proposition ("does THIS team break", where
-        # several teams break simultaneously) -- unlike every other bet type here, priced
-        # straight from that team's own break probability with NO pari-mutuel pool blending.
-        # Pool-blending assumes competing candidates' priors sum to 1 across a shared
-        # compartment (true for "who wins" markets); it would be actively wrong here, since
-        # heavy betting on one team breaking says nothing about any other team's chances.
+        # several teams break simultaneously) -- unlike every other bet type here, there's no
+        # shared compartment to blend into: heavy betting on one team breaking says nothing
+        # about any other team's chances, so this can't reuse e.g. CHAMPION's "stake on this
+        # candidate out of the whole market's stake" pool. Each team instead gets blended
+        # against its OWN money as its own one-candidate compartment (candidate_stake doubles as
+        # compartment_stake) -- with no bets yet this is exactly the simulated probability, and
+        # as real stake piles onto one team the price moves toward what the crowd is backing,
+        # same "seed gets outweighed by real money" mechanic as every other market here (see
+        # `app.domain.odds.pari_mutuel_probability`). This is what keeps two teams with similar
+        # model probabilities from pricing wildly differently just because the crowd is much
+        # more confident about one of them.
         if bet_market.target_break_category_id is None:
             raise UnpriceableMarketError("this market has no break category configured")
         probabilities = await team_break_probability(
@@ -601,7 +607,10 @@ async def quote_odds(
         team_id = payload["team_id"]
         if team_id not in probabilities:
             raise KeyError(team_id)
-        return decimal_odds_from_probability(probabilities[team_id])
+        candidate_stake, _total = await _field_pool(
+            session, bet_market.id, "team_id", team_id, exclude_user_id=exclude_user_id
+        )
+        return pari_mutuel_odds(candidate_stake, candidate_stake, probabilities[team_id])
 
     if bet_type == BetType.BEST_INSTITUTION:
         institution_power = await compute_institution_power_ratings(
@@ -1133,15 +1142,17 @@ async def market_board(session: AsyncSession, bet_market: BetMarket) -> MarketBo
             team = teams.get(tid)
             if team is None:
                 continue
+            team_stake = stake_by.get(tid, 0.0)
             options.append(
                 MarketBoardOption(
                     key=f"team:{tid}",
                     label=team.name,
                     emoji=team.emoji,
-                    stake=round(stake_by.get(tid, 0.0), 2),
+                    stake=round(team_stake, 2),
                     backers=backers_by.get(tid, 0),
-                    # No pool blending here -- see the matching comment in quote_odds.
-                    odds=decimal_odds_from_probability(probabilities[tid]),
+                    # Own-money-as-own-compartment blend -- see the matching comment in
+                    # quote_odds's TEAM_BREAK branch.
+                    odds=pari_mutuel_odds(team_stake, team_stake, probabilities[tid]),
                 )
             )
         return MarketBoard(pool_total=pool_total, bettors=bettors, options=options)

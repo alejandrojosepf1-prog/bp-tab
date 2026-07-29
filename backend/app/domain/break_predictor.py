@@ -78,11 +78,25 @@ def build_break_report(
     num_simulations: int = 2000,
 ) -> list[BreakAssessment]:
     """Full per-team assessment for a break category, combining the rigorous classification
-    with a simulated probability for the teams still genuinely in contention."""
+    with a simulated probability for the teams still genuinely in contention.
+
+    Runs ONE shared Monte Carlo simulation of the whole field (`_simulate_field`) rather than
+    a separate simulation per "alive" team. Besides being O(num_teams x num_simulations) instead
+    of O(num_teams^2 x num_simulations) -- the difference between this staying fast for a
+    realistic field and it hanging the request for tens of seconds -- a shared simulation is
+    also what makes probabilities across teams consistent with each other: every trial breaks
+    exactly `break_size` teams out of the SAME simulated world, so the probabilities this
+    returns necessarily sum to ~break_size across the field. Simulating each team against its
+    own independent random draws (the previous approach) gave every team an uncorrelated
+    Monte Carlo estimate with its own sampling noise, so nothing guaranteed that -- which is
+    exactly why two teams with near-identical real chances could end up priced very
+    differently."""
     points_by_team = {s.team_id: s.team_points for s in standings}
     placement_history = placement_history_by_team(standings)
 
-    assessments = []
+    statuses: dict[int, str] = {}
+    points_needed: dict[int, int | None] = {}
+    any_alive = False
     for team in standings:
         others_points = [p for tid, p in points_by_team.items() if tid != team.team_id]
         status = classify_status(
@@ -91,33 +105,48 @@ def build_break_report(
             rounds_remaining=rounds_remaining,
             break_size=break_size,
         )
+        statuses[team.team_id] = status
+        any_alive = any_alive or status == "alive"
+        points_needed[team.team_id] = (
+            points_needed_for_safety(
+                team.team_points,
+                other_teams_points=others_points,
+                rounds_remaining=rounds_remaining,
+                break_size=break_size,
+            )
+            if status != "safe"
+            else None
+        )
+
+    rank_counts = (
+        _simulate_field(
+            points_by_team,
+            placement_history,
+            rounds_remaining,
+            num_simulations,
+            random.Random("break-predictor:field"),
+        )
+        if any_alive
+        else {}
+    )
+
+    assessments = []
+    for team in standings:
+        status = statuses[team.team_id]
         if status == "safe":
             probability = 1.0
         elif status == "eliminated":
             probability = 0.0
         else:
-            probability = _simulate_probability(
-                team.team_id,
-                points_by_team=points_by_team,
-                placement_history=placement_history,
-                rounds_remaining=rounds_remaining,
-                break_size=break_size,
-                num_simulations=num_simulations,
-            )
+            counts = rank_counts.get(team.team_id, {})
+            probability = sum(c for r, c in counts.items() if r <= break_size) / num_simulations
         assessments.append(
             BreakAssessment(
                 team_id=team.team_id,
                 status=status,
                 probability=probability,
                 projected_rank=team.rank,
-                points_needed_for_safety=points_needed_for_safety(
-                    team.team_points,
-                    other_teams_points=others_points,
-                    rounds_remaining=rounds_remaining,
-                    break_size=break_size,
-                )
-                if status != "safe"
-                else None,
+                points_needed_for_safety=points_needed[team.team_id],
             )
         )
     return assessments
@@ -145,28 +174,32 @@ def _draw_round_points(rank_counts: dict[int, int], rng: random.Random) -> int:
     return BP_POINTS_BY_RANK[4]
 
 
-def _simulate_probability(
-    team_id: int,
-    *,
+def _simulate_field(
     points_by_team: dict[int, int],
     placement_history: dict[int, dict[int, int]],
     rounds_remaining: int,
-    break_size: int,
     num_simulations: int,
-) -> float:
-    rng = random.Random(f"break-predictor:{team_id}")
-    breaks = 0
+    rng: random.Random,
+) -> dict[int, dict[int, int]]:
+    """Runs `num_simulations` trials of the WHOLE field at once -- each trial draws every team's
+    remaining rounds from its own placement history, then ranks the full field once, so the
+    same trial answers "who breaks" for every team simultaneously and consistently (the same
+    fixed number of teams breaks in every single trial, same as a real break). Returns, per
+    team_id, a {final_rank: times_landed_there} counter across all trials --
+    both break probability (sum of counts for ranks <= break_size) and the exact-rank
+    distribution are read off these same counts, so both stay consistent with each other too."""
+    team_ids = list(points_by_team)
+    rank_counts: dict[int, dict[int, int]] = {tid: defaultdict(int) for tid in team_ids}
     for _ in range(num_simulations):
         final_points = dict(points_by_team)
-        for tid in final_points:
+        for tid in team_ids:
             history = placement_history.get(tid, {})
             for _round in range(rounds_remaining):
                 final_points[tid] += _draw_round_points(history, rng)
         ranked = sorted(final_points.items(), key=lambda kv: (-kv[1], kv[0]))
-        breaking_ids = {tid for tid, _ in ranked[:break_size]}
-        if team_id in breaking_ids:
-            breaks += 1
-    return breaks / num_simulations
+        for rank, (tid, _points) in enumerate(ranked, start=1):
+            rank_counts[tid][rank] += 1
+    return rank_counts
 
 
 def simulate_rank_distribution(
@@ -181,26 +214,19 @@ def simulate_rank_distribution(
     on -- prices `team_break`'s optional "exact rank" sub-bet (see
     `app.services.betting_service`'s sub_bet handling for `TEAM_BREAK`).
 
-    Reuses the EXACT same Monte Carlo mechanics `_simulate_probability` uses for "does it break
-    at all" (same seeded RNG per team, same `_draw_round_points` history-weighted draw) --
-    deliberately not the Plackett-Luce/softmax "power rating" model the rest of this app's odds
-    engine (`app.domain.odds`) uses for round_winner/champion/etc. Those are a genuinely
-    different pricing subsystem here: break probability is driven by each team's own points
-    history and how many rounds remain, which a static power rating doesn't model, and there's
-    already a working simulator for exactly that -- reading a different summary statistic
-    (final rank instead of "in the top break_size") off the same simulated standings keeps this
-    consistent with `team_break_probability` instead of introducing a second, incompatible way
-    to price the same underlying event.
+    Reuses `_simulate_field`, the same whole-field Monte Carlo `build_break_report` uses for
+    "does it break at all" -- deliberately not the Plackett-Luce/softmax "power rating" model
+    the rest of this app's odds engine (`app.domain.odds`) uses for round_winner/champion/etc.
+    Those are a genuinely different pricing subsystem here: break probability is driven by each
+    team's own points history and how many rounds remain, which a static power rating doesn't
+    model, and there's already a working simulator for exactly that -- reading a different
+    summary statistic (final rank instead of "in the top break_size") off the same simulated
+    standings keeps this consistent with `team_break_probability` instead of introducing a
+    second, incompatible way to price the same underlying event.
     """
     rng = random.Random(f"break-predictor:{team_id}")
-    rank_counts: dict[int, int] = defaultdict(int)
-    for _ in range(num_simulations):
-        final_points = dict(points_by_team)
-        for tid in final_points:
-            history = placement_history.get(tid, {})
-            for _round in range(rounds_remaining):
-                final_points[tid] += _draw_round_points(history, rng)
-        ranked = sorted(final_points.items(), key=lambda kv: (-kv[1], kv[0]))
-        rank_of_team = next(i + 1 for i, (tid, _points) in enumerate(ranked) if tid == team_id)
-        rank_counts[rank_of_team] += 1
-    return {rank: count / num_simulations for rank, count in rank_counts.items()}
+    rank_counts = _simulate_field(
+        points_by_team, placement_history, rounds_remaining, num_simulations, rng
+    )
+    counts = rank_counts.get(team_id, {})
+    return {rank: count / num_simulations for rank, count in counts.items()}
