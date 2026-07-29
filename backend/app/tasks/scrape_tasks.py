@@ -70,17 +70,14 @@ async def scrape_tournament_async(
             log = await IngestionService(session).ingest(tournament, snapshot)
             await refresh_tournament_status(session, tournament)
             await auto_close_pretournament_markets(session, tournament)
-            await _recompute_break_predictions_for_tournament(session, tournament.id)
-            await _settle_resolvable_markets(session, tournament.id)
-            await settle_pending_sub_bets(session, tournament.id)
-
+            # Committed here, before the derived/best-effort work below: that work can hold the
+            # connection idle for a long time (recompute_break_predictions' Monte Carlo can run
+            # tens of seconds for a large field -- see break_service.py), and a managed Postgres
+            # endpoint (Neon et al.) can drop a connection that's idle that long. If that
+            # happens mid-transaction with nothing committed yet, the real, hard-won scrape
+            # result (new rounds/debates/ballots) would be rolled back and silently lost right
+            # along with it -- exactly the trap this commit avoids.
             await session.commit()
-            return {
-                "tournament_id": tournament_id,
-                "entities_created": log.entities_created,
-                "entities_updated": log.entities_updated,
-                "new_debates": len(snapshot.ballots),
-            }
         except Exception as exc:
             # Used to vanish completely: IngestionService.ingest only ever wrote a ScrapeLog row
             # on the happy path (at the very end), so a scrape that threw partway through --
@@ -101,6 +98,26 @@ async def scrape_tournament_async(
             )
             await session.commit()
             raise
+
+        # Derived data, not real scraped data: break predictions and bet settlement. Cheap to
+        # skip for one cycle and pick back up next time, so a failure here (e.g. the connection
+        # staleness issue described above) must not be allowed to undo the ingestion that's
+        # already durably committed by this point.
+        try:
+            await _recompute_break_predictions_for_tournament(session, tournament.id)
+            await _settle_resolvable_markets(session, tournament.id)
+            await settle_pending_sub_bets(session, tournament.id)
+            await session.commit()
+        except Exception:
+            logger.exception("post-ingest processing failed for tournament_id=%s", tournament_id)
+            await session.rollback()
+
+        return {
+            "tournament_id": tournament_id,
+            "entities_created": log.entities_created,
+            "entities_updated": log.entities_updated,
+            "new_debates": len(snapshot.ballots),
+        }
 
 
 async def _recompute_break_predictions_for_tournament(
