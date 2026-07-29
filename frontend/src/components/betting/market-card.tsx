@@ -440,14 +440,41 @@ function RoundWinnerPick({
 }: PickerProps) {
   const [debateId, setDebateId] = useState<string | null>(null);
   const [teamId, setTeamId] = useState<number | null>(null);
+  const [subBetOpen, setSubBetOpen] = useState(false);
+  const [speakerPoints, setSpeakerPoints] = useState<Record<number, string>>({});
   const { round, debates } = useRoundDebates(tournamentId, market);
   const selectedDebate = debates.find((d) => String(d.id) === debateId);
+  const selectedTeam = selectedDebate?.teams.find((dt) => dt.team.id === teamId)?.team;
   const existingForDebate = debateId
     ? findByEntityKey(myPredictions, "round_winner", `debate:${debateId}`)
     : undefined;
 
   if (!market.target_round_id) {
     return <p className="text-xs text-muted-foreground">Este mercado no tiene ronda asignada.</p>;
+  }
+
+  function emit(
+    debate: string | null,
+    team: number | null,
+    open: boolean,
+    points: Record<number, string>
+  ) {
+    if (!debate || !team) {
+      onPayloadChange(null);
+      return;
+    }
+    const payload: Record<string, unknown> = { debate_id: Number(debate), team_id: team };
+    if (open && selectedTeam) {
+      const entries = selectedTeam.speakers.map((s) => {
+        const raw = points[s.id];
+        const value = raw !== undefined && raw !== "" ? Number(raw) : null;
+        return { speaker_id: s.id, points: value };
+      });
+      if (entries.length === 2 && entries.every((e) => e.points !== null && Number.isFinite(e.points))) {
+        payload.sub_bet = { speaker_scores: entries };
+      }
+    }
+    onPayloadChange(payload);
   }
 
   return (
@@ -471,6 +498,8 @@ function RoundWinnerPick({
         onChange={(v) => {
           setDebateId(v);
           setTeamId(null);
+          setSubBetOpen(false);
+          setSpeakerPoints({});
           onPayloadChange(null);
         }}
         placeholder="Buscar sala o equipo…"
@@ -493,6 +522,8 @@ function RoundWinnerPick({
               type="button"
               onClick={() => {
                 setTeamId(dt.team.id);
+                setSubBetOpen(false);
+                setSpeakerPoints({});
                 onPayloadChange({ debate_id: Number(debateId), team_id: dt.team.id });
               }}
               className={cn(
@@ -512,6 +543,54 @@ function RoundWinnerPick({
               )}
             </button>
           ))}
+        </div>
+      )}
+
+      {selectedTeam && selectedTeam.speakers.length === 2 && (
+        <div className="flex flex-col gap-2 rounded-lg border border-dashed border-border px-3 py-2">
+          <button
+            type="button"
+            onClick={() => {
+              const next = !subBetOpen;
+              setSubBetOpen(next);
+              emit(debateId, teamId, next, speakerPoints);
+            }}
+            className="w-fit text-xs font-medium text-primary hover:underline"
+          >
+            {subBetOpen ? "− Quitar apuesta específica" : "+ Añadir apuesta específica"}
+          </button>
+          {subBetOpen && (
+            <>
+              <p className="text-xs text-muted-foreground">
+                Bono si además acertás los puntos EXACTOS de los dos oradores de{" "}
+                {selectedTeam.name} en este debate. La apuesta base se cobra apenas se sabe quién
+                ganó la ronda, sin esperar esto — el bono se liquida aparte, más adelante (a
+                veces recién al final del torneo, cuando el tab libera los puntajes), y solo
+                SUMA: nunca te quita lo que ya cobraste.
+              </p>
+              <div className="flex flex-wrap items-end gap-3">
+                {selectedTeam.speakers.map((speaker) => (
+                  <div key={speaker.id} className="flex flex-col gap-1">
+                    <span className="text-[0.7rem] uppercase tracking-wider text-muted-foreground">
+                      {speaker.name}
+                    </span>
+                    <Input
+                      type="number"
+                      step="0.1"
+                      placeholder="76.5"
+                      className="h-8 w-24 font-mono"
+                      value={speakerPoints[speaker.id] ?? ""}
+                      onChange={(e) => {
+                        const next = { ...speakerPoints, [speaker.id]: e.target.value };
+                        setSpeakerPoints(next);
+                        emit(debateId, teamId, subBetOpen, next);
+                      }}
+                    />
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
         </div>
       )}
     </div>

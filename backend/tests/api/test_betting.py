@@ -927,3 +927,91 @@ async def test_round_head_to_head_quote_place_and_settle_with_sub_bet(
     expected_payout = 10.0 * settled_prediction["odds"] * settled_prediction["sub_bet_odds"]
     assert settled_prediction["points_awarded"] == pytest.approx(expected_payout)
     assert settled_prediction["sub_bet_points_awarded"] == pytest.approx(expected_payout)
+
+
+async def test_round_winner_speaker_points_sub_bet_pays_base_immediately_and_stays_open(
+    client: AsyncClient, db_session: AsyncSession
+) -> None:
+    """Unlike round_head_to_head/team_break's all-or-nothing combo above, round_winner's
+    speaker-points sub-bet settles in TWO separate steps: /settle only ever resolves the base
+    pick here (speaker points are frequently withheld until the tournament's final tab) -- the
+    sub-bet itself only resolves later via `betting_service.settle_pending_sub_bets`, run from
+    the auto-scrape cycle rather than any HTTP endpoint, so that half is exercised directly at
+    the service layer (see test_betting_service.py) rather than through this client."""
+    tournament, round_1, debate, teams = await _make_full_call_debate(db_session)
+    winning_team = teams[0]
+    speakers = [
+        Speaker(tournament_id=tournament.id, team_id=winning_team.id, name=f"Speaker {i}")
+        for i in (1, 2)
+    ]
+    db_session.add_all(speakers)
+    await db_session.commit()
+
+    admin = await make_user(db_session, email="admin-rw@example.com", role=UserRole.ADMIN)
+    user = await make_user(db_session, email="user-rw@example.com")
+
+    create_response = await client.post(
+        f"/api/v1/tournaments/{tournament.id}/bet-markets",
+        json={
+            "bet_type": "round_winner",
+            "label": "Round 1 winners",
+            "opens_at": PAST.isoformat(),
+            "closes_at": FUTURE.isoformat(),
+            "target_round_id": round_1.id,
+        },
+        headers=auth_headers(admin),
+    )
+    assert create_response.status_code == 201
+    market_id = create_response.json()["id"]
+
+    payload = {
+        "debate_id": debate.id,
+        "team_id": winning_team.id,
+        "sub_bet": {
+            "speaker_scores": [
+                {"speaker_id": speakers[0].id, "points": 76.0},
+                {"speaker_id": speakers[1].id, "points": 75.5},
+            ]
+        },
+    }
+    quote = await client.post(
+        f"/api/v1/bet-markets/{market_id}/quote",
+        json={"payload": payload},
+        headers=auth_headers(user),
+    )
+    assert quote.status_code == 200
+    assert quote.json()["sub_bet_odds"] == 15.0
+
+    prediction_response = await client.post(
+        f"/api/v1/bet-markets/{market_id}/predictions",
+        json={"payload": payload, "stake_amount": 10.0},
+        headers=auth_headers(user),
+    )
+    assert prediction_response.status_code == 201
+
+    for team, rank in zip(teams, [1, 2, 3, 4], strict=True):
+        row = (
+            await db_session.execute(
+                select(DebateTeam).where(
+                    DebateTeam.debate_id == debate.id, DebateTeam.team_id == team.id
+                )
+            )
+        ).scalar_one()
+        row.rank_in_debate = rank
+    await db_session.commit()
+
+    settle_response = await client.post(
+        f"/api/v1/bet-markets/{market_id}/settle", json={}, headers=auth_headers(admin)
+    )
+    assert settle_response.status_code == 200
+    assert settle_response.json() == {"settled": True}
+
+    after = await client.get(
+        f"/api/v1/bet-markets/{market_id}/predictions/me", headers=auth_headers(user)
+    )
+    settled_prediction = after.json()[0]
+    assert settled_prediction["status"] == "settled"
+    assert settled_prediction["points_awarded"] == pytest.approx(10.0 * settled_prediction["odds"])
+    # The base pick already paid in full -- the sub-bet is still awaiting real speaker points.
+    assert settled_prediction["sub_bet_status"] == "open"
+    assert settled_prediction["sub_bet_points_awarded"] is None

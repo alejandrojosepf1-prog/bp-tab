@@ -113,10 +113,13 @@ class Prediction(Base, TimestampMixin):
     # on -- a later swing in the market's pool or in team strength never changes an
     # already-placed bet's payout, same as a real fixed-odds sportsbook (not pari-mutuel).
     odds: Mapped[float] = mapped_column(Float, nullable=False)
-    # The actual amount credited back to User.balance once settled: stake_amount * odds if this
-    # prediction won, 0.0 if it lost, None while still OPEN. (Field predates the odds/stake
+    # The total amount ever credited back to User.balance for this prediction: stake_amount *
+    # odds if it won, 0.0 if it lost, None while still OPEN. (Field predates the odds/stake
     # model -- kept under its original name since it's the same "how much did this prediction
-    # pay" concept, just no longer a fixed per-bet_type point value.)
+    # pay" concept, just no longer a fixed per-bet_type point value.) For round_winner's
+    # deferred speaker-points sub-bet specifically, `settle_pending_sub_bets` ADDS its bonus on
+    # top of this value later, once the sub-bet resolves -- see sub_bet_points_awarded below for
+    # that bonus broken out on its own.
     points_awarded: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     # --- Optional sub-bet (modular "apuesta específica" modifier) -------------------------

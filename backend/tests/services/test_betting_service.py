@@ -34,6 +34,7 @@ from app.services.betting_service import (
     _entity_key,
     auto_close_pretournament_markets,
     settle_market,
+    settle_pending_sub_bets,
     validate_market_creation,
 )
 
@@ -1192,3 +1193,289 @@ async def test_team_break_sub_bet_exact_rank_is_all_or_nothing(db_session) -> No
     assert wrong.points_awarded == 0.0  # team_1 broke (base won) but wrong exact rank -> all lost
     assert wrong.sub_bet_status == PredictionStatus.SETTLED
     assert wrong.sub_bet_points_awarded == 0.0
+
+
+async def _make_round_winner_debate_with_speakers(db_session, tournament):
+    """One debate, 2 teams, and 2 speakers on the team the tests bet on -- enough to exercise
+    round_winner's deferred speaker-points sub-bet without needing the other bet types'
+    4-team-BP-debate shape."""
+    round_1 = Round(
+        tournament_id=tournament.id, seq=1, name="Round 1", stage=RoundStage.PRELIMINARY,
+        status=RoundStatus.RELEASED,
+    )
+    db_session.add(round_1)
+    await db_session.flush()
+    winning_team = Team(tournament_id=tournament.id, external_id=1, name="Winning Team")
+    other_team = Team(tournament_id=tournament.id, external_id=2, name="Other Team")
+    db_session.add_all([winning_team, other_team])
+    await db_session.flush()
+    debate = Debate(tournament_id=tournament.id, round_id=round_1.id, external_id=1)
+    db_session.add(debate)
+    await db_session.flush()
+    winning_debate_team = DebateTeam(
+        debate_id=debate.id, team_id=winning_team.id, position=BPPosition.OPENING_GOVERNMENT,
+    )
+    other_debate_team = DebateTeam(
+        debate_id=debate.id, team_id=other_team.id, position=BPPosition.OPENING_OPPOSITION,
+    )
+    db_session.add_all([winning_debate_team, other_debate_team])
+    await db_session.flush()
+    speakers = [
+        Speaker(tournament_id=tournament.id, team_id=winning_team.id, name=f"Speaker {i}")
+        for i in (1, 2)
+    ]
+    db_session.add_all(speakers)
+    await db_session.flush()
+    db_session.add_all(
+        [
+            SpeakerScore(
+                debate_team_id=winning_debate_team.id, speaker_id=speakers[0].id,
+                role=SpeakerRole.PM, score=None,
+            ),
+            SpeakerScore(
+                debate_team_id=winning_debate_team.id, speaker_id=speakers[1].id,
+                role=SpeakerRole.DPM, score=None,
+            ),
+        ]
+    )
+    await db_session.flush()
+    return (
+        round_1, debate, winning_team, other_team, winning_debate_team, other_debate_team,
+        speakers,
+    )
+
+
+async def test_round_winner_sub_bet_pays_base_then_settles_deferred_once_scores_arrive(
+    db_session,
+) -> None:
+    """Regression guard for the exact trap the plan called out: by the time a tournament
+    finally releases withheld speaker points, the round_winner market has typically been
+    SETTLED for a long time already -- settle_pending_sub_bets must find and resolve the
+    sub-bet anyway, without depending on BetMarket.status."""
+    tournament = await _make_tournament(db_session)
+    (
+        round_1, debate, winning_team, _other_team, winning_debate_team, other_debate_team,
+        speakers,
+    ) = await _make_round_winner_debate_with_speakers(db_session, tournament)
+    winning_debate_team.rank_in_debate = 1
+    other_debate_team.rank_in_debate = 2
+    await db_session.flush()
+
+    market = await _make_market(
+        db_session, tournament, BetType.ROUND_WINNER, target_round_id=round_1.id
+    )
+    alice = await _make_user(db_session, "alice@example.com")
+    alice_balance_before = alice.balance
+    db_session.add(
+        _prediction(
+            BetType.ROUND_WINNER, market_id=market.id, user_id=alice.id,
+            payload={
+                "debate_id": debate.id, "team_id": winning_team.id,
+                "sub_bet": {
+                    "speaker_scores": [
+                        {"speaker_id": speakers[0].id, "points": 76.0},
+                        {"speaker_id": speakers[1].id, "points": 75.5},
+                    ]
+                },
+            },
+            stake_amount=10.0, odds=2.0, sub_bet_odds=15.0,
+        )
+    )
+    await db_session.commit()
+
+    assert await settle_market(db_session, market) is True
+    await db_session.commit()
+
+    prediction = (await db_session.execute(select(Prediction))).scalar_one()
+    assert prediction.status == PredictionStatus.SETTLED
+    assert prediction.points_awarded == 20.0  # base only: stake(10) * odds(2)
+    assert prediction.sub_bet_status == PredictionStatus.OPEN
+    assert prediction.sub_bet_points_awarded is None
+    assert alice.balance == alice_balance_before + 20.0
+    # The trap: the market is ALREADY settled here, same as every round_winner market will be
+    # by the time speaker points actually show up.
+    assert market.status == BetMarketStatus.SETTLED
+
+    # Speaker points still withheld -- nothing resolvable yet.
+    assert await settle_pending_sub_bets(db_session, tournament.id) == 0
+    await db_session.commit()
+    assert prediction.sub_bet_status == PredictionStatus.OPEN
+
+    # Tab finally releases the real scores, matching the guess exactly.
+    scores = (await db_session.execute(select(SpeakerScore))).scalars().all()
+    for score in scores:
+        score.score = 76.0 if score.speaker_id == speakers[0].id else 75.5
+    await db_session.flush()
+
+    assert await settle_pending_sub_bets(db_session, tournament.id) == 1
+    await db_session.commit()
+
+    bonus = 10.0 * 2.0 * (15.0 - 1)  # stake * odds * (sub_bet_odds - 1)
+    assert prediction.sub_bet_status == PredictionStatus.SETTLED
+    assert prediction.sub_bet_points_awarded == bonus
+    assert prediction.points_awarded == 20.0 + bonus  # base + bonus folded together
+    assert alice.balance == alice_balance_before + 20.0 + bonus
+
+    leaderboard = (
+        await db_session.execute(
+            select(LeaderboardEntry).where(LeaderboardEntry.user_id == alice.id)
+        )
+    ).scalar_one()
+    assert leaderboard.total_points == (20.0 + bonus) - 10.0  # net profit = payout - stake
+
+
+async def test_round_winner_sub_bet_settles_as_a_loss_immediately_when_base_loses(
+    db_session,
+) -> None:
+    """The modifier is about the WINNING team's speakers -- if the picked team never won, there
+    is nothing left to wait for, so this must settle right away rather than sit OPEN forever."""
+    tournament = await _make_tournament(db_session)
+    (
+        round_1, debate, winning_team, other_team, winning_debate_team, other_debate_team,
+        speakers,
+    ) = await _make_round_winner_debate_with_speakers(db_session, tournament)
+    # other_team wins instead of winning_team.
+    other_debate_team.rank_in_debate = 1
+    winning_debate_team.rank_in_debate = 2
+    await db_session.flush()
+
+    market = await _make_market(
+        db_session, tournament, BetType.ROUND_WINNER, target_round_id=round_1.id
+    )
+    alice = await _make_user(db_session, "alice@example.com")
+    db_session.add(
+        _prediction(
+            BetType.ROUND_WINNER, market_id=market.id, user_id=alice.id,
+            payload={
+                "debate_id": debate.id, "team_id": winning_team.id,
+                "sub_bet": {
+                    "speaker_scores": [
+                        {"speaker_id": speakers[0].id, "points": 76.0},
+                        {"speaker_id": speakers[1].id, "points": 75.5},
+                    ]
+                },
+            },
+            stake_amount=10.0, odds=2.0, sub_bet_odds=15.0,
+        )
+    )
+    await db_session.commit()
+
+    assert await settle_market(db_session, market) is True
+    await db_session.commit()
+
+    prediction = (await db_session.execute(select(Prediction))).scalar_one()
+    assert prediction.points_awarded == 0.0
+    assert prediction.sub_bet_status == PredictionStatus.SETTLED
+    assert prediction.sub_bet_points_awarded == 0.0
+    # Nothing left pending -- settle_pending_sub_bets shouldn't even pick this one up.
+    assert await settle_pending_sub_bets(db_session, tournament.id) == 0
+
+
+async def test_round_winner_sub_bet_settles_as_a_loss_when_speaker_scores_are_wrong(
+    db_session,
+) -> None:
+    tournament = await _make_tournament(db_session)
+    (
+        round_1, debate, winning_team, _other_team, winning_debate_team, other_debate_team,
+        speakers,
+    ) = await _make_round_winner_debate_with_speakers(db_session, tournament)
+    winning_debate_team.rank_in_debate = 1
+    other_debate_team.rank_in_debate = 2
+    await db_session.flush()
+
+    market = await _make_market(
+        db_session, tournament, BetType.ROUND_WINNER, target_round_id=round_1.id
+    )
+    alice = await _make_user(db_session, "alice@example.com")
+    alice_balance_before = alice.balance
+    db_session.add(
+        _prediction(
+            BetType.ROUND_WINNER, market_id=market.id, user_id=alice.id,
+            payload={
+                "debate_id": debate.id, "team_id": winning_team.id,
+                "sub_bet": {
+                    "speaker_scores": [
+                        {"speaker_id": speakers[0].id, "points": 76.0},
+                        {"speaker_id": speakers[1].id, "points": 75.5},
+                    ]
+                },
+            },
+            stake_amount=10.0, odds=2.0, sub_bet_odds=15.0,
+        )
+    )
+    await db_session.commit()
+
+    assert await settle_market(db_session, market) is True
+    await db_session.commit()
+
+    prediction = (await db_session.execute(select(Prediction))).scalar_one()
+    assert prediction.sub_bet_status == PredictionStatus.OPEN
+
+    scores = (await db_session.execute(select(SpeakerScore))).scalars().all()
+    for score in scores:
+        # Real scores don't match the guess.
+        score.score = 70.0 if score.speaker_id == speakers[0].id else 70.0
+    await db_session.flush()
+
+    assert await settle_pending_sub_bets(db_session, tournament.id) == 1
+    await db_session.commit()
+
+    assert prediction.sub_bet_status == PredictionStatus.SETTLED
+    assert prediction.sub_bet_points_awarded == 0.0
+    assert prediction.points_awarded == 20.0  # base payout stands, no bonus added
+    assert alice.balance == alice_balance_before + 20.0
+
+
+async def test_round_winner_sub_bet_odds_rejects_malformed_speaker_scores(db_session) -> None:
+    from app.services.odds_service import quote_sub_bet_odds
+
+    tournament = await _make_tournament(db_session)
+    (round_1, debate, winning_team, _other, _wdt, _odt, speakers) = (
+        await _make_round_winner_debate_with_speakers(db_session, tournament)
+    )
+    market = await _make_market(
+        db_session, tournament, BetType.ROUND_WINNER, target_round_id=round_1.id
+    )
+    base_payload = {"debate_id": debate.id, "team_id": winning_team.id}
+
+    # Only one speaker named -- a BP team always has 2.
+    one_speaker_sub_bet = {
+        "speaker_scores": [{"speaker_id": speakers[0].id, "points": 76.0}]
+    }
+    with pytest.raises(ValueError):
+        await quote_sub_bet_odds(
+            db_session, market, {**base_payload, "sub_bet": one_speaker_sub_bet}
+        )
+
+    # Missing "points" on one entry.
+    with pytest.raises(ValueError):
+        await quote_sub_bet_odds(
+            db_session, market,
+            {
+                **base_payload,
+                "sub_bet": {
+                    "speaker_scores": [
+                        {"speaker_id": speakers[0].id, "points": 76.0},
+                        {"speaker_id": speakers[1].id},
+                    ]
+                },
+            },
+        )
+
+    # Well-formed -- flat admin-tunable price, no DB-dependent math.
+    odds = await quote_sub_bet_odds(
+        db_session, market,
+        {
+            **base_payload,
+            "sub_bet": {
+                "speaker_scores": [
+                    {"speaker_id": speakers[0].id, "points": 76.0},
+                    {"speaker_id": speakers[1].id, "points": 75.5},
+                ]
+            },
+        },
+    )
+    assert odds == 15.0
+
+    # No sub_bet at all -- None, same as every other bet type.
+    assert await quote_sub_bet_odds(db_session, market, base_payload) is None

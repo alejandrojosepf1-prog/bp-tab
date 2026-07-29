@@ -163,3 +163,19 @@ def did_sub_bet_win(bet_type: BetType, payload: dict, outcome: dict) -> bool:
         return rank_ok and points_ok
 
     return False
+
+
+def did_speaker_points_sub_bet_win(sub_bet: dict, score_by_speaker: dict[int, float]) -> bool:
+    """Whether every guessed speaker score in `sub_bet["speaker_scores"]` (a list of
+    `{"speaker_id": int, "points": float}`) exactly matches the real, now-known `SpeakerScore`
+    for that speaker -- ROUND_WINNER's deferred speaker-points sub-bet, resolved independently
+    of the base pick by `betting_service.settle_pending_sub_bets` once the tournament finally
+    releases withheld speaker points.
+
+    `score_by_speaker` must already be known-complete (every named speaker has a non-null
+    score) -- callers check that themselves before invoking this, since "not yet known" and
+    "known and wrong" need different handling (retry later vs. settle as a loss)."""
+    entries = sub_bet.get("speaker_scores") or []
+    if not entries:
+        return False
+    return all(score_by_speaker.get(e.get("speaker_id")) == e.get("points") for e in entries)

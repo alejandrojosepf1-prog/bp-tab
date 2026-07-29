@@ -61,6 +61,14 @@ DEFAULT_BREAKOUT_TEAM_ODDS = 4.0
 # integer point total is a much longer shot than picking one team out of a field.
 DEFAULT_EXACT_POINTS_SUB_BET_ODDS = 8.0
 
+# round_winner's "speaker points" sub-bet (see betting_service.settle_pending_sub_bets for the
+# deferred-settlement mechanics) asks for TWO independent exact speaker scores at once, on top
+# of the base pick already needing that team to win the room -- a much longer shot than
+# team_break's single exact_points guess above, so it's priced notably higher on the same flat,
+# admin-tunable pattern (no historical distribution of speaker scores to build a real
+# probability from either).
+DEFAULT_SPEAKER_POINTS_SUB_BET_ODDS = 15.0
+
 
 class UnpriceableMarketError(Exception):
     """Raised when a market/payload combination can't be priced yet (e.g. no debates played
@@ -712,6 +720,19 @@ async def quote_sub_bet_odds(
             return round(rank_odds * DEFAULT_EXACT_POINTS_SUB_BET_ODDS, 2)
         return rank_odds
 
+    if bet_type == BetType.ROUND_WINNER:
+        # Deferred family (see betting_service.settle_pending_sub_bets) -- no pool blending and
+        # no per-payload probability model at all, just like DEFAULT_EXACT_POINTS_SUB_BET_ODDS
+        # above; the shape is still validated here so a malformed sub_bet fails fast at quote
+        # time rather than silently pricing as "no sub-bet" and surprising the user later.
+        speaker_scores = sub_bet.get("speaker_scores")
+        if not speaker_scores or len(speaker_scores) != 2:
+            raise ValueError("sub_bet.speaker_scores must list exactly the team's 2 speakers")
+        for entry in speaker_scores:
+            if entry.get("speaker_id") is None or entry.get("points") is None:
+                raise ValueError("sub_bet.speaker_scores entries need speaker_id and points")
+        return DEFAULT_SPEAKER_POINTS_SUB_BET_ODDS
+
     return None
 
 
@@ -783,6 +804,15 @@ def format_payload_label(
         return f"{winner} gana ({a} vs. {b})", emoji
     if bet_type == BetType.ROUND_WINNER:
         name, emoji = team(payload.get("team_id"))
+        sub_bet = payload.get("sub_bet") or {}
+        entries = sub_bet.get("speaker_scores") or []
+        if entries:
+            points = " y ".join(
+                str(e["points"])
+                for e in entries
+                if e.get("points") is not None
+            )
+            return f"{name} gana su debate + oradores hacen {points} pts", emoji
         return f"{name} gana su debate", emoji
     if bet_type in (BetType.TOP_N_BREAK, BetType.ROUND_FULL_CALL):
         names = " → ".join(team(tid)[0] for tid in payload.get("team_ids", []))

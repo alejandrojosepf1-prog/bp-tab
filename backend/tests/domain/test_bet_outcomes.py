@@ -1,6 +1,6 @@
 import pytest
 
-from app.domain.bet_outcomes import did_prediction_win
+from app.domain.bet_outcomes import did_prediction_win, did_speaker_points_sub_bet_win
 from app.models.enums import BetType
 
 
@@ -80,3 +80,25 @@ def test_best_institution_loss() -> None:
 def test_unknown_bet_type_raises() -> None:
     with pytest.raises(ValueError):
         did_prediction_win("not-a-real-bet-type", {}, {})  # type: ignore[arg-type]
+
+
+_TWO_SPEAKER_SUB_BET = {
+    "speaker_scores": [
+        {"speaker_id": 1, "points": 76.0},
+        {"speaker_id": 2, "points": 75.5},
+    ]
+}
+
+
+def test_speaker_points_sub_bet_wins_when_both_scores_match_exactly() -> None:
+    score_by_speaker = {1: 76.0, 2: 75.5}
+    assert did_speaker_points_sub_bet_win(_TWO_SPEAKER_SUB_BET, score_by_speaker) is True
+
+
+def test_speaker_points_sub_bet_loses_when_one_score_is_off() -> None:
+    score_by_speaker = {1: 76.0, 2: 75.0}
+    assert did_speaker_points_sub_bet_win(_TWO_SPEAKER_SUB_BET, score_by_speaker) is False
+
+
+def test_speaker_points_sub_bet_empty_sub_bet_is_a_loss() -> None:
+    assert did_speaker_points_sub_bet_win({}, {1: 76.0}) is False

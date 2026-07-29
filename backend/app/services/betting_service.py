@@ -22,7 +22,11 @@ import datetime
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.domain.bet_outcomes import did_prediction_win, did_sub_bet_win
+from app.domain.bet_outcomes import (
+    did_prediction_win,
+    did_speaker_points_sub_bet_win,
+    did_sub_bet_win,
+)
 from app.models import (
     Break,
     Debate,
@@ -69,6 +73,12 @@ _ROUND_SCOPED_BET_TYPES = {
 # speaker-points sub-bet is deliberately NOT here: it settles independently via
 # `settle_pending_sub_bets`, since speaker points are often withheld until the tournament ends.
 _SAME_TIMING_SUB_BET_TYPES = {BetType.ROUND_HEAD_TO_HEAD, BetType.TEAM_BREAK}
+
+# Bet types whose optional sub-bet resolves LATER, independent of the base pick -- the base pays
+# in full the moment the round result is known; the sub-bet is only marked OPEN then (never at
+# placement time -- see place_prediction) and resolves separately via `settle_pending_sub_bets`,
+# crediting an ADDITIONAL bonus on top of the base payout that already happened.
+_DEFERRED_SUB_BET_TYPES = {BetType.ROUND_WINNER}
 
 
 class InsufficientBalanceError(Exception):
@@ -413,12 +423,26 @@ def _settle_prediction_payout(bet_type: BetType, prediction: Prediction, outcome
     behind this feature. Sets `sub_bet_status`/`sub_bet_points_awarded` as a side effect when a
     sub-bet was attempted; returns the total to credit to the user's balance.
 
-    ROUND_WINNER's speaker-points sub-bet does NOT go through here -- it settles independently,
-    much later, via `settle_pending_sub_bets`, since the base pick pays on its own the moment
-    the round result is known."""
+    ROUND_WINNER's speaker-points sub-bet is the one deferred exception (`_DEFERRED_SUB_BET_TYPES`):
+    the base pick pays on its own the moment the round result is known, and the sub-bet is only
+    flipped to `sub_bet_status=OPEN` here (never at placement) -- its actual resolution happens
+    much later, via `settle_pending_sub_bets`."""
     won = did_prediction_win(bet_type, prediction.payload, outcome)
     sub_bet_payload = prediction.payload.get("sub_bet")
     has_sub_bet = bool(sub_bet_payload) and prediction.sub_bet_odds is not None
+
+    if has_sub_bet and bet_type in _DEFERRED_SUB_BET_TYPES:
+        # The base pays on its own right now, independent of the sub-bet -- see
+        # settle_pending_sub_bets for how the modifier resolves later. A losing base pick makes
+        # the modifier moot forever (there's no "this team's speakers scored X" to check if this
+        # team never won), so it's settled as a loss immediately instead of waiting on data that
+        # could never change the outcome.
+        if won:
+            prediction.sub_bet_status = PredictionStatus.OPEN
+        else:
+            prediction.sub_bet_status = PredictionStatus.SETTLED
+            prediction.sub_bet_points_awarded = 0.0
+        return prediction.stake_amount * prediction.odds if won else 0.0
 
     if not has_sub_bet or bet_type not in _SAME_TIMING_SUB_BET_TYPES:
         return prediction.stake_amount * prediction.odds if won else 0.0
@@ -506,6 +530,81 @@ async def settle_market(
     if any_settled:
         await recompute_leaderboard(session, bet_market.tournament_id)
     return True
+
+
+async def settle_pending_sub_bets(session: AsyncSession, tournament_id: int) -> int:
+    """Resolves ROUND_WINNER's deferred speaker-points sub-bet once real `SpeakerScore` data
+    exists for the named speakers -- deliberately NOT filtered by `BetMarket.status`. By the
+    time a tournament finally releases withheld speaker points, every round_winner market for
+    it has typically been SETTLED for a long time already; `_settle_resolvable_markets` only
+    ever looks at not-yet-settled markets, so it would never revisit these on its own. Called
+    every scrape cycle (see `app.tasks.scrape_tasks.scrape_tournament_async`, right after
+    `_settle_resolvable_markets`) -- auto-scrape keeps running indefinitely even after every
+    market is settled, so a pending sub-bet just keeps getting rechecked until the data shows up.
+
+    Returns how many sub-bets were resolved this call (0 most cycles)."""
+    stmt = (
+        select(Prediction)
+        .join(BetMarket, Prediction.bet_market_id == BetMarket.id)
+        .where(
+            BetMarket.tournament_id == tournament_id,
+            BetMarket.bet_type == BetType.ROUND_WINNER,
+            Prediction.sub_bet_status == PredictionStatus.OPEN,
+        )
+    )
+    predictions = (await session.execute(stmt)).scalars().all()
+    if not predictions:
+        return 0
+
+    resolved = 0
+    for prediction in predictions:
+        sub_bet = prediction.payload.get("sub_bet") or {}
+        entries = sub_bet.get("speaker_scores") or []
+        speaker_ids = [e.get("speaker_id") for e in entries if e.get("speaker_id") is not None]
+        debate_id = prediction.payload.get("debate_id")
+        if not speaker_ids or debate_id is None:
+            # Malformed payload -- nothing to ever wait for, settle as a loss now rather than
+            # retrying forever.
+            prediction.sub_bet_status = PredictionStatus.SETTLED
+            prediction.sub_bet_points_awarded = 0.0
+            resolved += 1
+            continue
+
+        rows = (
+            await session.execute(
+                select(SpeakerScore.speaker_id, SpeakerScore.score)
+                .join(DebateTeam, SpeakerScore.debate_team_id == DebateTeam.id)
+                .where(
+                    DebateTeam.debate_id == debate_id,
+                    SpeakerScore.speaker_id.in_(speaker_ids),
+                )
+            )
+        ).all()
+        score_by_speaker = dict(rows)
+        if any(score_by_speaker.get(sid) is None for sid in speaker_ids):
+            continue  # still withheld -- retried on a later cycle
+
+        sub_bet_won = did_speaker_points_sub_bet_win(sub_bet, score_by_speaker)
+        bonus = (
+            prediction.stake_amount * prediction.odds * (prediction.sub_bet_odds - 1)
+            if sub_bet_won
+            else 0.0
+        )
+        prediction.sub_bet_status = PredictionStatus.SETTLED
+        prediction.sub_bet_points_awarded = bonus
+        resolved += 1
+        if bonus > 0:
+            # Folded into points_awarded (not just sub_bet_points_awarded) so this bonus counts
+            # toward the leaderboard's net-profit sum without a separate SQL branch there -- see
+            # Prediction.points_awarded's docstring, updated to describe this cumulative role.
+            prediction.points_awarded = (prediction.points_awarded or 0.0) + bonus
+            user = await session.get(User, prediction.user_id)
+            if user is not None:
+                user.balance += bonus
+
+    if resolved:
+        await recompute_leaderboard(session, tournament_id)
+    return resolved
 
 
 def _as_aware_utc(dt: datetime.datetime) -> datetime.datetime:
