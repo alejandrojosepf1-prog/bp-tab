@@ -109,9 +109,13 @@ async def test_scrape_tournament_async_runs_the_full_pipeline(
         )
         assert len(teams) == 146
 
-        # No team in the real CMUDE fixture is tagged into our synthetic "Open" break category
-        # (TeamBreakCategory links only get created for the tournament's own scraped categories,
-        # e.g. "Alfred Snider"), so the predictor correctly has nothing to assess for it yet.
+        # This test pre-creates a BreakCategory(slug="open") before scraping specifically to
+        # exercise ingestion's general-break backfill (see
+        # ingestion.py::_ensure_general_break_category): since no real tournament reliably tags
+        # teams into an implicit "Open" category, ingestion links EVERY scraped team to it
+        # (idempotently -- the pre-existing "open" row is reused, not duplicated). With
+        # break_size already set (2, from setup above) and all 146 teams now linked, the
+        # break predictor has real standings to assess and should produce predictions.
         linked = (
             (
                 await verify_session.execute(
@@ -123,9 +127,9 @@ async def test_scrape_tournament_async_runs_the_full_pipeline(
             .scalars()
             .all()
         )
-        assert linked == []
+        assert len(linked) == 146
         predictions = (await verify_session.execute(select(BreakPrediction))).scalars().all()
-        assert predictions == []
+        assert len(predictions) > 0
 
 
 @pytest.mark.asyncio

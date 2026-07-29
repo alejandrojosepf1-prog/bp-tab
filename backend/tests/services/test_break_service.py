@@ -11,7 +11,10 @@ from app.models import (
     Tournament,
 )
 from app.models.enums import BPPosition, RoundStage, RoundStatus, TournamentStatus
-from app.services.break_service import recompute_break_predictions
+from app.services.break_service import (
+    recompute_break_predictions,
+    team_break_exact_rank_probability,
+)
 
 
 async def _make_tournament(db_session) -> Tournament:
@@ -115,3 +118,81 @@ async def test_recompute_break_predictions_returns_empty_before_any_round_comple
 
     report = await recompute_break_predictions(db_session, tournament.id, category.id)
     assert report == []
+
+
+async def test_team_break_exact_rank_probability_sums_to_one_after_round_completes(
+    db_session,
+) -> None:
+    tournament = await _make_tournament(db_session)
+    category = BreakCategory(tournament_id=tournament.id, name="Open", slug="open", break_size=2)
+    db_session.add(category)
+    await db_session.flush()
+
+    round_1 = Round(
+        tournament_id=tournament.id, seq=1, name="Round 1", stage=RoundStage.PRELIMINARY,
+        status=RoundStatus.COMPLETED,
+    )
+    db_session.add(round_1)
+    await db_session.flush()
+
+    teams = [
+        Team(tournament_id=tournament.id, external_id=i, name=f"Team {i}") for i in range(1, 5)
+    ]
+    db_session.add_all(teams)
+    await db_session.flush()
+    for team in teams:
+        db_session.add(TeamBreakCategory(team_id=team.id, break_category_id=category.id))
+
+    debate = Debate(tournament_id=tournament.id, round_id=round_1.id, external_id=1)
+    db_session.add(debate)
+    await db_session.flush()
+    placements = [
+        (teams[0], BPPosition.OPENING_GOVERNMENT, 1),
+        (teams[1], BPPosition.OPENING_OPPOSITION, 2),
+        (teams[2], BPPosition.CLOSING_GOVERNMENT, 3),
+        (teams[3], BPPosition.CLOSING_OPPOSITION, 4),
+    ]
+    for team, position, rank in placements:
+        db_session.add(
+            DebateTeam(debate_id=debate.id, team_id=team.id, position=position, rank_in_debate=rank)
+        )
+    await db_session.commit()
+
+    distribution = await team_break_exact_rank_probability(
+        db_session, tournament.id, category.id, teams[0].id, num_simulations=500
+    )
+    assert distribution  # not empty -- Round 1 is complete, there's real data to simulate from
+    assert abs(sum(distribution.values()) - 1.0) < 1e-9
+
+
+async def test_team_break_exact_rank_probability_empty_before_any_round_completes(
+    db_session,
+) -> None:
+    tournament = await _make_tournament(db_session)
+    category = BreakCategory(tournament_id=tournament.id, name="Open", slug="open", break_size=2)
+    db_session.add(category)
+    await db_session.flush()
+    team = Team(tournament_id=tournament.id, external_id=1, name="Team 1")
+    db_session.add(team)
+    await db_session.commit()
+
+    distribution = await team_break_exact_rank_probability(
+        db_session, tournament.id, category.id, team.id
+    )
+    assert distribution == {}
+
+
+async def test_team_break_exact_rank_probability_empty_without_break_size(db_session) -> None:
+    tournament = await _make_tournament(db_session)
+    category = BreakCategory(
+        tournament_id=tournament.id, name="Novice", slug="novice", break_size=None
+    )
+    db_session.add(category)
+    team = Team(tournament_id=tournament.id, external_id=1, name="Team 1")
+    db_session.add(team)
+    await db_session.commit()
+
+    distribution = await team_break_exact_rank_probability(
+        db_session, tournament.id, category.id, team.id
+    )
+    assert distribution == {}

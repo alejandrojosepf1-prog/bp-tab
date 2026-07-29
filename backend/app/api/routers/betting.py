@@ -29,7 +29,12 @@ from app.services.betting_service import (
     settle_market,
     validate_market_creation,
 )
-from app.services.odds_service import UnpriceableMarketError, market_board, quote_odds
+from app.services.odds_service import (
+    UnpriceableMarketError,
+    market_board,
+    quote_odds,
+    quote_sub_bet_odds,
+)
 
 router = APIRouter(tags=["betting"])
 
@@ -222,6 +227,7 @@ async def quote_bet_market_odds(
     market = await _get_market_or_404(session, market_id)
     try:
         odds = await quote_odds(session, market, payload.payload, exclude_user_id=current_user.id)
+        sub_bet_odds = await quote_sub_bet_odds(session, market, payload.payload)
     except UnpriceableMarketError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     except (KeyError, ValueError) as exc:
@@ -229,7 +235,7 @@ async def quote_bet_market_odds(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"invalid pick for this market: {exc}",
         ) from exc
-    return OddsQuoteOut(odds=odds)
+    return OddsQuoteOut(odds=odds, sub_bet_odds=sub_bet_odds)
 
 
 @router.get("/bet-markets/{market_id}/predictions/me", response_model=list[PredictionOut])

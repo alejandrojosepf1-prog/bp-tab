@@ -15,6 +15,7 @@ import type {
   LoginResponse,
   MarketBoard,
   MyPrediction,
+  OddsQuote,
   PendingEliminationDebate,
   Prediction,
   Round,
@@ -191,6 +192,15 @@ export const api = {
       get<BreakEntry[]>(
         `/tournaments/${tournamentId}/break-categories/${categoryId}/break`
       ),
+    setBreakSize: (
+      tournamentId: number | string,
+      categoryId: number | string,
+      breakSize: number
+    ) =>
+      patch<BreakCategory>(
+        `/tournaments/${tournamentId}/break-categories/${categoryId}`,
+        { break_size: breakSize }
+      ),
   },
 
   betMarkets: {
@@ -227,7 +237,7 @@ export const api = {
         stake_amount: stakeAmount,
       }),
     quoteOdds: (marketId: number | string, payload: object) =>
-      post<{ odds: number }>(`/bet-markets/${marketId}/quote`, { payload }),
+      post<OddsQuote>(`/bet-markets/${marketId}/quote`, { payload }),
   },
 
   leaderboard: {

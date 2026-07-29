@@ -39,6 +39,12 @@ class MyPredictionOut(BaseModel):
     odds: float
     potential_payout: float
     points_awarded: float | None
+    # Optional modular sub-bet layered on this same prediction -- see
+    # app.models.betting.Prediction's sub_bet_* column docstring. sub_bet_status is None when
+    # no sub-bet was placed at all.
+    sub_bet_odds: float | None = None
+    sub_bet_status: str | None = None
+    sub_bet_points_awarded: float | None = None
     created_at: datetime.datetime
 
 

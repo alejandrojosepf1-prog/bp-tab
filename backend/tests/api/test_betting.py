@@ -1,6 +1,8 @@
 import datetime
 
+import pytest
 from httpx import AsyncClient
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
@@ -839,3 +841,89 @@ async def test_market_board_round_winner_multi_debate_characterization(
     assert options_by_label["Board Team 0 gana su debate"]["odds"] == 1.77
     assert options_by_label["Board Team 2 gana su debate"]["stake"] == 15.0
     assert options_by_label["Board Team 2 gana su debate"]["odds"] == 1.87
+
+
+async def test_round_head_to_head_quote_place_and_settle_with_sub_bet(
+    client: AsyncClient, db_session: AsyncSession
+) -> None:
+    tournament, round_1, debate, teams = await _make_full_call_debate(db_session)
+    admin = await make_user(db_session, email="admin-h2h@example.com", role=UserRole.ADMIN)
+    user = await make_user(db_session, email="user-h2h@example.com")
+
+    create_response = await client.post(
+        f"/api/v1/tournaments/{tournament.id}/bet-markets",
+        json={
+            "bet_type": "round_head_to_head",
+            "label": "Team 0 vs Team 1",
+            "opens_at": PAST.isoformat(),
+            "closes_at": FUTURE.isoformat(),
+            "target_round_id": round_1.id,
+        },
+        headers=auth_headers(admin),
+    )
+    assert create_response.status_code == 201
+    market_id = create_response.json()["id"]
+
+    base_payload = {
+        "debate_id": debate.id, "team_a_id": teams[0].id, "team_b_id": teams[1].id,
+        "predicted_higher_id": teams[0].id,
+    }
+
+    # Base-only quote: fair 50/50 field (no results yet) -> exactly 2.0x.
+    base_quote = await client.post(
+        f"/api/v1/bet-markets/{market_id}/quote",
+        json={"payload": base_payload},
+        headers=auth_headers(user),
+    )
+    assert base_quote.status_code == 200
+    assert base_quote.json()["odds"] == 2.0
+    assert base_quote.json()["sub_bet_odds"] is None  # no sub_bet in payload -> not priced
+
+    # With the rank-gap sub-bet attached, sub_bet_odds is now also priced.
+    with_sub_bet = {**base_payload, "sub_bet": {"rank_gap": 2}}
+    combo_quote = await client.post(
+        f"/api/v1/bet-markets/{market_id}/quote",
+        json={"payload": with_sub_bet},
+        headers=auth_headers(user),
+    )
+    assert combo_quote.status_code == 200
+    assert combo_quote.json()["odds"] == 2.0
+    assert combo_quote.json()["sub_bet_odds"] > 1.0
+
+    prediction_response = await client.post(
+        f"/api/v1/bet-markets/{market_id}/predictions",
+        json={"payload": with_sub_bet, "stake_amount": 10.0},
+        headers=auth_headers(user),
+    )
+    assert prediction_response.status_code == 201
+    body = prediction_response.json()
+    assert body["odds"] == 2.0
+    assert body["sub_bet_odds"] == combo_quote.json()["sub_bet_odds"]
+
+    # Confirm the ballot: team[0] 1st, team[1] 3rd -> higher (team[0]) wins, gap is exactly 2.
+    for team, rank in zip(teams, [1, 3, 2, 4], strict=True):
+        row = (
+            await db_session.execute(
+                select(DebateTeam).where(
+                    DebateTeam.debate_id == debate.id, DebateTeam.team_id == team.id
+                )
+            )
+        ).scalar_one()
+        row.rank_in_debate = rank
+    await db_session.commit()
+
+    settle_response = await client.post(
+        f"/api/v1/bet-markets/{market_id}/settle", json={}, headers=auth_headers(admin)
+    )
+    assert settle_response.status_code == 200
+    assert settle_response.json() == {"settled": True}
+
+    after = await client.get(
+        f"/api/v1/bet-markets/{market_id}/predictions/me", headers=auth_headers(user)
+    )
+    settled_prediction = after.json()[0]
+    assert settled_prediction["status"] == "settled"
+    assert settled_prediction["sub_bet_status"] == "settled"
+    expected_payout = 10.0 * settled_prediction["odds"] * settled_prediction["sub_bet_odds"]
+    assert settled_prediction["points_awarded"] == pytest.approx(expected_payout)
+    assert settled_prediction["sub_bet_points_awarded"] == pytest.approx(expected_payout)

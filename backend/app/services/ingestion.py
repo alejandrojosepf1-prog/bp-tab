@@ -234,7 +234,33 @@ class IngestionService:
                     team_id=result.instance.id,
                     break_category_id=category.instance.id,
                 )
+
+        if ids:
+            await self._ensure_general_break_category(tournament, list(ids.values()))
         return ids
+
+    async def _ensure_general_break_category(
+        self, tournament: Tournament, team_ids: list[int]
+    ) -> None:
+        """Tabbycat almost never tags teams with an explicit "Open" category -- it's the
+        implicit default every team is eligible for unless tagged otherwise (ESL, Novice, ...).
+        Without this, a tournament that never names its general break never gets a
+        BreakCategory row at all, so the admin panel can never offer a team_break market for
+        it until the real break is already published (too late to bet on). Slug "open" also
+        naturally de-dupes with an explicitly-scraped "Open" category from `category_names`
+        above, just backfilling `is_general=True` on it instead of creating a second row.
+        Every team gets linked here -- not just ones scraped with an explicit tag."""
+        general = await upsert_by_natural_key(
+            self.session,
+            BreakCategory,
+            lookup={"tournament_id": tournament.id, "slug": "open"},
+            values={"name": "Open", "is_general": True},
+        )
+        await self._track(tournament.id, "BreakCategory", general)
+        for team_id in team_ids:
+            await self._ensure_link(
+                TeamBreakCategory, team_id=team_id, break_category_id=general.instance.id
+            )
 
     async def _ingest_speakers(
         self, tournament: Tournament, snapshot: TournamentSnapshot, team_id_by_ext: dict[int, int]

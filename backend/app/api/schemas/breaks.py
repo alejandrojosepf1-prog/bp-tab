@@ -13,6 +13,14 @@ class BreakCategoryOut(BaseModel):
     break_size: int | None
 
 
+class BreakCategoryUpdate(BaseModel):
+    # Tabbycat doesn't reliably expose "how many teams break" as structured data before the
+    # break is actually published, so this has to come from an admin who knows the announced
+    # break size -- see app.services.ingestion._ensure_general_break_category and
+    # app.services.break_service (break_size is required to price/predict anything).
+    break_size: int
+
+
 class BreakAssessmentOut(BaseModel):
     team: TeamOut
     status: str

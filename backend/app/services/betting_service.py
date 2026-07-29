@@ -22,7 +22,7 @@ import datetime
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.domain.bet_outcomes import did_prediction_win
+from app.domain.bet_outcomes import did_prediction_win, did_sub_bet_win
 from app.models import (
     Break,
     Debate,
@@ -38,10 +38,15 @@ from app.models import (
 from app.models.betting import BetMarket
 from app.models.enums import BetMarketStatus, BetType, PredictionStatus, TournamentStatus
 from app.repositories.upsert import upsert_by_natural_key
-from app.services.odds_service import quote_odds
+from app.services.odds_service import quote_odds, quote_sub_bet_odds
 from app.services.ranking_service import get_standings
 
-_PER_PREDICTION_BET_TYPES = {BetType.HEAD_TO_HEAD, BetType.ROUND_WINNER, BetType.ROUND_FULL_CALL}
+_PER_PREDICTION_BET_TYPES = {
+    BetType.HEAD_TO_HEAD,
+    BetType.ROUND_WINNER,
+    BetType.ROUND_FULL_CALL,
+    BetType.ROUND_HEAD_TO_HEAD,
+}
 
 # Bet types still creatable from the admin panel -- see app.models.enums.BetType for why
 # top_n_break/top_n_speakers/head_to_head/breakout_team/best_institution are no longer here.
@@ -51,9 +56,19 @@ CREATABLE_BET_TYPES = (
     BetType.ROUND_FULL_CALL,
     BetType.TOP_SPEAKER_POSITION,
     BetType.TEAM_BREAK,
+    BetType.ROUND_HEAD_TO_HEAD,
 )
 
-_ROUND_SCOPED_BET_TYPES = {BetType.ROUND_WINNER, BetType.ROUND_FULL_CALL}
+_ROUND_SCOPED_BET_TYPES = {
+    BetType.ROUND_WINNER, BetType.ROUND_FULL_CALL, BetType.ROUND_HEAD_TO_HEAD
+}
+
+# Bet types whose optional sub-bet resolves in the SAME instant as the base pick (see
+# app.models.betting.Prediction's sub_bet_* docstring) -- all-or-nothing: missing the modifier
+# zeroes out the whole payout, just like missing any leg of a parlay. ROUND_WINNER's
+# speaker-points sub-bet is deliberately NOT here: it settles independently via
+# `settle_pending_sub_bets`, since speaker points are often withheld until the tournament ends.
+_SAME_TIMING_SUB_BET_TYPES = {BetType.ROUND_HEAD_TO_HEAD, BetType.TEAM_BREAK}
 
 
 class InsufficientBalanceError(Exception):
@@ -129,6 +144,12 @@ def _entity_key(bet_type: BetType, payload: dict) -> str:
     if bet_type == BetType.HEAD_TO_HEAD:
         a, b = sorted([payload["team_a_id"], payload["team_b_id"]])
         return f"pair:{a}:{b}"
+    if bet_type == BetType.ROUND_HEAD_TO_HEAD:
+        # Scoped to the debate too (unlike legacy HEAD_TO_HEAD's global pair key): a round
+        # can have many debates, so a user can hold one bet per pair PER debate, not just one
+        # per pair across the whole round.
+        a, b = sorted([payload["team_a_id"], payload["team_b_id"]])
+        return f"debate:{payload['debate_id']}:pair:{a}:{b}"
     return "__market__"
 
 
@@ -154,6 +175,9 @@ async def place_prediction(
         raise ValueError("stake_amount must be positive")
 
     odds = await quote_odds(session, bet_market, payload, exclude_user_id=user.id)
+    # None whenever payload has no "sub_bet" key or this bet_type has no modifier support --
+    # see quote_sub_bet_odds and Prediction's sub_bet_* column docstring.
+    sub_bet_odds = await quote_sub_bet_odds(session, bet_market, payload)
     entity_key = _entity_key(bet_market.bet_type, payload)
 
     existing = (
@@ -186,6 +210,9 @@ async def place_prediction(
             "stake_amount": stake_amount,
             "odds": odds,
             "points_awarded": None,
+            "sub_bet_odds": sub_bet_odds,
+            "sub_bet_status": None,
+            "sub_bet_points_awarded": None,
         },
     )
     return result.instance
@@ -241,19 +268,30 @@ async def build_market_outcome(session: AsyncSession, bet_market: BetMarket) -> 
     if bet_market.bet_type == BetType.TEAM_BREAK:
         if bet_market.target_break_category_id is None:
             return None
-        team_ids = (
-            (
-                await session.execute(
-                    select(Break.team_id).where(
-                        Break.tournament_id == bet_market.tournament_id,
-                        Break.break_category_id == bet_market.target_break_category_id,
-                    )
+        break_rows = (
+            await session.execute(
+                select(Break.team_id, Break.rank).where(
+                    Break.tournament_id == bet_market.tournament_id,
+                    Break.break_category_id == bet_market.target_break_category_id,
                 )
             )
-            .scalars()
-            .all()
+        ).all()
+        if not break_rows:
+            return None
+        # break_rank_by_team/break_points_by_team feed the optional exact-rank/exact-points
+        # sub-bet (see domain.bet_outcomes.did_sub_bet_win) -- breaking_team_ids alone (the
+        # original, still-used key) only tells the base pick "did this team break at all".
+        breaking_team_ids = [team_id for team_id, _rank in sorted(break_rows, key=lambda r: r[1])]
+        rank_by_team = dict(break_rows)
+        standings = await get_standings(
+            session, bet_market.tournament_id, break_category_id=bet_market.target_break_category_id
         )
-        return {"breaking_team_ids": list(team_ids)} if team_ids else None
+        points_by_team = {s.team_id: s.team_points for s in standings}
+        return {
+            "breaking_team_ids": breaking_team_ids,
+            "break_rank_by_team": rank_by_team,
+            "break_points_by_team": points_by_team,
+        }
 
     return (
         None  # BREAKOUT_TEAM needs a manual outcome; HEAD_TO_HEAD/ROUND_WINNER/ROUND_FULL_CALL
@@ -279,16 +317,30 @@ async def build_prediction_specific_outcome(
         debate_id = payload.get("debate_id")
         if debate_id is None:
             return None
-        winner_team_id = (
+        rows = (
             await session.execute(
-                select(DebateTeam.team_id)
+                select(DebateTeam.rank_in_debate, DebateTeam.advanced, DebateTeam.team_id)
                 .join(Debate, DebateTeam.debate_id == Debate.id)
-                .where(Debate.id == debate_id, DebateTeam.rank_in_debate == 1)
+                .where(Debate.id == debate_id)
             )
-        ).scalar_one_or_none()
-        if winner_team_id is None:
+        ).all()
+        if not rows:
             return None
-        return {"debate_id": debate_id, "winning_team_id": winner_team_id}
+        ranked_winner = next((team_id for rank, _advanced, team_id in rows if rank == 1), None)
+        if ranked_winner is not None:
+            return {"debate_id": debate_id, "winning_team_id": ranked_winner}
+        # Elimination fallback: no preliminary-style 1st-4th ranking exists for this debate --
+        # see manual_results_service.apply_manual_advancing_teams, which records ONLY
+        # advanced/not-advanced for a non-final out-round (BP eliminations advance 2 of 4
+        # teams, so "who wins this debate" means "did MY team advance", not "who placed 1st",
+        # which doesn't exist here). Falls through to this once a real ballot never arrives and
+        # an admin resolves the debate manually instead.
+        if any(advanced is None for _rank, advanced, _team_id in rows):
+            return None  # still pending -- advance/rank status not fully known yet
+        advancing_team_ids = [team_id for _rank, advanced, team_id in rows if advanced]
+        if not advancing_team_ids:
+            return None
+        return {"debate_id": debate_id, "advancing_team_ids": advancing_team_ids}
 
     if bet_market.bet_type == BetType.ROUND_FULL_CALL:
         debate_id = payload.get("debate_id")
@@ -303,9 +355,37 @@ async def build_prediction_specific_outcome(
         ).all()
         ranked = [(team_id, rank) for team_id, rank in rows if rank is not None]
         if len(ranked) < 4:
+            # Also the permanent state for an elimination debate resolved via
+            # apply_manual_advancing_teams (advanced/not-advanced only, no full 1st-4th order)
+            # -- a round_full_call market created against such a round simply never resolves
+            # for that debate, same as any other missing-data case here.
             return None
         ranked.sort(key=lambda entry: entry[1])
         return {"debate_id": debate_id, "actual_order": [team_id for team_id, _ in ranked]}
+
+    if bet_market.bet_type == BetType.ROUND_HEAD_TO_HEAD:
+        debate_id = payload.get("debate_id")
+        team_a_id, team_b_id = payload.get("team_a_id"), payload.get("team_b_id")
+        if debate_id is None or team_a_id is None or team_b_id is None:
+            return None
+        rows = (
+            await session.execute(
+                select(DebateTeam.team_id, DebateTeam.rank_in_debate).where(
+                    DebateTeam.debate_id == debate_id,
+                    DebateTeam.team_id.in_([team_a_id, team_b_id]),
+                )
+            )
+        ).all()
+        rank_by_team = dict(rows)
+        rank_a, rank_b = rank_by_team.get(team_a_id), rank_by_team.get(team_b_id)
+        if rank_a is None or rank_b is None:
+            return None
+        higher_id = team_a_id if rank_a < rank_b else team_b_id
+        return {
+            "debate_id": debate_id,
+            "higher_ranked_team_id": higher_id,
+            "actual_rank_gap": abs(rank_a - rank_b),
+        }
 
     return None
 
@@ -323,6 +403,40 @@ async def _get_final_speaker_ranking(session: AsyncSession, tournament_id: int) 
     )
     rows = (await session.execute(stmt)).all()
     return [speaker_id for speaker_id, _total in rows]
+
+
+def _settle_prediction_payout(bet_type: BetType, prediction: Prediction, outcome: dict) -> float:
+    """Base-pick payout, PLUS -- for the same-timing sub-bet types (`_SAME_TIMING_SUB_BET_TYPES`)
+    -- the all-or-nothing combined payout if a modifier was attempted alongside it. Missing the
+    base makes the modifier moot (no payout either way); missing the modifier after winning the
+    base zeroes the WHOLE payout, same as missing any leg of a parlay -- the product decision
+    behind this feature. Sets `sub_bet_status`/`sub_bet_points_awarded` as a side effect when a
+    sub-bet was attempted; returns the total to credit to the user's balance.
+
+    ROUND_WINNER's speaker-points sub-bet does NOT go through here -- it settles independently,
+    much later, via `settle_pending_sub_bets`, since the base pick pays on its own the moment
+    the round result is known."""
+    won = did_prediction_win(bet_type, prediction.payload, outcome)
+    sub_bet_payload = prediction.payload.get("sub_bet")
+    has_sub_bet = bool(sub_bet_payload) and prediction.sub_bet_odds is not None
+
+    if not has_sub_bet or bet_type not in _SAME_TIMING_SUB_BET_TYPES:
+        return prediction.stake_amount * prediction.odds if won else 0.0
+
+    if not won:
+        prediction.sub_bet_status = PredictionStatus.SETTLED
+        prediction.sub_bet_points_awarded = 0.0
+        return 0.0
+
+    sub_bet_won = did_sub_bet_win(bet_type, prediction.payload, outcome)
+    payout = (
+        prediction.stake_amount * prediction.odds * prediction.sub_bet_odds
+        if sub_bet_won
+        else 0.0
+    )
+    prediction.sub_bet_status = PredictionStatus.SETTLED
+    prediction.sub_bet_points_awarded = payout
+    return payout
 
 
 async def settle_market(
@@ -364,12 +478,11 @@ async def settle_market(
         assert (
             outcome is not None
         )  # guaranteed by the shared_outcome check above when not per_prediction
-        won = did_prediction_win(bet_market.bet_type, prediction.payload, outcome)
-        payout = prediction.stake_amount * prediction.odds if won else 0.0
+        payout = _settle_prediction_payout(bet_market.bet_type, prediction, outcome)
         prediction.points_awarded = payout
         prediction.status = PredictionStatus.SETTLED
         any_settled = True
-        if won:
+        if payout > 0:
             user = await session.get(User, prediction.user_id)
             if user is not None:
                 user.balance += payout

@@ -69,6 +69,10 @@ class BetType(str, enum.Enum):
     ROUND_FULL_CALL = "round_full_call"
     TOP_SPEAKER_POSITION = "top_speaker_position"
     TEAM_BREAK = "team_break"
+    # Bet on which of two teams in the SAME debate finishes ranked higher -- distinct from the
+    # retired global HEAD_TO_HEAD below (which compared final tournament standings, not a
+    # specific drawn room). Round-scoped like ROUND_WINNER/ROUND_FULL_CALL.
+    ROUND_HEAD_TO_HEAD = "round_head_to_head"
 
     # Retired from the admin "create market" UI in favor of the five types above, but kept as
     # valid enum members -- and their pricing/settlement code kept working -- so any market of

@@ -45,10 +45,14 @@ def _top_n_speakers(payload: dict, outcome: dict) -> bool:
 def _round_winner(payload: dict, outcome: dict) -> bool:
     if payload.get("debate_id") is None or payload.get("team_id") is None:
         return False
-    return (
-        outcome.get("debate_id") == payload["debate_id"]
-        and payload["team_id"] == outcome.get("winning_team_id")
-    )
+    if outcome.get("debate_id") != payload["debate_id"]:
+        return False
+    if "winning_team_id" in outcome:
+        return payload["team_id"] == outcome["winning_team_id"]
+    # Elimination fallback (see betting_service.build_prediction_specific_outcome): no single
+    # 1st-place winner exists for a BP out-round resolved via advanced/not-advanced only (2 of
+    # 4 teams advance), so "won" means "my team was among the ones that advanced."
+    return payload["team_id"] in (outcome.get("advancing_team_ids") or [])
 
 
 def _head_to_head(payload: dict, outcome: dict) -> bool:
@@ -97,6 +101,15 @@ def _team_break(payload: dict, outcome: dict) -> bool:
     return team_id in (outcome.get("breaking_team_ids") or [])
 
 
+def _round_head_to_head(payload: dict, outcome: dict) -> bool:
+    if payload.get("debate_id") is None or payload.get("predicted_higher_id") is None:
+        return False
+    return (
+        outcome.get("debate_id") == payload["debate_id"]
+        and payload["predicted_higher_id"] == outcome.get("higher_ranked_team_id")
+    )
+
+
 _STRATEGIES: dict[BetType, Callable[[dict, dict], bool]] = {
     BetType.CHAMPION: _champion,
     BetType.TOP_N_BREAK: _top_n_break,
@@ -108,6 +121,7 @@ _STRATEGIES: dict[BetType, Callable[[dict, dict], bool]] = {
     BetType.ROUND_FULL_CALL: _round_full_call,
     BetType.TOP_SPEAKER_POSITION: _top_speaker_position,
     BetType.TEAM_BREAK: _team_break,
+    BetType.ROUND_HEAD_TO_HEAD: _round_head_to_head,
 }
 
 
@@ -116,3 +130,36 @@ def did_prediction_win(bet_type: BetType, payload: dict, outcome: dict) -> bool:
     if strategy is None:
         raise ValueError(f"no outcome strategy registered for bet type {bet_type!r}")
     return strategy(payload, outcome)
+
+
+def did_sub_bet_win(bet_type: BetType, payload: dict, outcome: dict) -> bool:
+    """Whether the OPTIONAL modifier layered on this same prediction (`payload["sub_bet"]`)
+    also hit, given the exact same `outcome` used to score the base pick -- see
+    `app.models.betting.Prediction`'s sub_bet_* column docstring for the "same bet slip, extra
+    modifier" design. Callers only invoke this once the base pick has already won (missing the
+    base makes the modifier moot -- the whole thing pays nothing either way for the
+    same-timing bet types this applies to, see `betting_service._settle_with_optional_sub_bet`).
+
+    Returns False (never raises) for a bet_type with no modifier support or a malformed/empty
+    `sub_bet` -- same "never abort settlement for one bad prediction" policy as the rest of
+    this module."""
+    sub_bet = payload.get("sub_bet")
+    if not sub_bet:
+        return False
+
+    if bet_type == BetType.ROUND_HEAD_TO_HEAD:
+        return sub_bet.get("rank_gap") == outcome.get("actual_rank_gap")
+
+    if bet_type == BetType.TEAM_BREAK:
+        team_id = payload.get("team_id")
+        rank_by_team = outcome.get("break_rank_by_team") or {}
+        points_by_team = outcome.get("break_points_by_team") or {}
+        rank_ok = "exact_rank" not in sub_bet or sub_bet["exact_rank"] == rank_by_team.get(
+            team_id
+        )
+        points_ok = "exact_points" not in sub_bet or sub_bet[
+            "exact_points"
+        ] == points_by_team.get(team_id)
+        return rank_ok and points_ok
+
+    return False

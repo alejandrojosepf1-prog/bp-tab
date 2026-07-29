@@ -31,6 +31,7 @@ export const BET_TYPE_LABELS: Record<string, string> = {
   round_full_call: "Call completo de un debate",
   top_speaker_position: "Posición en el top 3 de oradores",
   team_break: "Equipo que hace break",
+  round_head_to_head: "Enfrentamiento directo en sala",
   // Retirados de la creación de mercados, pero un mercado viejo todavía podría existir.
   top_n_break: "Top 3 equipos que rompen (en orden)",
   top_n_speakers: "Top 3 speakers (en orden)",
@@ -68,6 +69,13 @@ function entityKeyForPayload(
       if (a == null || b == null) return null;
       const [x, y] = [Number(a), Number(b)].sort((m, n) => m - n);
       return `pair:${x}:${y}`;
+    }
+    case "round_head_to_head": {
+      const a = payload.team_a_id as number | undefined;
+      const b = payload.team_b_id as number | undefined;
+      if (payload.debate_id == null || a == null || b == null) return null;
+      const [x, y] = [Number(a), Number(b)].sort((m, n) => m - n);
+      return `debate:${payload.debate_id}:pair:${x}:${y}`;
     }
     default:
       return "__market__";
@@ -581,6 +589,199 @@ function RoundFullCallPick({
   );
 }
 
+const RANK_GAP_OPTIONS = [1, 2, 3];
+
+function HeadToHeadRoomPick({
+  tournamentId,
+  market,
+  myPredictions,
+  onPayloadChange,
+}: PickerProps) {
+  const [debateId, setDebateId] = useState<string | null>(null);
+  const [teamA, setTeamA] = useState<string | null>(null);
+  const [teamB, setTeamB] = useState<string | null>(null);
+  const [higherId, setHigherId] = useState<string | null>(null);
+  const [subBetOpen, setSubBetOpen] = useState(false);
+  const [rankGap, setRankGap] = useState<number | null>(null);
+  const { round, debates } = useRoundDebates(tournamentId, market);
+  const selectedDebate = debates.find((d) => String(d.id) === debateId);
+  const existingForDebate = debateId
+    ? findByEntityKey(myPredictions, "round_head_to_head", `debate:${debateId}`)
+    : undefined;
+
+  if (!market.target_round_id) {
+    return <p className="text-xs text-muted-foreground">Este mercado no tiene ronda asignada.</p>;
+  }
+
+  function emit(a: string | null, b: string | null, higher: string | null, gap: number | null) {
+    const complete = debateId && a && b && a !== b && higher && (higher === a || higher === b);
+    if (!complete) {
+      onPayloadChange(null);
+      return;
+    }
+    const payload: Record<string, unknown> = {
+      debate_id: Number(debateId),
+      team_a_id: Number(a),
+      team_b_id: Number(b),
+      predicted_higher_id: Number(higher),
+    };
+    if (subBetOpen && gap != null) payload.sub_bet = { rank_gap: gap };
+    onPayloadChange(payload);
+  }
+
+  const debateTeamOptions = (exclude: string | null) =>
+    (selectedDebate?.teams ?? [])
+      .filter((dt) => String(dt.team.id) !== exclude)
+      .map((dt) => ({
+        value: String(dt.team.id),
+        label: dt.team.name,
+        emoji: dt.team.emoji,
+        hint: dt.team.speakers.map((s) => s.name).join(" · ") || undefined,
+      }));
+
+  const nameOf = (id: string | null) =>
+    selectedDebate?.teams.find((dt) => String(dt.team.id) === id)?.team.name ?? "";
+
+  return (
+    <div className="flex flex-col gap-3">
+      <p className="text-xs text-muted-foreground">
+        Elegí el debate de{" "}
+        <span className="font-medium text-foreground">{round?.name ?? "esta ronda"}</span> y los
+        dos equipos a comparar — podés apostar en varias salas, una apuesta por par de equipos.
+      </p>
+      <OptionPicker
+        options={debates.map((d) => ({
+          value: String(d.id),
+          label: d.room?.name ? `Sala ${d.room.name}` : `Debate #${d.id}`,
+          hint: d.teams.map((t) => t.team.name).join(" · "),
+        }))}
+        value={debateId}
+        onChange={(v) => {
+          setDebateId(v);
+          setTeamA(null);
+          setTeamB(null);
+          setHigherId(null);
+          setRankGap(null);
+          onPayloadChange(null);
+        }}
+        placeholder="Buscar sala…"
+        maxHeight="max-h-40"
+      />
+
+      {existingForDebate && (
+        <p className="text-xs text-muted-foreground">
+          Ya tenés {formatTokens(existingForDebate.stake_amount)} apostados en esta sala — elegir
+          de nuevo reemplaza esa apuesta.
+        </p>
+      )}
+
+      {selectedDebate && (
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+          <div className="flex flex-col gap-1.5">
+            <span className="text-xs font-medium text-muted-foreground">Equipo 1</span>
+            <OptionPicker
+              options={debateTeamOptions(teamB)}
+              value={teamA}
+              onChange={(v) => {
+                setTeamA(v);
+                const nextHigher = higherId === teamA ? null : higherId;
+                setHigherId(nextHigher);
+                emit(v, teamB, nextHigher, rankGap);
+              }}
+              maxHeight="max-h-40"
+            />
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <span className="text-xs font-medium text-muted-foreground">Equipo 2</span>
+            <OptionPicker
+              options={debateTeamOptions(teamA)}
+              value={teamB}
+              onChange={(v) => {
+                setTeamB(v);
+                const nextHigher = higherId === teamB ? null : higherId;
+                setHigherId(nextHigher);
+                emit(teamA, v, nextHigher, rankGap);
+              }}
+              maxHeight="max-h-40"
+            />
+          </div>
+        </div>
+      )}
+
+      {teamA && teamB && (
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-xs text-muted-foreground">¿Cuál queda más arriba?</span>
+          {[teamA, teamB].map((id) => (
+            <button
+              key={id}
+              type="button"
+              onClick={() => {
+                setHigherId(id);
+                emit(teamA, teamB, id, rankGap);
+              }}
+              className={cn(
+                "rounded-lg border px-3 py-1.5 text-sm transition-colors",
+                higherId === id
+                  ? "border-primary/50 bg-primary/10 text-primary"
+                  : "border-border bg-card hover:border-primary/50 hover:bg-primary/10"
+              )}
+            >
+              {nameOf(id)}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {higherId && (
+        <div className="flex flex-col gap-2 rounded-lg border border-dashed border-border px-3 py-2">
+          <button
+            type="button"
+            onClick={() => {
+              const next = !subBetOpen;
+              setSubBetOpen(next);
+              const nextGap = next ? rankGap : null;
+              if (!next) setRankGap(null);
+              emit(teamA, teamB, higherId, nextGap);
+            }}
+            className="w-fit text-xs font-medium text-primary hover:underline"
+          >
+            {subBetOpen ? "− Quitar apuesta específica" : "+ Añadir apuesta específica"}
+          </button>
+          {subBetOpen && (
+            <>
+              <p className="text-xs text-muted-foreground">
+                Bono si además acertás la diferencia EXACTA de puestos entre los dos equipos —
+                si fallás esto, se pierde toda la apuesta, incluso si acertaste quién queda
+                arriba.
+              </p>
+              <div className="flex flex-wrap gap-1.5">
+                {RANK_GAP_OPTIONS.map((gap) => (
+                  <button
+                    key={gap}
+                    type="button"
+                    onClick={() => {
+                      setRankGap(gap);
+                      emit(teamA, teamB, higherId, gap);
+                    }}
+                    className={cn(
+                      "rounded-lg border px-3 py-1.5 text-sm transition-colors",
+                      rankGap === gap
+                        ? "border-primary/50 bg-primary/10 text-primary"
+                        : "border-border bg-card hover:bg-accent"
+                    )}
+                  >
+                    {gap} puesto{gap > 1 ? "s" : ""}
+                  </button>
+                ))}
+              </div>
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function SpeakerPositionPick({ speakers, myPredictions, onPayloadChange }: PickerProps) {
   const [speakerId, setSpeakerId] = useState<string | null>(null);
   const [position, setPosition] = useState<number | null>(null);
@@ -649,6 +850,9 @@ function SpeakerPositionPick({ speakers, myPredictions, onPayloadChange }: Picke
 
 function TeamBreakPick({ tournamentId, market, myPredictions, onPayloadChange }: PickerProps) {
   const [teamId, setTeamId] = useState<string | null>(null);
+  const [subBetOpen, setSubBetOpen] = useState(false);
+  const [exactRank, setExactRank] = useState("");
+  const [exactPoints, setExactPoints] = useState("");
   const categoryId = market.target_break_category_id;
   const { data: predictions } = useQuery({
     queryKey: queryKeys.breakPredictions(tournamentId, categoryId ?? "none"),
@@ -668,6 +872,24 @@ function TeamBreakPick({ tournamentId, market, myPredictions, onPayloadChange }:
   const existingForTeam = teamId
     ? findByEntityKey(myPredictions, "team_break", `team:${teamId}`)
     : undefined;
+
+  function emit(team: string | null, open: boolean, rank: string, points: string) {
+    if (!team) {
+      onPayloadChange(null);
+      return;
+    }
+    const payload: Record<string, unknown> = { team_id: Number(team) };
+    const rankNum = Number(rank);
+    if (open && rank !== "" && Number.isInteger(rankNum) && rankNum > 0) {
+      const subBet: Record<string, unknown> = { exact_rank: rankNum };
+      const pointsNum = Number(points);
+      if (points !== "" && Number.isFinite(pointsNum)) {
+        subBet.exact_points = pointsNum;
+      }
+      payload.sub_bet = subBet;
+    }
+    onPayloadChange(payload);
+  }
 
   const options = (predictions ?? []).map((p) => {
     const existing = findByEntityKey(myPredictions, "team_break", `team:${p.team.id}`);
@@ -690,7 +912,7 @@ function TeamBreakPick({ tournamentId, market, myPredictions, onPayloadChange }:
         value={teamId}
         onChange={(v) => {
           setTeamId(v);
-          onPayloadChange(v ? { team_id: Number(v) } : null);
+          emit(v, subBetOpen, exactRank, exactPoints);
         }}
         placeholder="Buscar equipo…"
         emptyLabel="Sin equipos registrados en esta categoría todavía"
@@ -701,6 +923,66 @@ function TeamBreakPick({ tournamentId, market, myPredictions, onPayloadChange }:
           Ya tenés {formatTokens(existingForTeam.stake_amount)} apostados a este equipo — apostar
           de nuevo reemplaza esa apuesta.
         </p>
+      )}
+
+      {teamId && (
+        <div className="flex flex-col gap-2 rounded-lg border border-dashed border-border px-3 py-2">
+          <button
+            type="button"
+            onClick={() => {
+              const next = !subBetOpen;
+              setSubBetOpen(next);
+              emit(teamId, next, exactRank, exactPoints);
+            }}
+            className="w-fit text-xs font-medium text-primary hover:underline"
+          >
+            {subBetOpen ? "− Quitar apuesta específica" : "+ Añadir apuesta específica"}
+          </button>
+          {subBetOpen && (
+            <>
+              <p className="text-xs text-muted-foreground">
+                Bono si además acertás el puesto EXACTO de ruptura (y, opcional, los puntos
+                exactos) — es todo o nada: si esta parte falla, se pierde la apuesta completa
+                aunque el equipo sí haya roto.
+              </p>
+              <div className="flex flex-wrap items-end gap-3">
+                <div className="flex flex-col gap-1">
+                  <span className="text-[0.7rem] uppercase tracking-wider text-muted-foreground">
+                    Puesto exacto
+                  </span>
+                  <Input
+                    type="number"
+                    min="1"
+                    step="1"
+                    placeholder="1"
+                    className="h-8 w-20 font-mono"
+                    value={exactRank}
+                    onChange={(e) => {
+                      setExactRank(e.target.value);
+                      emit(teamId, subBetOpen, e.target.value, exactPoints);
+                    }}
+                  />
+                </div>
+                <div className="flex flex-col gap-1">
+                  <span className="text-[0.7rem] uppercase tracking-wider text-muted-foreground">
+                    Puntos exactos (opcional)
+                  </span>
+                  <Input
+                    type="number"
+                    step="1"
+                    placeholder="ej. 24"
+                    className="h-8 w-24 font-mono"
+                    value={exactPoints}
+                    onChange={(e) => {
+                      setExactPoints(e.target.value);
+                      emit(teamId, subBetOpen, exactRank, e.target.value);
+                    }}
+                  />
+                </div>
+              </div>
+            </>
+          )}
+        </div>
       )}
     </div>
   );
@@ -739,8 +1021,14 @@ function StakeSlip({
   const stakeValid = stake !== "" && stakeNumber > 0;
   const overBalance = user != null && stakeValid && stakeNumber > user.balance + (existing?.status === "open" ? existing.stake_amount : 0);
   const odds = payload ? quote?.odds ?? null : null;
+  // Present only when payload has a "sub_bet" key AND this bet_type prices one (see backend
+  // odds_service.quote_sub_bet_odds) -- the combined price is all-or-nothing (see
+  // betting_service._settle_prediction_payout): miss the modifier and the WHOLE payout is
+  // lost, not just the bonus, so it's shown as one combined number, not base + extra.
+  const subBetOdds = payload?.sub_bet ? quote?.sub_bet_odds ?? null : null;
+  const combinedOdds = odds && subBetOdds ? odds * subBetOdds : odds;
   const potentialPayout =
-    odds && stakeValid ? Math.round(stakeNumber * odds * 100) / 100 : null;
+    combinedOdds && stakeValid ? Math.round(stakeNumber * combinedOdds * 100) / 100 : null;
   const canSubmit = payload !== null && stakeValid && odds !== null && !isQuoting && !overBalance;
 
   return (
@@ -778,10 +1066,15 @@ function StakeSlip({
               ? "—"
               : isQuoting
                 ? "…"
-                : odds !== null
-                  ? `${odds.toFixed(2)}x`
+                : combinedOdds !== null
+                  ? `${combinedOdds.toFixed(2)}x`
                   : "n/d"}
           </span>
+          {subBetOdds !== null && odds !== null && (
+            <span className="text-[0.65rem] text-muted-foreground">
+              {odds.toFixed(2)}x base × {subBetOdds.toFixed(2)}x específica
+            </span>
+          )}
         </div>
         <div className="flex flex-col gap-1">
           <span className="text-[0.7rem] uppercase tracking-wider text-muted-foreground">
@@ -923,6 +1216,9 @@ export function MarketCard({
     case "team_break":
       picker = <TeamBreakPick {...pickerProps} />;
       break;
+    case "round_head_to_head":
+      picker = <HeadToHeadRoomPick {...pickerProps} />;
+      break;
   }
 
   return (
@@ -989,6 +1285,20 @@ export function MarketCard({
                     ) : (
                       <span className="ml-1 font-medium text-destructive">→ perdida</span>
                     ))}
+                  {p.payload.sub_bet != null && p.sub_bet_odds != null && (
+                    <span className="ml-1">
+                      · apuesta específica ({p.sub_bet_odds}x)
+                      {p.sub_bet_status === "settled" ? (
+                        (p.sub_bet_points_awarded ?? 0) > 0 ? (
+                          <span className="ml-1 font-medium text-primary">acertada</span>
+                        ) : (
+                          <span className="ml-1 font-medium text-destructive">fallada</span>
+                        )
+                      ) : (
+                        <span className="ml-1">pendiente</span>
+                      )}
+                    </span>
+                  )}
                 </p>
               ))}
             </div>

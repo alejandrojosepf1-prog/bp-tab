@@ -187,3 +187,83 @@ async def test_ingest_is_idempotent_on_a_second_identical_run(db_session) -> Non
     assert second_log.entities_created == 0
     assert second_log.entities_updated == 0
     assert change_events_after == change_events_before  # no spurious "changes" on a no-op re-scrape
+
+
+async def test_ingest_creates_general_open_break_category_when_none_scraped(db_session) -> None:
+    """Regression: Tabbycat almost never tags teams with an explicit "Open" category (it's the
+    implicit default), so a tournament with no ESL/Novice-style tags used to end up with ZERO
+    BreakCategory rows at all -- meaning the admin panel could never offer a team_break market
+    for it, even before any real break happened. See ingestion.py's
+    _ensure_general_break_category."""
+    from app.models import BreakCategory, TeamBreakCategory
+    from app.scraper.dtos import ScrapedTeam
+
+    tournament = await _make_tournament(db_session)
+    snapshot = TournamentSnapshot(
+        teams=(
+            ScrapedTeam(external_id=1, name="Team A", emoji=None),
+            ScrapedTeam(external_id=2, name="Team B", emoji=None),
+        ),
+    )
+
+    service = IngestionService(db_session)
+    await service.ingest(tournament, snapshot)
+    await db_session.commit()
+
+    categories = (
+        (
+            await db_session.execute(
+                select(BreakCategory).filter_by(tournament_id=tournament.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert len(categories) == 1
+    assert categories[0].slug == "open"
+    assert categories[0].is_general is True
+    assert categories[0].break_size is None  # still needs an admin to set it by hand
+
+    links = (
+        (await db_session.execute(select(TeamBreakCategory))).scalars().all()
+    )
+    assert {link.break_category_id for link in links} == {categories[0].id}
+    assert len(links) == 2  # both teams linked to the general category
+
+
+async def test_ingest_reingest_of_general_break_category_is_still_a_no_op(db_session) -> None:
+    """The general-category backfill must not break idempotency: re-ingesting an unchanged
+    snapshot a second time must not produce new ChangeEvent rows or duplicate links."""
+    from app.models import ChangeEvent, TeamBreakCategory
+    from app.scraper.dtos import ScrapedTeam
+
+    tournament = await _make_tournament(db_session)
+    snapshot = TournamentSnapshot(
+        teams=(ScrapedTeam(external_id=1, name="Team A", emoji=None),),
+    )
+
+    service = IngestionService(db_session)
+    await service.ingest(tournament, snapshot)
+    await db_session.commit()
+
+    events_before = (
+        await db_session.execute(
+            select(func.count()).select_from(ChangeEvent).filter_by(tournament_id=tournament.id)
+        )
+    ).scalar_one()
+
+    second_log = await service.ingest(tournament, snapshot)
+    await db_session.commit()
+
+    assert second_log.entities_created == 0
+    assert second_log.entities_updated == 0
+
+    links = (await db_session.execute(select(TeamBreakCategory))).scalars().all()
+    assert len(links) == 1  # not duplicated
+
+    events_after = (
+        await db_session.execute(
+            select(func.count()).select_from(ChangeEvent).filter_by(tournament_id=tournament.id)
+        )
+    ).scalar_one()
+    assert events_after == events_before  # the backfill produced no spurious changes

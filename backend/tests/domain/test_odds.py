@@ -8,6 +8,7 @@ from app.domain.odds import (
     MIN_ODDS,
     adaptive_temperature,
     decimal_odds_from_probability,
+    exact_rank_gap_probability,
     ordered_sequence_odds,
     pari_mutuel_odds,
     pari_mutuel_probability,
@@ -241,3 +242,46 @@ def test_positional_probabilities_rejects_unsupported_position() -> None:
 def test_positional_probabilities_empty_input() -> None:
     assert positional_probabilities({}, 1) == {}
     assert positional_probabilities({}, 3) == {}
+
+
+def test_exact_rank_gap_probability_uniform_field_matches_hand_count() -> None:
+    # 4 equal-power candidates -> every one of the 4! = 24 orderings is equally likely. Given
+    # "a finishes above b" (12 of the 24 orderings), hand-counting how many of THOSE have each
+    # gap: gap=1 -> 3 adjacent (h,l) pairs * 2! for the other two = 6/12 = 0.5; gap=2 -> 2 pairs
+    # * 2! = 4/12 = 1/3; gap=3 -> 1 pair * 2! = 2/12 = 1/6.
+    power = {"a": 5.0, "b": 5.0, "c": 5.0, "d": 5.0}
+    assert math.isclose(
+        exact_rank_gap_probability(power, "a", "b", 1, temperature=1.0), 0.5, rel_tol=1e-9
+    )
+    assert math.isclose(
+        exact_rank_gap_probability(power, "a", "b", 2, temperature=1.0), 1 / 3, rel_tol=1e-9
+    )
+    assert math.isclose(
+        exact_rank_gap_probability(power, "a", "b", 3, temperature=1.0), 1 / 6, rel_tol=1e-9
+    )
+
+
+def test_exact_rank_gap_probability_sums_to_one_across_every_gap() -> None:
+    power = {"a": 9.0, "b": 4.0, "c": 2.0, "d": 1.0}
+    total = sum(
+        exact_rank_gap_probability(power, "a", "c", gap, temperature=2.0) for gap in (1, 2, 3)
+    )
+    assert math.isclose(total, 1.0, rel_tol=1e-9)
+
+
+def test_exact_rank_gap_probability_unknown_candidate_raises() -> None:
+    with pytest.raises(KeyError):
+        exact_rank_gap_probability({"a": 1.0, "b": 1.0}, "a", "ghost", 1)
+
+
+def test_exact_rank_gap_probability_rejects_same_candidate() -> None:
+    with pytest.raises(ValueError):
+        exact_rank_gap_probability({"a": 1.0, "b": 1.0}, "a", "a", 1)
+
+
+def test_exact_rank_gap_probability_rejects_out_of_range_gap() -> None:
+    power = {"a": 1.0, "b": 1.0, "c": 1.0, "d": 1.0}
+    with pytest.raises(ValueError):
+        exact_rank_gap_probability(power, "a", "b", 0)
+    with pytest.raises(ValueError):
+        exact_rank_gap_probability(power, "a", "b", 4)

@@ -35,6 +35,7 @@ pure "fair book" building block pari-mutuel pricing is layered on top of -- see
 `pari_mutuel_odds`.
 """
 
+import itertools
 import math
 from collections.abc import Iterable
 from typing import TypeVar
@@ -259,6 +260,57 @@ def sequence_probability(
         del remaining[pick]
 
     return combined_probability
+
+
+def exact_rank_gap_probability(
+    power_by_candidate: dict[CandidateT, float],
+    higher_id: CandidateT,
+    lower_id: CandidateT,
+    gap: int,
+    *,
+    temperature: float | None = None,
+) -> float:
+    """P(`higher_id` finishes EXACTLY `gap` positions above `lower_id` | `higher_id` finishes
+    above `lower_id` at all) over the full field in `power_by_candidate` (this domain's one use
+    case is a single 4-team BP debate -- see `round_head_to_head` in
+    `app.services.odds_service`). Conditioned on the base pick already being correct, matching
+    the "combined odds = base_odds * modifier_odds" chain-rule pricing this sub-bet uses: the
+    modifier's own price only needs to answer "given you already need `higher_id` to win, how
+    much MORE precise do you also need to be."
+
+    Brute-forced by enumerating every full-field permutation and weighting each by
+    `sequence_probability` -- deliberately not a closed form. The field here is always small
+    (4 BP teams = 24 permutations), so there's no performance reason to derive one, and brute
+    force is trivially correct to read and verify.
+
+    Raises KeyError if either id isn't in `power_by_candidate`, or ValueError if `gap` is
+    outside `[1, len(power_by_candidate) - 1]` or `higher_id == lower_id`.
+    """
+    candidates = list(power_by_candidate)
+    if higher_id not in candidates or lower_id not in candidates:
+        raise KeyError((higher_id, lower_id))
+    if higher_id == lower_id:
+        raise ValueError("higher_id and lower_id must be different candidates")
+    if not (1 <= gap <= len(candidates) - 1):
+        raise ValueError(f"gap must be between 1 and {len(candidates) - 1}")
+
+    temp = temperature if temperature is not None else adaptive_temperature(
+        power_by_candidate.values()
+    )
+    higher_wins_total = 0.0
+    higher_wins_with_gap = 0.0
+    for perm in itertools.permutations(candidates):
+        rank = {candidate: i + 1 for i, candidate in enumerate(perm)}
+        if rank[higher_id] >= rank[lower_id]:
+            continue  # higher_id did not actually rank above lower_id in this permutation
+        probability = sequence_probability(power_by_candidate, list(perm), temperature=temp)
+        higher_wins_total += probability
+        if rank[lower_id] - rank[higher_id] == gap:
+            higher_wins_with_gap += probability
+
+    if higher_wins_total <= 0:
+        return 0.0
+    return higher_wins_with_gap / higher_wins_total
 
 
 def ordered_sequence_odds(

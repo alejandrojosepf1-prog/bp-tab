@@ -10,6 +10,7 @@ import {
   Award,
   CheckCircle2,
   Coins,
+  Crosshair,
   Eye,
   Loader2,
   Mic2,
@@ -38,7 +39,7 @@ import { LoadingState, EmptyState } from "@/components/query-state";
 import { BET_TYPE_LABELS } from "@/components/betting/market-card";
 import { cn } from "@/lib/utils";
 import { formatTokens } from "@/lib/format";
-import type { BetMarket, BetType } from "@/lib/api/types";
+import type { BetMarket, BetType, BreakCategory } from "@/lib/api/types";
 
 interface BetTypeOption {
   value: BetType;
@@ -84,6 +85,13 @@ const BET_TYPES: BetTypeOption[] = [
     hint: "Apuesta independiente por equipo (varios pueden romper a la vez)",
     icon: Award,
     needsBreakCategory: true,
+  },
+  {
+    value: "round_head_to_head",
+    label: "Enfrentamiento directo en sala",
+    hint: "Qué equipo queda arriba del otro en la misma sala — con apuesta específica opcional al puesto exacto",
+    icon: Crosshair,
+    needsRound: true,
   },
 ];
 
@@ -157,6 +165,61 @@ function Field({
   );
 }
 
+/** Tabbycat doesn't reliably publish "how many teams break" before the break itself happens
+ * (see backend app.services.ingestion._ensure_general_break_category), so an admin who knows
+ * the announced size fills it in here -- required before team_break can price/predict anything. */
+function BreakSizeInput({
+  tournamentId,
+  category,
+}: {
+  tournamentId: string;
+  category: BreakCategory;
+}) {
+  const queryClient = useQueryClient();
+  const [value, setValue] = useState("");
+
+  const mutation = useMutation({
+    mutationFn: (breakSize: number) =>
+      api.breakCategories.setBreakSize(tournamentId, category.id, breakSize),
+    onSuccess: () => {
+      toast.success(`Tamaño de break guardado para "${category.name}"`);
+      queryClient.invalidateQueries({ queryKey: queryKeys.breakCategories(tournamentId) });
+    },
+    onError: (err) =>
+      toast.error(err instanceof ApiError ? err.detail : "Error al guardar el tamaño de break"),
+  });
+
+  const parsed = Number(value);
+  const valid = value !== "" && Number.isInteger(parsed) && parsed > 0;
+
+  return (
+    <div className="flex items-center gap-2 rounded-lg border border-dashed border-amber-500/40 bg-amber-500/5 px-3 py-2">
+      <p className="flex-1 text-xs text-amber-600 dark:text-amber-400">
+        &ldquo;{category.name}&rdquo; todavía no tiene tamaño de break — el tab no lo publica
+        hasta que rompe. Escribilo a mano para poder crear el mercado.
+      </p>
+      <Input
+        type="number"
+        min="1"
+        step="1"
+        placeholder="32"
+        className="h-8 w-20 font-mono"
+        value={value}
+        onChange={(e) => setValue(e.target.value)}
+      />
+      <Button
+        type="button"
+        size="sm"
+        disabled={!valid || mutation.isPending}
+        onClick={() => mutation.mutate(parsed)}
+      >
+        {mutation.isPending && <Loader2 className="size-3.5 animate-spin" />}
+        Guardar
+      </Button>
+    </div>
+  );
+}
+
 function MarketPreview({
   form,
   roundName,
@@ -210,6 +273,8 @@ function MarketPreview({
         pool real. Cuota justa, sin comisión: la casa no se lleva nada. Rango 1.01x – 50x.{" "}
         {form.bet_type === "team_break" &&
           "Excepción: equipos que rompen se cotiza directo desde su probabilidad de break, sin pool compartido — romper no es excluyente entre equipos."}
+        {form.bet_type === "round_head_to_head" &&
+          "Cada apuesta puede incluir opcionalmente la diferencia exacta de puestos entre los dos equipos — es todo o nada: si esa parte falla, se pierde la apuesta completa aunque el equipo elegido sí haya quedado arriba."}
       </p>
     </div>
   );
@@ -427,9 +492,10 @@ export default function AdminMarketsPage() {
   };
 
   const roundName = rounds?.find((r) => String(r.id) === form.target_round_id)?.name;
-  const categoryName = breakCategories?.find(
+  const selectedCategory = breakCategories?.find(
     (c) => String(c.id) === form.target_break_category_id
-  )?.name;
+  );
+  const categoryName = selectedCategory?.name;
 
   return (
     <div className="flex flex-col gap-6">
@@ -547,6 +613,12 @@ export default function AdminMarketsPage() {
                     </p>
                   )}
                 </div>
+                {selectedCategory && selectedCategory.break_size == null && (
+                  <BreakSizeInput
+                    tournamentId={tournamentId!}
+                    category={selectedCategory}
+                  />
+                )}
               </Field>
             )}
 

@@ -1,3 +1,5 @@
+import math
+
 from app.domain.break_predictor import (
     build_break_report,
     classify_status,
@@ -119,3 +121,71 @@ def test_build_break_report_simulates_a_probability_for_alive_teams() -> None:
     assert by_id[3].status == "alive"
     assert 0.0 <= by_id[2].probability <= 1.0
     assert 0.0 <= by_id[3].probability <= 1.0
+
+
+def test_simulate_rank_distribution_sums_to_one() -> None:
+    from app.domain.break_predictor import placement_history_by_team, simulate_rank_distribution
+
+    standings = [
+        _standing(1, 15, firsts=5),
+        _standing(2, 9, firsts=3),
+        _standing(3, 9, firsts=3),
+        _standing(4, 3, fourths=5),
+    ]
+    points_by_team = {s.team_id: s.team_points for s in standings}
+    history = placement_history_by_team(standings)
+
+    distribution = simulate_rank_distribution(
+        2,
+        points_by_team=points_by_team,
+        placement_history=history,
+        rounds_remaining=1,
+        num_simulations=2000,
+    )
+    assert math.isclose(sum(distribution.values()), 1.0, rel_tol=1e-9)
+    assert set(distribution).issubset({1, 2, 3, 4})
+
+
+def test_simulate_rank_distribution_favors_the_stronger_team_for_top_rank() -> None:
+    from app.domain.break_predictor import placement_history_by_team, simulate_rank_distribution
+
+    # Team 1 is comfortably ahead on points and history; team 4 is comfortably behind.
+    standings = [
+        _standing(1, 24, firsts=8),
+        _standing(2, 9, firsts=3),
+        _standing(3, 9, firsts=3),
+        _standing(4, 0, fourths=8),
+    ]
+    points_by_team = {s.team_id: s.team_points for s in standings}
+    history = placement_history_by_team(standings)
+
+    dist_leader = simulate_rank_distribution(
+        1, points_by_team=points_by_team, placement_history=history,
+        rounds_remaining=1, num_simulations=2000,
+    )
+    dist_trailer = simulate_rank_distribution(
+        4, points_by_team=points_by_team, placement_history=history,
+        rounds_remaining=1, num_simulations=2000,
+    )
+    assert dist_leader.get(1, 0.0) > dist_trailer.get(1, 0.0)
+    assert dist_trailer.get(4, 0.0) > dist_leader.get(4, 0.0)
+
+
+def test_simulate_rank_distribution_no_rounds_remaining_is_deterministic() -> None:
+    from app.domain.break_predictor import placement_history_by_team, simulate_rank_distribution
+
+    # With 0 rounds remaining, final standings are already fixed -- every simulation lands on
+    # the exact same rank, no randomness left to sample.
+    standings = [
+        _standing(1, 24, firsts=8),
+        _standing(2, 9, firsts=3),
+        _standing(3, 3, fourths=5),
+    ]
+    points_by_team = {s.team_id: s.team_points for s in standings}
+    history = placement_history_by_team(standings)
+
+    distribution = simulate_rank_distribution(
+        1, points_by_team=points_by_team, placement_history=history,
+        rounds_remaining=0, num_simulations=100,
+    )
+    assert distribution == {1: 1.0}

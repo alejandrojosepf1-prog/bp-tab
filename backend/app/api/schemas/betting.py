@@ -91,6 +91,12 @@ class PredictionOut(BaseModel):
     # The amount actually credited back once settled: stake_amount * odds if won, 0.0 if lost,
     # None while still OPEN.
     points_awarded: float | None
+    # Optional modular sub-bet layered on this same prediction (e.g. an exact rank gap or exact
+    # speaker points) -- see app.models.betting.Prediction's sub_bet_* column docstring.
+    # sub_bet_status is None when no sub-bet was placed at all.
+    sub_bet_odds: float | None = None
+    sub_bet_status: PredictionStatus | None = None
+    sub_bet_points_awarded: float | None = None
     locked_at: datetime.datetime
     created_at: datetime.datetime
 
@@ -106,3 +112,6 @@ class OddsQuoteRequest(BaseModel):
 
 class OddsQuoteOut(BaseModel):
     odds: float
+    # Priced only when payload has a "sub_bet" key and this bet_type supports one -- see
+    # app.services.odds_service.quote_sub_bet_odds. None otherwise.
+    sub_bet_odds: float | None = None

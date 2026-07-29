@@ -17,6 +17,7 @@ Two independent pieces, deliberately kept separate because they answer different
 """
 
 import random
+from collections import defaultdict
 from dataclasses import dataclass
 
 from app.domain.ranking import BP_POINTS_BY_RANK, TeamStanding
@@ -79,7 +80,7 @@ def build_break_report(
     """Full per-team assessment for a break category, combining the rigorous classification
     with a simulated probability for the teams still genuinely in contention."""
     points_by_team = {s.team_id: s.team_points for s in standings}
-    placement_history = _placement_history_by_team(standings)
+    placement_history = placement_history_by_team(standings)
 
     assessments = []
     for team in standings:
@@ -122,7 +123,7 @@ def build_break_report(
     return assessments
 
 
-def _placement_history_by_team(standings: list[TeamStanding]) -> dict[int, dict[int, int]]:
+def placement_history_by_team(standings: list[TeamStanding]) -> dict[int, dict[int, int]]:
     """A team's own {rank: times_achieved} distribution, from what compute_standings tracked."""
     history = {}
     for s in standings:
@@ -166,3 +167,40 @@ def _simulate_probability(
         if team_id in breaking_ids:
             breaks += 1
     return breaks / num_simulations
+
+
+def simulate_rank_distribution(
+    team_id: int,
+    *,
+    points_by_team: dict[int, int],
+    placement_history: dict[int, dict[int, int]],
+    rounds_remaining: int,
+    num_simulations: int,
+) -> dict[int, float]:
+    """P(this team finishes in EXACTLY final rank r), for every r it was ever simulated to land
+    on -- prices `team_break`'s optional "exact rank" sub-bet (see
+    `app.services.betting_service`'s sub_bet handling for `TEAM_BREAK`).
+
+    Reuses the EXACT same Monte Carlo mechanics `_simulate_probability` uses for "does it break
+    at all" (same seeded RNG per team, same `_draw_round_points` history-weighted draw) --
+    deliberately not the Plackett-Luce/softmax "power rating" model the rest of this app's odds
+    engine (`app.domain.odds`) uses for round_winner/champion/etc. Those are a genuinely
+    different pricing subsystem here: break probability is driven by each team's own points
+    history and how many rounds remain, which a static power rating doesn't model, and there's
+    already a working simulator for exactly that -- reading a different summary statistic
+    (final rank instead of "in the top break_size") off the same simulated standings keeps this
+    consistent with `team_break_probability` instead of introducing a second, incompatible way
+    to price the same underlying event.
+    """
+    rng = random.Random(f"break-predictor:{team_id}")
+    rank_counts: dict[int, int] = defaultdict(int)
+    for _ in range(num_simulations):
+        final_points = dict(points_by_team)
+        for tid in final_points:
+            history = placement_history.get(tid, {})
+            for _round in range(rounds_remaining):
+                final_points[tid] += _draw_round_points(history, rng)
+        ranked = sorted(final_points.items(), key=lambda kv: (-kv[1], kv[0]))
+        rank_of_team = next(i + 1 for i, (tid, _points) in enumerate(ranked) if tid == team_id)
+        rank_counts[rank_of_team] += 1
+    return {rank: count / num_simulations for rank, count in rank_counts.items()}

@@ -119,6 +119,29 @@ class Prediction(Base, TimestampMixin):
     # pay" concept, just no longer a fixed per-bet_type point value.)
     points_awarded: Mapped[float | None] = mapped_column(Float, nullable=True)
 
+    # --- Optional sub-bet (modular "apuesta específica" modifier) -------------------------
+    # A sub-bet is an extra, harder pick layered onto this SAME prediction (e.g. the exact rank
+    # gap in a head-to-head, or the winning team's exact speaker points) -- never a separate
+    # market or a separate Prediction row, per the product decision behind this feature. The
+    # modifier detail itself lives in `payload["sub_bet"]` (shape is bet_type-specific, same
+    # convention as the rest of `payload`); these three columns exist because the sub-bet needs
+    # its OWN independent lifecycle, distinct from the base pick's `odds`/`status`/
+    # `points_awarded` above:
+    #   - For same-timing markets (e.g. round_head_to_head's rank-gap, team_break's exact
+    #     rank/points), base and sub-bet settle together, all-or-nothing: missing the modifier
+    #     zeroes out `points_awarded` too, exactly like missing any leg of a parlay.
+    #   - For round_winner's speaker-points sub-bet specifically, the base pick pays on its own
+    #     as soon as the round result is known; the sub-bet can stay open for a long time after
+    #     (speaker points are often withheld until the tournament's final tab), settling later
+    #     via `betting_service.settle_pending_sub_bets` and crediting an ADDITIONAL bonus on
+    #     top of the base payout that already happened -- never retroactively touching it.
+    # See app.services.betting_service for exactly which rule applies to which bet_type.
+    sub_bet_odds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # None: this prediction has no sub-bet at all. OPEN: a sub-bet was placed and is awaiting
+    # its own resolution. SETTLED: resolved (won or lost) -- see sub_bet_points_awarded.
+    sub_bet_status: Mapped[PredictionStatus | None] = mapped_column(nullable=True)
+    sub_bet_points_awarded: Mapped[float | None] = mapped_column(Float, nullable=True)
+
     bet_market = relationship("BetMarket", back_populates="predictions")
     user = relationship("User")
 

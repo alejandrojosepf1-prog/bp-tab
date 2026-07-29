@@ -9,7 +9,12 @@ the scraper writes once the tournament publishes its real break.
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.domain.break_predictor import BreakAssessment, build_break_report
+from app.domain.break_predictor import (
+    BreakAssessment,
+    build_break_report,
+    placement_history_by_team,
+    simulate_rank_distribution,
+)
 from app.models import BreakCategory, BreakPrediction, Round, TeamBreakCategory
 from app.models.enums import RoundStage
 from app.repositories.upsert import upsert_by_natural_key
@@ -124,3 +129,49 @@ async def team_break_probability(
         return {}
     base_rate = min(1.0, category.break_size / len(team_ids))
     return {team_id: base_rate for team_id in team_ids}
+
+
+async def team_break_exact_rank_probability(
+    session: AsyncSession,
+    tournament_id: int,
+    break_category_id: int,
+    team_id: int,
+    *,
+    num_simulations: int = 2000,
+) -> dict[int, float]:
+    """P(this team finishes in EXACTLY final rank r), for pricing `team_break`'s optional
+    "exact rank" sub-bet -- see `app.domain.break_predictor.simulate_rank_distribution` for the
+    Monte Carlo mechanics (same simulator `team_break_probability` uses underneath, just
+    reading a different statistic off the same simulated standings).
+
+    Unlike `team_break_probability`, there's no honest naive fallback before Round 1 has been
+    judged -- a full rank distribution needs real per-team placement history to simulate from,
+    not just "break_size / num_teams". So this returns `{}` (unpriceable) until then, rather
+    than guessing a shape with no signal behind it.
+    """
+    category = await session.get(BreakCategory, break_category_id)
+    if category is None or category.break_size is None:
+        return {}
+
+    latest_round_seq = await get_latest_completed_round_seq(session, tournament_id)
+    if latest_round_seq is None:
+        return {}
+    total_rounds = await get_total_preliminary_rounds(session, tournament_id)
+    rounds_remaining = max(total_rounds - latest_round_seq, 0)
+
+    standings = await get_standings(
+        session,
+        tournament_id,
+        as_of_round_seq=latest_round_seq,
+        break_category_id=break_category_id,
+    )
+    if not standings or not any(s.team_id == team_id for s in standings):
+        return {}
+
+    return simulate_rank_distribution(
+        team_id,
+        points_by_team={s.team_id: s.team_points for s in standings},
+        placement_history=placement_history_by_team(standings),
+        rounds_remaining=rounds_remaining,
+        num_simulations=num_simulations,
+    )

@@ -124,6 +124,11 @@ async def my_predictions(
                 odds=prediction.odds,
                 potential_payout=round(prediction.stake_amount * prediction.odds, 2),
                 points_awarded=prediction.points_awarded,
+                sub_bet_odds=prediction.sub_bet_odds,
+                sub_bet_status=(
+                    prediction.sub_bet_status.value if prediction.sub_bet_status else None
+                ),
+                sub_bet_points_awarded=prediction.sub_bet_points_awarded,
                 created_at=prediction.created_at,
             )
         )

@@ -915,3 +915,280 @@ def test_set_bet_market_status_rejects_a_new_closes_at_in_the_past() -> None:
     )
     with pytest.raises(ValueError, match="future"):
         set_bet_market_status(market, BetMarketStatus.OPEN, new_closes_at=NOW)
+
+
+async def test_round_winner_settles_via_manual_advancing_teams_in_elimination(db_session) -> None:
+    """Regression: an elimination debate resolved via manual_results_service.
+    apply_manual_advancing_teams (the path used when Tabbycat never confirms an out-round
+    ballot, e.g. a Grand Final everyone in the room already knows the result of) only sets
+    DebateTeam.advanced, never .rank_in_debate -- a BP out-round advances 2 of 4 teams, so
+    there's no single "1st place" the way there is in a preliminary round. Before this fix,
+    round_winner's settlement only ever looked at rank_in_debate, so a bet on an out-round
+    resolved this way could never settle at all."""
+    from app.services.manual_results_service import apply_manual_advancing_teams
+
+    tournament = await _make_tournament(db_session)
+    elim_round = Round(
+        tournament_id=tournament.id, seq=10, name="Quarterfinal", stage=RoundStage.ELIMINATION,
+        status=RoundStatus.RELEASED,
+    )
+    db_session.add(elim_round)
+    await db_session.flush()
+    teams = [
+        Team(tournament_id=tournament.id, external_id=i, name=f"QF Team {i}") for i in range(1, 5)
+    ]
+    db_session.add_all(teams)
+    await db_session.flush()
+    debate = Debate(tournament_id=tournament.id, round_id=elim_round.id, external_id=1)
+    db_session.add(debate)
+    await db_session.flush()
+    for team, position in zip(
+        teams,
+        [
+            BPPosition.OPENING_GOVERNMENT, BPPosition.OPENING_OPPOSITION,
+            BPPosition.CLOSING_GOVERNMENT, BPPosition.CLOSING_OPPOSITION,
+        ],
+        strict=True,
+    ):
+        db_session.add(DebateTeam(debate_id=debate.id, team_id=team.id, position=position))
+    await db_session.flush()
+
+    market = await _make_market(
+        db_session, tournament, BetType.ROUND_WINNER, target_round_id=elim_round.id
+    )
+    alice = await _make_user(db_session, "alice@example.com")  # bets on an advancing team
+    bob = await _make_user(db_session, "bob@example.com")  # bets on an eliminated team
+
+    db_session.add_all(
+        [
+            _prediction(
+                BetType.ROUND_WINNER, market_id=market.id, user_id=alice.id,
+                payload={"debate_id": debate.id, "team_id": teams[0].id},
+                stake_amount=10.0, odds=2.0,
+            ),
+            _prediction(
+                BetType.ROUND_WINNER, market_id=market.id, user_id=bob.id,
+                payload={"debate_id": debate.id, "team_id": teams[2].id},
+                stake_amount=10.0, odds=2.0,
+            ),
+        ]
+    )
+    await db_session.commit()
+    alice_balance_before = alice.balance
+
+    # Not settleable yet -- advanced is still null for every team.
+    assert await settle_market(db_session, market) is False
+
+    # Admin marks teams 0 and 1 as the two that advance (teams[0] is Alice's pick).
+    await apply_manual_advancing_teams(db_session, debate.id, [teams[0].id, teams[1].id])
+    await db_session.commit()
+
+    assert await settle_market(db_session, market) is True
+    await db_session.commit()
+
+    predictions = (
+        (await db_session.execute(select(Prediction).order_by(Prediction.user_id))).scalars().all()
+    )
+    by_user = {p.user_id: p for p in predictions}
+    assert by_user[alice.id].status == PredictionStatus.SETTLED
+    assert by_user[alice.id].points_awarded == 20.0  # advanced -> won: stake * odds
+    assert by_user[bob.id].points_awarded == 0.0  # eliminated -> lost
+
+    await db_session.refresh(alice)
+    assert alice.balance == alice_balance_before + 20.0
+
+
+def test_entity_key_round_head_to_head_is_scoped_by_debate_and_pair() -> None:
+    key = _entity_key(
+        BetType.ROUND_HEAD_TO_HEAD,
+        {"debate_id": 5, "team_a_id": 20, "team_b_id": 10, "predicted_higher_id": 20},
+    )
+    assert key == "debate:5:pair:10:20"
+    # Order of team_a_id/team_b_id in the payload shouldn't matter -- same pair, same key.
+    same_pair_swapped = _entity_key(
+        BetType.ROUND_HEAD_TO_HEAD,
+        {"debate_id": 5, "team_a_id": 10, "team_b_id": 20, "predicted_higher_id": 10},
+    )
+    assert same_pair_swapped == key
+
+
+async def test_round_head_to_head_settles_base_pick_correctly(db_session) -> None:
+    tournament = await _make_tournament(db_session)
+    round_1, debate_a, _debate_b, teams = await _make_round_with_two_debates(db_session, tournament)
+    # debate_a's two teams: teams[0] (OG) and teams[1] (OO). Give them a rank so the outcome
+    # is resolvable.
+    debate_a_teams = (
+        (await db_session.execute(select(DebateTeam).where(DebateTeam.debate_id == debate_a.id)))
+        .scalars()
+        .all()
+    )
+    for rank, dt in enumerate(debate_a_teams, start=1):
+        dt.rank_in_debate = rank
+    await db_session.flush()
+    higher_team_id = next(dt.team_id for dt in debate_a_teams if dt.rank_in_debate == 1)
+    lower_team_id = next(dt.team_id for dt in debate_a_teams if dt.rank_in_debate == 2)
+
+    market = await _make_market(
+        db_session, tournament, BetType.ROUND_HEAD_TO_HEAD, target_round_id=round_1.id
+    )
+    alice = await _make_user(db_session, "alice@example.com")
+    bob = await _make_user(db_session, "bob@example.com")
+
+    db_session.add_all(
+        [
+            _prediction(
+                BetType.ROUND_HEAD_TO_HEAD, market_id=market.id, user_id=alice.id,
+                payload={
+                    "debate_id": debate_a.id, "team_a_id": higher_team_id,
+                    "team_b_id": lower_team_id, "predicted_higher_id": higher_team_id,
+                },
+            ),
+            _prediction(
+                BetType.ROUND_HEAD_TO_HEAD, market_id=market.id, user_id=bob.id,
+                payload={
+                    "debate_id": debate_a.id, "team_a_id": higher_team_id,
+                    "team_b_id": lower_team_id, "predicted_higher_id": lower_team_id,
+                },
+            ),
+        ]
+    )
+    await db_session.commit()
+    alice_balance_before = alice.balance
+
+    assert await settle_market(db_session, market) is True
+    await db_session.commit()
+
+    predictions = (
+        (await db_session.execute(select(Prediction).order_by(Prediction.user_id))).scalars().all()
+    )
+    by_user = {p.user_id: p for p in predictions}
+    assert by_user[alice.id].points_awarded == 20.0  # correctly predicted the higher team
+    assert by_user[bob.id].points_awarded == 0.0
+
+    await db_session.refresh(alice)
+    assert alice.balance == alice_balance_before + 20.0
+
+
+async def test_round_head_to_head_sub_bet_is_all_or_nothing(db_session) -> None:
+    """Regression guard for the exact product decision confirmed for this feature: getting the
+    base pick right but the rank-gap sub-bet wrong must zero out the ENTIRE payout, not just
+    skip the bonus -- same rule as missing any leg of a parlay."""
+    tournament = await _make_tournament(db_session)
+    round_1, debate_a, _debate_b, teams = await _make_round_with_two_debates(db_session, tournament)
+    debate_a_teams = (
+        (await db_session.execute(select(DebateTeam).where(DebateTeam.debate_id == debate_a.id)))
+        .scalars()
+        .all()
+    )
+    for rank, dt in enumerate(debate_a_teams, start=1):
+        dt.rank_in_debate = rank
+    await db_session.flush()
+    higher_team_id = next(dt.team_id for dt in debate_a_teams if dt.rank_in_debate == 1)
+    lower_team_id = next(dt.team_id for dt in debate_a_teams if dt.rank_in_debate == 2)
+    actual_gap = 1  # only two teams in this synthetic debate -> gap is always 1
+
+    market = await _make_market(
+        db_session, tournament, BetType.ROUND_HEAD_TO_HEAD, target_round_id=round_1.id
+    )
+    winner_correct_gap = await _make_user(db_session, "correct@example.com")
+    winner_wrong_gap = await _make_user(db_session, "wronggap@example.com")
+
+    base_payload = {
+        "debate_id": debate_a.id, "team_a_id": higher_team_id, "team_b_id": lower_team_id,
+        "predicted_higher_id": higher_team_id,
+    }
+    db_session.add_all(
+        [
+            _prediction(
+                BetType.ROUND_HEAD_TO_HEAD, market_id=market.id, user_id=winner_correct_gap.id,
+                payload={**base_payload, "sub_bet": {"rank_gap": actual_gap}},
+                stake_amount=10.0, odds=2.0, sub_bet_odds=3.0,
+            ),
+            _prediction(
+                BetType.ROUND_HEAD_TO_HEAD, market_id=market.id, user_id=winner_wrong_gap.id,
+                payload={**base_payload, "sub_bet": {"rank_gap": actual_gap + 1}},
+                stake_amount=10.0, odds=2.0, sub_bet_odds=3.0,
+            ),
+        ]
+    )
+    await db_session.commit()
+
+    assert await settle_market(db_session, market) is True
+    await db_session.commit()
+
+    predictions = (
+        (await db_session.execute(select(Prediction).order_by(Prediction.user_id))).scalars().all()
+    )
+    by_user = {p.user_id: p for p in predictions}
+
+    correct = by_user[winner_correct_gap.id]
+    assert correct.points_awarded == 60.0  # stake(10) * odds(2) * sub_bet_odds(3)
+    assert correct.sub_bet_status == PredictionStatus.SETTLED
+    assert correct.sub_bet_points_awarded == 60.0
+
+    wrong = by_user[winner_wrong_gap.id]
+    assert wrong.points_awarded == 0.0  # base was right but modifier missed -> ALL lost
+    assert wrong.sub_bet_status == PredictionStatus.SETTLED
+    assert wrong.sub_bet_points_awarded == 0.0
+
+
+async def test_team_break_sub_bet_exact_rank_is_all_or_nothing(db_session) -> None:
+    tournament = await _make_tournament(db_session)
+    category = BreakCategory(tournament_id=tournament.id, name="Open", slug="open", break_size=2)
+    db_session.add(category)
+    await db_session.flush()
+    team_1 = Team(tournament_id=tournament.id, external_id=1, name="Team 1")
+    team_2 = Team(tournament_id=tournament.id, external_id=2, name="Team 2")
+    db_session.add_all([team_1, team_2])
+    await db_session.flush()
+    db_session.add_all(
+        [
+            Break(
+                tournament_id=tournament.id, break_category_id=category.id, team_id=team_1.id,
+                rank=1,
+            ),
+            Break(
+                tournament_id=tournament.id, break_category_id=category.id, team_id=team_2.id,
+                rank=2,
+            ),
+        ]
+    )
+    await db_session.flush()
+
+    market = await _make_market(
+        db_session, tournament, BetType.TEAM_BREAK, target_break_category_id=category.id
+    )
+    correct_rank = await _make_user(db_session, "correct-rank@example.com")
+    wrong_rank = await _make_user(db_session, "wrong-rank@example.com")
+
+    db_session.add_all(
+        [
+            _prediction(
+                BetType.TEAM_BREAK, market_id=market.id, user_id=correct_rank.id,
+                payload={"team_id": team_1.id, "sub_bet": {"exact_rank": 1}},
+                stake_amount=10.0, odds=2.0, sub_bet_odds=5.0,
+            ),
+            _prediction(
+                BetType.TEAM_BREAK, market_id=market.id, user_id=wrong_rank.id,
+                payload={"team_id": team_1.id, "sub_bet": {"exact_rank": 2}},
+                stake_amount=10.0, odds=2.0, sub_bet_odds=5.0,
+            ),
+        ]
+    )
+    await db_session.commit()
+
+    assert await settle_market(db_session, market) is True
+    await db_session.commit()
+
+    predictions = {
+        p.user_id: p for p in (await db_session.execute(select(Prediction))).scalars().all()
+    }
+    correct = predictions[correct_rank.id]
+    assert correct.points_awarded == 100.0  # stake(10) * odds(2) * sub_bet_odds(5)
+    assert correct.sub_bet_status == PredictionStatus.SETTLED
+    assert correct.sub_bet_points_awarded == 100.0
+
+    wrong = predictions[wrong_rank.id]
+    assert wrong.points_awarded == 0.0  # team_1 broke (base won) but wrong exact rank -> all lost
+    assert wrong.sub_bet_status == PredictionStatus.SETTLED
+    assert wrong.sub_bet_points_awarded == 0.0

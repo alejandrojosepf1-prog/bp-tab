@@ -1,12 +1,18 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.api.schemas.breaks import BreakAssessmentOut, BreakCategoryOut, BreakEntryOut
+from app.api.deps import require_admin
+from app.api.schemas.breaks import (
+    BreakAssessmentOut,
+    BreakCategoryOut,
+    BreakCategoryUpdate,
+    BreakEntryOut,
+)
 from app.api.schemas.participants import InstitutionOut, SpeakerOut, TeamOut
 from app.db.session import get_db
-from app.models import Break, BreakCategory, Speaker, Team
+from app.models import Break, BreakCategory, Speaker, Team, User
 from app.services.break_service import recompute_break_predictions
 
 router = APIRouter(prefix="/tournaments/{tournament_id}", tags=["breaks"])
@@ -56,6 +62,33 @@ async def list_break_categories(
         .order_by(BreakCategory.name)
     )
     return list((await session.execute(stmt)).scalars().all())
+
+
+@router.patch("/break-categories/{category_id}", response_model=BreakCategoryOut)
+async def update_break_category(
+    tournament_id: int,
+    category_id: int,
+    payload: BreakCategoryUpdate,
+    session: AsyncSession = Depends(get_db),
+    _admin: User = Depends(require_admin),
+) -> BreakCategory:
+    """Sets break_size by hand -- Tabbycat doesn't reliably publish "how many teams break"
+    before the break itself happens, so this can't be scraped; an admin who knows the
+    tournament's announced break size fills it in here. Required before a team_break market
+    can be priced (see app.services.break_service.team_break_probability)."""
+    category = await session.get(BreakCategory, category_id)
+    if category is None or category.tournament_id != tournament_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Break category not found"
+        )
+    if payload.break_size <= 0:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="break_size must be positive"
+        )
+    category.break_size = payload.break_size
+    await session.commit()
+    await session.refresh(category)
+    return category
 
 
 @router.get("/break-categories/{category_id}/predictions", response_model=list[BreakAssessmentOut])

@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.domain.odds import (
     adaptive_temperature,
     decimal_odds_from_probability,
+    exact_rank_gap_probability,
     pari_mutuel_odds,
     positional_probabilities,
     sequence_probability,
@@ -39,7 +40,7 @@ from app.models import (
     TeamBreakCategory,
 )
 from app.models.enums import BetType, PredictionStatus, RoundStage
-from app.services.break_service import team_break_probability
+from app.services.break_service import team_break_exact_rank_probability, team_break_probability
 from app.services.ranking_service import get_standings
 
 SPEAKER_POINTS_WEIGHT = 0.02  # total_speaker_points are ~10-30x team_points in magnitude
@@ -50,6 +51,15 @@ STRENGTH_OF_SCHEDULE_WEIGHT = 0.5
 # services/betting_service.py's build_market_outcome docstring for the same caveat on
 # settlement), so it gets a flat, admin-tunable default instead of a computed one.
 DEFAULT_BREAKOUT_TEAM_ODDS = 4.0
+
+# team_break's "exact_points" sub-bet modifier (the team's EXACT team_points total at the
+# moment the break is decided) has the same problem: there's no historical data on how
+# team_points are distributed across the field to build a real probability from, and the value
+# itself is close to a coin-flip-times-many-outcomes guess. Same pattern as
+# DEFAULT_BREAKOUT_TEAM_ODDS -- a flat, admin-tunable multiplier rather than invented
+# statistics. Kept notably higher than DEFAULT_BREAKOUT_TEAM_ODDS since guessing one exact
+# integer point total is a much longer shot than picking one team out of a field.
+DEFAULT_EXACT_POINTS_SUB_BET_ODDS = 8.0
 
 
 class UnpriceableMarketError(Exception):
@@ -119,10 +129,17 @@ def _pair_pool_from_stakes(
     team_a_id: int,
     team_b_id: int,
     predicted_winner_id: int,
+    *,
+    predicted_field: str = "predicted_winner_id",
+    debate_id: int | None = None,
 ) -> tuple[float, float]:
     """Same as `_field_pool_from_stakes`, but scoped to just this one head-to-head pairing -- a
-    HEAD_TO_HEAD market can host many independent pairings, so team A vs. B's money shouldn't
-    dilute or be diluted by C vs. D's."""
+    HEAD_TO_HEAD-style market can host many independent pairings, so team A vs. B's money
+    shouldn't dilute or be diluted by C vs. D's. `predicted_field` lets ROUND_HEAD_TO_HEAD reuse
+    this same pool logic under its own payload key (`predicted_higher_id`) instead of legacy
+    HEAD_TO_HEAD's `predicted_winner_id`; `debate_id`, when given, additionally scopes to one
+    specific drawn debate (redundant in practice -- two teams can only co-occur in one debate
+    within a single round-scoped market -- but cheap and matches entity_key's own scoping)."""
     pair = {team_a_id, team_b_id}
     candidate_stake = 0.0
     total = 0.0
@@ -130,8 +147,10 @@ def _pair_pool_from_stakes(
         a, b = payload.get("team_a_id"), payload.get("team_b_id")
         if a is None or b is None or {a, b} != pair:
             continue
+        if debate_id is not None and payload.get("debate_id") != debate_id:
+            continue
         total += stake
-        if payload.get("predicted_winner_id") == predicted_winner_id:
+        if payload.get(predicted_field) == predicted_winner_id:
             candidate_stake += stake
     return candidate_stake, total
 
@@ -144,9 +163,18 @@ async def _pair_pool(
     predicted_winner_id: int,
     *,
     exclude_user_id: int | None,
+    predicted_field: str = "predicted_winner_id",
+    debate_id: int | None = None,
 ) -> tuple[float, float]:
     stakes = await _open_stakes(session, market_id, exclude_user_id=exclude_user_id)
-    return _pair_pool_from_stakes(stakes, team_a_id, team_b_id, predicted_winner_id)
+    return _pair_pool_from_stakes(
+        stakes,
+        team_a_id,
+        team_b_id,
+        predicted_winner_id,
+        predicted_field=predicted_field,
+        debate_id=debate_id,
+    )
 
 
 def _debate_pool_from_stakes(
@@ -504,6 +532,32 @@ async def quote_odds(
         )
         return pari_mutuel_odds(candidate_stake, debate_stake, prior)
 
+    if bet_type == BetType.ROUND_HEAD_TO_HEAD:
+        debate_id = payload["debate_id"]
+        await _require_debate_in_round(session, debate_id, bet_market.target_round_id)
+        power = await compute_team_power_ratings(session, bet_market.tournament_id)
+        team_a_id, team_b_id = payload["team_a_id"], payload["team_b_id"]
+        pair_power = {t: power[t] for t in (team_a_id, team_b_id) if t in power}
+        if len(pair_power) != 2:
+            raise UnpriceableMarketError("one or both teams have no standings yet")
+        # Same tournament-wide-spread reasoning as ROUND_WINNER/legacy HEAD_TO_HEAD above.
+        temperature = adaptive_temperature(power.values())
+        predicted_higher_id = payload["predicted_higher_id"]
+        if predicted_higher_id not in (team_a_id, team_b_id):
+            raise ValueError("predicted_higher_id must be one of team_a_id/team_b_id")
+        prior = softmax_probabilities(pair_power, temperature=temperature)[predicted_higher_id]
+        candidate_stake, pair_stake = await _pair_pool(
+            session,
+            bet_market.id,
+            team_a_id,
+            team_b_id,
+            predicted_higher_id,
+            exclude_user_id=exclude_user_id,
+            predicted_field="predicted_higher_id",
+            debate_id=debate_id,
+        )
+        return pari_mutuel_odds(candidate_stake, pair_stake, prior)
+
     if bet_type == BetType.TOP_SPEAKER_POSITION:
         power = await compute_speaker_power_ratings(session, bet_market.tournament_id)
         if not power:
@@ -587,6 +641,80 @@ async def quote_odds(
     raise ValueError(f"no odds pricing implemented for bet type {bet_type!r}")
 
 
+async def quote_sub_bet_odds(
+    session: AsyncSession, bet_market: BetMarket, payload: dict
+) -> float | None:
+    """Prices the OPTIONAL modifier in `payload["sub_bet"]`, if present -- see
+    `app.models.betting.Prediction`'s sub_bet_* column docstring for the "same bet slip, extra
+    modifier" design. Returns `None` if no sub-bet was attempted (no "sub_bet" key in `payload`)
+    or this bet_type has no modifier support at all.
+
+    Deliberately NO pari-mutuel pool blending here (unlike `quote_odds`'s base pricing): these
+    modifiers see far fewer bets than the base pick, so a seeded pool would rarely move off the
+    prior anyway -- this stays a plain fair-book price straight from the model. Raises the same
+    `UnpriceableMarketError`/`KeyError`/`ValueError` `quote_odds` does for equivalent situations.
+    """
+    sub_bet = payload.get("sub_bet")
+    if not sub_bet:
+        return None
+    bet_type = bet_market.bet_type
+
+    if bet_type == BetType.ROUND_HEAD_TO_HEAD:
+        gap = sub_bet.get("rank_gap")
+        if gap is None:
+            raise ValueError("sub_bet.rank_gap is required")
+        debate_id = payload["debate_id"]
+        team_a_id, team_b_id = payload["team_a_id"], payload["team_b_id"]
+        predicted_higher_id = payload["predicted_higher_id"]
+        lower_id = team_b_id if predicted_higher_id == team_a_id else team_a_id
+        power = await compute_team_power_ratings(session, bet_market.tournament_id)
+        debate_team_ids = (
+            (
+                await session.execute(
+                    select(DebateTeam.team_id).where(DebateTeam.debate_id == debate_id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        debate_power = {t: power[t] for t in debate_team_ids if t in power}
+        if len(debate_power) < len(debate_team_ids) or len(debate_power) < 2:
+            raise UnpriceableMarketError("not enough priced teams in this debate yet")
+        temperature = adaptive_temperature(power.values())
+        probability = exact_rank_gap_probability(
+            debate_power, predicted_higher_id, lower_id, gap, temperature=temperature
+        )
+        return decimal_odds_from_probability(probability)
+
+    if bet_type == BetType.TEAM_BREAK:
+        if bet_market.target_break_category_id is None:
+            raise UnpriceableMarketError("this market has no break category configured")
+        exact_rank = sub_bet.get("exact_rank")
+        if exact_rank is None:
+            raise ValueError("sub_bet.exact_rank is required")
+        team_id = payload["team_id"]
+        rank_distribution = await team_break_exact_rank_probability(
+            session, bet_market.tournament_id, bet_market.target_break_category_id, team_id
+        )
+        if not rank_distribution:
+            raise UnpriceableMarketError(
+                "not enough rounds judged yet to price the exact-rank sub-bet"
+            )
+        # A rank this team was never once simulated to land on prices as a genuine longshot
+        # (near-zero probability -> MAX_ODDS via decimal_odds_from_probability), not an error --
+        # 2000 simulated draws just not happening to hit it once is meaningfully different from
+        # it being literally impossible.
+        rank_odds = decimal_odds_from_probability(rank_distribution.get(exact_rank, 0.0))
+        # "exact_points" has no principled probability model (see
+        # DEFAULT_EXACT_POINTS_SUB_BET_ODDS) -- layers on as a flat multiplier on top of the
+        # rank price rather than replacing it, since both conditions must hold together.
+        if "exact_points" in sub_bet:
+            return round(rank_odds * DEFAULT_EXACT_POINTS_SUB_BET_ODDS, 2)
+        return rank_odds
+
+    return None
+
+
 # --- Live market board -------------------------------------------------------------------
 #
 # Read-only aggregate for the "Mercados abiertos" UI: per candidate/option, how much is
@@ -637,6 +765,14 @@ def format_payload_label(
         return team(payload.get("team_id"))
     if bet_type == BetType.TEAM_BREAK:
         name, emoji = team(payload.get("team_id"))
+        sub_bet = payload.get("sub_bet") or {}
+        if "exact_rank" in sub_bet and "exact_points" in sub_bet:
+            return (
+                f"{name} rompe #{sub_bet['exact_rank']} con {sub_bet['exact_points']} pts",
+                emoji,
+            )
+        if "exact_rank" in sub_bet:
+            return f"{name} rompe exactamente #{sub_bet['exact_rank']}", emoji
         return f"{name} rompe", emoji
     if bet_type == BetType.BEST_INSTITUTION:
         return payload.get("institution_code") or "—", None
@@ -661,6 +797,13 @@ def format_payload_label(
         name = speaker_names.get(speaker_id, f"Speaker {speaker_id}")
         position_label = _POSITION_LABELS.get(payload.get("position"), "—")
         return f"{name} — {position_label}", None
+    if bet_type == BetType.ROUND_HEAD_TO_HEAD:
+        higher, emoji = team(payload.get("predicted_higher_id"))
+        a, _ = team(payload.get("team_a_id"))
+        b, _ = team(payload.get("team_b_id"))
+        sub_bet = payload.get("sub_bet") or {}
+        gap_suffix = f" por {sub_bet['rank_gap']} puesto(s)" if "rank_gap" in sub_bet else ""
+        return f"{higher} arriba{gap_suffix} ({a} vs. {b})", emoji
     return "|".join(f"{k}={payload[k]}" for k in sorted(payload)) or "—", None
 
 
@@ -668,8 +811,9 @@ async def _generic_fallback_options(
     session: AsyncSession, bet_market: BetMarket, payload_by_key: dict[str, dict]
 ) -> dict[str, float]:
     """Prices every distinct payload for the bet types `market_board` has no dedicated
-    enumerable-candidate branch for (round_winner, round_full_call, top_speaker_position,
-    head_to_head, top_n_break, top_n_speakers, breakout_team). Returns {key: odds}, omitting any
+    enumerable-candidate branch for (round_winner, round_full_call, round_head_to_head,
+    top_speaker_position, head_to_head, top_n_break, top_n_speakers, breakout_team). Returns
+    {key: odds}, omitting any
     payload that can't be priced (mirrors `quote_odds` raising UnpriceableMarketError/KeyError/
     ValueError for that same payload, which callers used to `continue` past).
 
@@ -697,6 +841,7 @@ async def _generic_fallback_options(
         BetType.HEAD_TO_HEAD,
         BetType.ROUND_WINNER,
         BetType.ROUND_FULL_CALL,
+        BetType.ROUND_HEAD_TO_HEAD,
         BetType.TOP_N_BREAK,
     ):
         power = await compute_team_power_ratings(
@@ -722,7 +867,7 @@ async def _generic_fallback_options(
     debate_ids = {
         payload["debate_id"]
         for payload in payload_by_key.values()
-        if bet_type in (BetType.ROUND_WINNER, BetType.ROUND_FULL_CALL)
+        if bet_type in (BetType.ROUND_WINNER, BetType.ROUND_FULL_CALL, BetType.ROUND_HEAD_TO_HEAD)
         and payload.get("debate_id") is not None
     }
     teams_by_debate: dict[int, list[int]] = defaultdict(list)
@@ -795,6 +940,32 @@ async def _generic_fallback_options(
                 prior = sequence_probability(debate_power, team_ids, temperature=temperature)
                 candidate_stake, compartment_stake = _debate_sequence_pool_from_stakes(
                     open_stakes, debate_id, team_ids
+                )
+
+            elif bet_type == BetType.ROUND_HEAD_TO_HEAD:
+                debate_id = payload["debate_id"]
+                if (
+                    bet_market.target_round_id is not None
+                    and round_by_debate.get(debate_id) != bet_market.target_round_id
+                ):
+                    continue
+                team_a_id, team_b_id = payload["team_a_id"], payload["team_b_id"]
+                pair_power = {t: power[t] for t in (team_a_id, team_b_id) if t in power}
+                if len(pair_power) != 2:
+                    continue
+                predicted_higher_id = payload["predicted_higher_id"]
+                if predicted_higher_id not in (team_a_id, team_b_id):
+                    continue
+                prior = softmax_probabilities(pair_power, temperature=temperature)[
+                    predicted_higher_id
+                ]
+                candidate_stake, compartment_stake = _pair_pool_from_stakes(
+                    open_stakes,
+                    team_a_id,
+                    team_b_id,
+                    predicted_higher_id,
+                    predicted_field="predicted_higher_id",
+                    debate_id=debate_id,
                 )
 
             elif bet_type == BetType.TOP_SPEAKER_POSITION:

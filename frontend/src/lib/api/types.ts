@@ -164,7 +164,10 @@ export interface BreakCategory {
   name: string;
   slug: string;
   is_general: boolean;
-  break_size: number;
+  // Tabbycat doesn't reliably publish "how many teams break" before the break itself happens,
+  // so this stays null until an admin sets it by hand (PATCH .../break-categories/{id}) --
+  // required before a team_break market can be priced.
+  break_size: number | null;
 }
 
 export type BreakStatus = "safe" | "alive" | "eliminated";
@@ -190,6 +193,7 @@ export type BetType =
   | "round_full_call"
   | "top_speaker_position"
   | "team_break"
+  | "round_head_to_head"
   // Retired from the admin "create market" UI (see backend app.models.enums.BetType) but kept
   // here since a market created before the redesign could still be open/settled.
   | "top_n_break"
@@ -234,6 +238,9 @@ export interface MarketBoard {
 
 export interface OddsQuote {
   odds: number;
+  // Priced only when the quoted payload has a "sub_bet" key and the bet_type supports one --
+  // see backend app.services.odds_service.quote_sub_bet_odds. null otherwise.
+  sub_bet_odds: number | null;
 }
 
 export type PredictionStatus = "open" | "locked" | "settled";
@@ -256,6 +263,16 @@ export interface HeadToHeadPayload {
   team_b_id: number;
   predicted_winner_id: number;
 }
+export interface RoundHeadToHeadSubBet {
+  rank_gap: number;
+}
+export interface RoundHeadToHeadPayload {
+  debate_id: number;
+  team_a_id: number;
+  team_b_id: number;
+  predicted_higher_id: number;
+  sub_bet?: RoundHeadToHeadSubBet;
+}
 export interface BreakoutTeamPayload {
   team_id: number;
 }
@@ -269,6 +286,7 @@ export type PredictionPayload =
   | TopNSpeakersPayload
   | RoundWinnerPayload
   | HeadToHeadPayload
+  | RoundHeadToHeadPayload
   | BreakoutTeamPayload
   | BestInstitutionPayload;
 
@@ -286,6 +304,12 @@ export interface Prediction {
   // The amount actually credited back once settled (stake_amount * odds if won, 0 if lost),
   // null while still open.
   points_awarded: number | null;
+  // Optional modular sub-bet layered on this same prediction (e.g. an exact rank gap) -- see
+  // backend app.models.betting.Prediction's sub_bet_* column docstring. sub_bet_status is null
+  // when no sub-bet was placed at all.
+  sub_bet_odds: number | null;
+  sub_bet_status: PredictionStatus | null;
+  sub_bet_points_awarded: number | null;
   locked_at: string | null;
   created_at: string;
 }
@@ -307,6 +331,9 @@ export interface MyPrediction {
   odds: number;
   potential_payout: number;
   points_awarded: number | null;
+  sub_bet_odds: number | null;
+  sub_bet_status: string | null;
+  sub_bet_points_awarded: number | null;
   created_at: string;
 }
 
