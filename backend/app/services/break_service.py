@@ -6,6 +6,8 @@ own derived analysis, stored in `BreakPrediction`, never mixed with the OFFICIAL
 the scraper writes once the tournament publishes its real break.
 """
 
+import asyncio
+
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -61,7 +63,12 @@ async def recompute_break_predictions(
     if not standings:
         return []
 
-    report = build_break_report(
+    # build_break_report is plain sync CPU work -- for a large field (hundreds of teams) its
+    # Monte Carlo simulation can run long enough to block the event loop past Render's health
+    # check timeout, since this runs on every scrape cycle. asyncio.to_thread moves it off the
+    # loop so /health and other requests keep getting serviced while it runs.
+    report = await asyncio.to_thread(
+        build_break_report,
         standings,
         break_size=category.break_size,
         rounds_remaining=rounds_remaining,
