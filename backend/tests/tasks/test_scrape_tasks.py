@@ -6,12 +6,27 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 
+import httpx
 import pytest
 from sqlalchemy import select
 
-from app.models import BreakCategory, BreakPrediction, Team, TeamBreakCategory, Tournament, User
+from app.models import (
+    BreakCategory,
+    BreakPrediction,
+    ScrapeLog,
+    Team,
+    TeamBreakCategory,
+    Tournament,
+    User,
+)
 from app.models.betting import BetMarket, Prediction
-from app.models.enums import BetMarketStatus, BetType, TournamentStatus, UserRole
+from app.models.enums import (
+    BetMarketStatus,
+    BetType,
+    ScrapeStatus,
+    TournamentStatus,
+    UserRole,
+)
 from app.tasks.scrape_tasks import scrape_all_active_tournaments_async, scrape_tournament_async
 
 FIXTURES_DIR = Path(__file__).parent.parent / "scraper" / "fixtures"
@@ -227,3 +242,48 @@ async def test_scrape_all_active_tournaments_async_lists_only_active(
 
     ids = await scrape_all_active_tournaments_async(session_factory=file_db_session_factory)
     assert ids == [active_id]
+
+
+@pytest.mark.asyncio
+async def test_scrape_tournament_async_records_a_failed_scrape_log_on_error(
+    httpx_mock, file_db_session_factory
+) -> None:
+    """Regression guard: a scrape/ingest exception used to vanish with no trace at all -- the
+    admin 'Scraping' screen only ever reads ScrapeLog, and the only place that ever wrote one was
+    the happy path at the very end of IngestionService.ingest. Now a failure lands in that same
+    table instead of only Render's raw log stream."""
+    httpx_mock.add_response(
+        url=f"{BASE_URL}/api/v1/tournaments/open/", status_code=404, is_reusable=True
+    )
+    httpx_mock.add_response(
+        url=f"{BASE_URL}/open/participants/institutions/",
+        status_code=200,
+        text=_fixture("institutions_list.html"),
+        is_reusable=True,
+    )
+    httpx_mock.add_exception(
+        httpx.ConnectError("connection refused"),
+        url=f"{BASE_URL}/open/participants/list/",
+        is_reusable=True,  # the client retries via tenacity -- every attempt must see the error
+    )
+
+    async with file_db_session_factory() as setup_session:
+        tournament = Tournament(
+            name="CMUDE 2025", slug="cmude2025-open", source_base_url=BASE_URL,
+            source_slug="open", status=TournamentStatus.UPCOMING,
+        )
+        setup_session.add(tournament)
+        await setup_session.commit()
+        tournament_id = tournament.id
+
+    with pytest.raises(httpx.ConnectError):
+        await scrape_tournament_async(tournament_id, session_factory=file_db_session_factory)
+
+    async with file_db_session_factory() as verify_session:
+        log = (
+            await verify_session.execute(
+                select(ScrapeLog).where(ScrapeLog.tournament_id == tournament_id)
+            )
+        ).scalar_one()
+        assert log.status == ScrapeStatus.FAILED
+        assert "connection refused" in log.error_message

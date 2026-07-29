@@ -11,6 +11,7 @@ Postgres-backed `AsyncSessionLocal` -- the Celery task wrappers always use the r
 """
 
 import asyncio
+import datetime
 import logging
 from collections.abc import Callable
 
@@ -18,9 +19,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import AsyncSessionLocal
-from app.models import BreakCategory, Debate, Tournament
+from app.models import BreakCategory, Debate, ScrapeLog, Tournament
 from app.models.betting import BetMarket
-from app.models.enums import BetMarketStatus
+from app.models.enums import BetMarketStatus, ScrapeStatus, ScrapeStrategy
 from app.scraper.orchestrator import TournamentScraper
 from app.services.betting_service import (
     auto_close_pretournament_markets,
@@ -55,27 +56,51 @@ async def scrape_tournament_async(
             .all()
         )
 
-        scraper = TournamentScraper(tournament.source_base_url, tournament.source_slug)
+        started_at = datetime.datetime.now(datetime.timezone.utc)
         try:
-            tournament.api_available = await scraper.check_api_available()
-            snapshot = await scraper.scrape(known_debate_external_ids=known_debate_external_ids)
-        finally:
-            await scraper.close()
+            scraper = TournamentScraper(tournament.source_base_url, tournament.source_slug)
+            try:
+                tournament.api_available = await scraper.check_api_available()
+                snapshot = await scraper.scrape(
+                    known_debate_external_ids=known_debate_external_ids
+                )
+            finally:
+                await scraper.close()
 
-        log = await IngestionService(session).ingest(tournament, snapshot)
-        await refresh_tournament_status(session, tournament)
-        await auto_close_pretournament_markets(session, tournament)
-        await _recompute_break_predictions_for_tournament(session, tournament.id)
-        await _settle_resolvable_markets(session, tournament.id)
-        await settle_pending_sub_bets(session, tournament.id)
+            log = await IngestionService(session).ingest(tournament, snapshot)
+            await refresh_tournament_status(session, tournament)
+            await auto_close_pretournament_markets(session, tournament)
+            await _recompute_break_predictions_for_tournament(session, tournament.id)
+            await _settle_resolvable_markets(session, tournament.id)
+            await settle_pending_sub_bets(session, tournament.id)
 
-        await session.commit()
-        return {
-            "tournament_id": tournament_id,
-            "entities_created": log.entities_created,
-            "entities_updated": log.entities_updated,
-            "new_debates": len(snapshot.ballots),
-        }
+            await session.commit()
+            return {
+                "tournament_id": tournament_id,
+                "entities_created": log.entities_created,
+                "entities_updated": log.entities_updated,
+                "new_debates": len(snapshot.ballots),
+            }
+        except Exception as exc:
+            # Used to vanish completely: IngestionService.ingest only ever wrote a ScrapeLog row
+            # on the happy path (at the very end), so a scrape that threw partway through --
+            # network error, a Tabbycat page changing shape, whatever -- left no trace at all in
+            # the admin "Scraping" screen, only in Render's raw log stream. Now every failure
+            # lands in the same table admins already check, with the actual error message.
+            logger.exception("scrape failed for tournament_id=%s", tournament_id)
+            await session.rollback()
+            session.add(
+                ScrapeLog(
+                    tournament_id=tournament_id,
+                    started_at=started_at,
+                    finished_at=datetime.datetime.now(datetime.timezone.utc),
+                    status=ScrapeStatus.FAILED,
+                    strategy_used=ScrapeStrategy.HTML_VUEDATA,
+                    error_message=str(exc),
+                )
+            )
+            await session.commit()
+            raise
 
 
 async def _recompute_break_predictions_for_tournament(
