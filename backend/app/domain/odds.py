@@ -67,6 +67,16 @@ MAX_ODDS = 50.0
 # approaching or passing this) has the crowd's money doing most of the pricing.
 DEFAULT_SEED = 200.0
 
+# Elimination rounds (octofinals -> grand final) get a much thinner seed. A prelim round spreads
+# the same crowd over ~15 simultaneous rooms, so any single debate sees little money and needs
+# the model to carry the price; an elimination round has a handful of rooms, everyone is watching
+# the SAME debates, and stakes per debate are far larger. With DEFAULT_SEED the model would keep
+# overriding a genuinely well-informed crowd all the way to close. This is not "no prior" -- with
+# an empty pool the price is still exactly the model's (see `pari_mutuel_probability`, where the
+# seed cancels out at zero stakes); the seed only sets how fast real money takes over, and here
+# it should be fast.
+ELIMINATION_SEED = 25.0
+
 
 def softmax_probabilities(
     power_by_candidate: dict[CandidateT, float], *, temperature: float = DEFAULT_TEMPERATURE
@@ -191,6 +201,39 @@ def positional_probabilities(
                 acc += p_j_first * p_k_second_given_j * p_i_third
         result[i] = acc
     return result
+
+
+def top_n_probabilities(
+    power_by_candidate: dict[CandidateT, float], n: int, *, temperature: float | None = None
+) -> dict[CandidateT, float]:
+    """P(each candidate finishes in the top `n`) -- i.e. "does this team ADVANCE", the actual
+    proposition in a British Parliamentary elimination room where `n` of the 4 teams go through
+    (2 for octofinals/quarters/semis, 1 for the grand final).
+
+    Summing `positional_probabilities` over slots 1..n is exact, not an approximation: finishing
+    top-n means occupying exactly one of those mutually exclusive slots.
+
+    Unlike every other prior in this module, the returned values sum to ~`n` across the field,
+    NOT to 1.0 -- because `n` candidates win, not one. Callers blending this into a pari-mutuel
+    pool must divide by `n` first (so priors and stake shares are on the same 1.0 scale) and
+    multiply the blended result back by `n`; see `app.services.odds_service`'s ROUND_WINNER
+    branch. Pricing these as though only one team advanced is what made backing all four teams
+    in an elimination room a risk-free double-your-money arbitrage.
+    """
+    if n not in (1, 2, 3):
+        raise ValueError("top_n_probabilities only supports n of 1, 2, or 3")
+    if not power_by_candidate:
+        return {}
+    temp = temperature if temperature is not None else adaptive_temperature(
+        power_by_candidate.values()
+    )
+    totals = {candidate: 0.0 for candidate in power_by_candidate}
+    for position in range(1, n + 1):
+        for candidate, probability in positional_probabilities(
+            power_by_candidate, position, temperature=temp
+        ).items():
+            totals[candidate] += probability
+    return totals
 
 
 def decimal_odds_from_probability(probability: float) -> float:

@@ -52,6 +52,7 @@ async def test_full_scrape_cycle_against_real_fixtures(httpx_mock, fixture_html)
     # No public draw up right now (between rounds) -- the orchestrator must treat it as
     # "no active round" and continue, exactly like an unavailable results page.
     httpx_mock.add_response(url=f"{BASE_URL}/open/draw/", status_code=403)
+    httpx_mock.add_response(url=f"{BASE_URL}/open/motions/", text=fixture_html("motions.html"))
 
     known_ids = _known_debate_ids_except(fixture_html, keep_unknown=443236)
 

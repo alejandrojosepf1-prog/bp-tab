@@ -15,17 +15,20 @@ tracks -- nothing here invents a new stat:
 from collections import defaultdict
 from dataclasses import dataclass
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.odds import (
+    ELIMINATION_SEED,
     adaptive_temperature,
     decimal_odds_from_probability,
     exact_rank_gap_probability,
     pari_mutuel_odds,
+    pari_mutuel_probability,
     positional_probabilities,
     sequence_probability,
     softmax_probabilities,
+    top_n_probabilities,
 )
 from app.models import (
     BetMarket,
@@ -211,6 +214,76 @@ async def _debate_pool(
 ) -> tuple[float, float]:
     stakes = await _open_stakes(session, market_id, exclude_user_id=exclude_user_id)
     return _debate_pool_from_stakes(stakes, debate_id, team_id)
+
+
+async def _advancing_count(session: AsyncSession, debate_id: int) -> int | None:
+    """How many of this debate's teams ADVANCE, if it belongs to an elimination round -- or
+    `None` when it's an ordinary preliminary debate (exactly one "winner", the team that ranks
+    1st).
+
+    British Parliamentary elimination rooms send 2 of 4 teams through, except the grand final
+    which crowns 1. The tab never publishes "how many advance" as a field, so it's inferred from
+    the round's shape: a round with a single debate is the final, anything wider is a normal
+    2-per-room elimination round.
+
+    ponytail: debate-count heuristic, covers standard BP brackets. If a tournament ever runs a
+    partial-double-octofinal (uneven bracket where some rooms advance 1 and others 2), read the
+    real count off the next round's team count instead.
+    """
+    row = (
+        await session.execute(
+            select(Round.id, Round.stage)
+            .join(Debate, Debate.round_id == Round.id)
+            .where(Debate.id == debate_id)
+        )
+    ).first()
+    if row is None or row.stage != RoundStage.ELIMINATION:
+        return None
+    num_debates = (
+        await session.execute(
+            select(func.count(Debate.id)).where(Debate.round_id == row.id)
+        )
+    ).scalar_one()
+    return 1 if num_debates <= 1 else 2
+
+
+def _round_winner_odds(
+    debate_power: dict[int, float],
+    team_id: int,
+    *,
+    temperature: float,
+    candidate_stake: float,
+    compartment_stake: float,
+    advancing_count: int | None,
+) -> float:
+    """Price for "this team wins/advances out of its debate". Shared by `quote_odds` and
+    `market_board`'s fallback so the two can never drift apart (see `_generic_fallback_options`).
+
+    Preliminary rounds (`advancing_count is None`) are a one-winner market: the softmax prior
+    sums to 1 across the room and blends straight into the seeded pari-mutuel pool.
+
+    Elimination rounds are a TOP-N market -- `advancing_count` teams advance together, so
+    P(advance) sums to `advancing_count`, not 1. Blending that directly against pool shares
+    (which always sum to 1) is what mispriced every elimination room by a factor of
+    `advancing_count`, making "back all four teams" a guaranteed double-up. Instead the prior is
+    normalized to the 1.0 scale, blended, then scaled back up -- which is also exactly how a real
+    pari-mutuel place pool pays: the pool splits between the N winners, so each winner's backers
+    collect `1 / (N * their_share)`.
+    """
+    if advancing_count is None:
+        prior = softmax_probabilities(debate_power, temperature=temperature)[team_id]
+        return pari_mutuel_odds(candidate_stake, compartment_stake, prior)
+
+    prior_advance = top_n_probabilities(debate_power, advancing_count, temperature=temperature)[
+        team_id
+    ]
+    blended = pari_mutuel_probability(
+        candidate_stake,
+        compartment_stake,
+        prior_advance / advancing_count,
+        seed=ELIMINATION_SEED,
+    )
+    return decimal_odds_from_probability(min(1.0, blended * advancing_count))
 
 
 async def _require_debate_in_round(
@@ -505,11 +578,17 @@ async def quote_odds(
         # tournament-wide spread, not just amongst themselves.
         temperature = adaptive_temperature(power.values())
         team_id = payload["team_id"]
-        prior = softmax_probabilities(debate_power, temperature=temperature)[team_id]
         candidate_stake, debate_stake = await _debate_pool(
             session, bet_market.id, debate_id, team_id, exclude_user_id=exclude_user_id
         )
-        return pari_mutuel_odds(candidate_stake, debate_stake, prior)
+        return _round_winner_odds(
+            debate_power,
+            team_id,
+            temperature=temperature,
+            candidate_stake=candidate_stake,
+            compartment_stake=debate_stake,
+            advancing_count=await _advancing_count(session, debate_id),
+        )
 
     if bet_type == BetType.ROUND_FULL_CALL:
         debate_id = payload["debate_id"]
@@ -911,6 +990,12 @@ async def _generic_fallback_options(
     }
     teams_by_debate: dict[int, list[int]] = defaultdict(list)
     round_by_debate: dict[int, int | None] = {}
+    # Elimination rounds price as top-N ("does this team advance") rather than one-winner -- see
+    # `_round_winner_odds`. Both facts it needs (the round's stage, and how many debates the
+    # round has) are batch-fetched here for every round these payloads touch, so the board keeps
+    # its "one query set for the whole market" property instead of calling `_advancing_count`
+    # per debate.
+    advancing_by_round: dict[int, int | None] = {}
     if debate_ids:
         debate_rows = (
             await session.execute(
@@ -927,6 +1012,22 @@ async def _generic_fallback_options(
             )
         ).all()
         round_by_debate = dict(round_rows)
+        round_ids = {rid for rid in round_by_debate.values() if rid is not None}
+        if round_ids:
+            stage_rows = (
+                await session.execute(
+                    select(Round.id, Round.stage, func.count(Debate.id))
+                    .join(Debate, Debate.round_id == Round.id)
+                    .where(Round.id.in_(round_ids))
+                    .group_by(Round.id, Round.stage)
+                )
+            ).all()
+            for round_id, stage, debate_count in stage_rows:
+                advancing_by_round[round_id] = (
+                    None
+                    if stage != RoundStage.ELIMINATION
+                    else (1 if debate_count <= 1 else 2)
+                )
 
     odds_by_key: dict[str, float] = {}
     for key, payload in payload_by_key.items():
@@ -957,10 +1058,18 @@ async def _generic_fallback_options(
                 if len(debate_power) < 2:
                     continue
                 team_id = payload["team_id"]
-                prior = softmax_probabilities(debate_power, temperature=temperature)[team_id]
                 candidate_stake, compartment_stake = _debate_pool_from_stakes(
                     open_stakes, debate_id, team_id
                 )
+                odds_by_key[key] = _round_winner_odds(
+                    debate_power,
+                    team_id,
+                    temperature=temperature,
+                    candidate_stake=candidate_stake,
+                    compartment_stake=compartment_stake,
+                    advancing_count=advancing_by_round.get(round_by_debate.get(debate_id)),
+                )
+                continue
 
             elif bet_type == BetType.ROUND_FULL_CALL:
                 debate_id = payload["debate_id"]

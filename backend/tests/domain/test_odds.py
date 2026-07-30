@@ -1,3 +1,4 @@
+import itertools
 import math
 
 import pytest
@@ -16,6 +17,7 @@ from app.domain.odds import (
     sequence_probability,
     single_candidate_odds,
     softmax_probabilities,
+    top_n_probabilities,
 )
 
 
@@ -285,3 +287,51 @@ def test_exact_rank_gap_probability_rejects_out_of_range_gap() -> None:
         exact_rank_gap_probability(power, "a", "b", 0)
     with pytest.raises(ValueError):
         exact_rank_gap_probability(power, "a", "b", 4)
+
+
+# --- Elimination rounds: top-N ("does this team advance"), not one-winner -------------------
+
+
+def test_top_n_probabilities_sum_to_n() -> None:
+    """A BP elimination room sends N of 4 teams through, so P(advance) must sum to N -- not to
+    1.0 the way a one-winner market does."""
+    power = {"a": 18.0, "b": 15.0, "c": 13.0, "d": 11.0}
+    for n in (1, 2, 3):
+        probs = top_n_probabilities(power, n, temperature=5.0)
+        assert math.isclose(sum(probs.values()), float(n), rel_tol=1e-9)
+
+
+def test_top_n_probabilities_n_of_one_matches_plain_softmax() -> None:
+    power = {"a": 18.0, "b": 15.0, "c": 13.0, "d": 11.0}
+    assert top_n_probabilities(power, 1, temperature=5.0) == pytest.approx(
+        softmax_probabilities(power, temperature=5.0)
+    )
+
+
+def test_top_n_probabilities_favors_the_stronger_team() -> None:
+    power = {"a": 18.0, "b": 15.0, "c": 13.0, "d": 11.0}
+    probs = top_n_probabilities(power, 2, temperature=5.0)
+    assert probs["a"] > probs["b"] > probs["c"] > probs["d"]
+    # Even the weakest team in a 2-of-4 room is far from hopeless.
+    assert 0.0 < probs["d"] < probs["a"] < 1.0
+
+
+def test_top_n_probabilities_rejects_unsupported_n() -> None:
+    with pytest.raises(ValueError):
+        top_n_probabilities({"a": 1.0, "b": 1.0}, 4)
+
+
+def test_backing_every_team_in_an_elimination_room_is_not_free_money() -> None:
+    """Regression guard for a real arbitrage: elimination rooms were priced as if ONE team won,
+    but 2 of 4 advance -- so backing all four teams in proportion to their own odds returned
+    ~2x the stake no matter who went through. Pricing top-2 as top-2 removes the edge: covering
+    the whole room must return roughly the stake back (a fair book with no house margin), never
+    a guaranteed profit."""
+    power = {"a": 18.0, "b": 15.0, "c": 13.0, "d": 11.0}
+    probs = top_n_probabilities(power, 2, temperature=15.0)
+    # Stake each team its normalized share of a 100-token book.
+    stakes = {team: probs[team] / 2 * 100 for team in probs}
+    cost = sum(stakes.values())
+    for advancing in itertools.combinations(probs, 2):
+        payout = sum(stakes[t] * decimal_odds_from_probability(probs[t]) for t in advancing)
+        assert payout == pytest.approx(cost, rel=0.02)

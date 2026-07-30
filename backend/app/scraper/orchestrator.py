@@ -83,6 +83,11 @@ class TournamentScraper:
         adjudicators = await self._apply_adjudicator_break(adjudicators, break_categories)
         team_breaks = await self._fetch_team_breaks(break_categories)
 
+        # One cheap page holding every round's motion + info slide. Fetched every cycle (not
+        # just once) because a round's motion is published only when that round is released --
+        # an out-round sits there with an empty motion until then.
+        motions = await self._safe_fetch_parse("motions/", parsers.parse_motions, default=[])
+
         return TournamentSnapshot(
             institutions=tuple(institutions),
             adjudicators=tuple(adjudicators),
@@ -94,6 +99,7 @@ class TournamentScraper:
             ballots=tuple(ballots),
             break_categories=tuple(break_categories),
             team_breaks=team_breaks,
+            motions=tuple(motions),
         )
 
     async def _safe_fetch_parse(self, path: str, parse_fn: Callable[[str], T], *, default: T) -> T:

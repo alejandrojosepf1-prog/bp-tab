@@ -66,6 +66,25 @@ class ScrapedRoundRef:
 
 
 @dataclass(frozen=True)
+class ScrapedMotion:
+    """A round's motion (and its info slide) as published on the tournament-wide /motions/ page.
+
+    Deliberately keyed by round NAME, not seq: the motions page is the one public page that
+    lists a round before it appears in the results navigation (an upcoming out-round shows up
+    there with an empty motion, which is exactly how "Octavos de Final" is announced), so there
+    is no seq to join on -- the name is the only shared key.
+
+    Distinct from the motion `parse_ballot` already reads off a scoresheet: that one only exists
+    once the debate has been judged and its ballot published, which is far too late to be useful
+    to somebody deciding a bet.
+    """
+
+    round_name: str
+    motion_text: str
+    info_slide: str | None
+
+
+@dataclass(frozen=True)
 class ScrapedDebateAdjudicator:
     external_id: int
     name: str
@@ -190,3 +209,4 @@ class TournamentSnapshot:
     ballots: tuple[ScrapedBallot, ...] = ()
     break_categories: tuple[ScrapedBreakCategoryRef, ...] = ()
     team_breaks: dict[str, tuple[ScrapedTeamBreakEntry, ...]] = field(default_factory=dict)
+    motions: tuple[ScrapedMotion, ...] = ()

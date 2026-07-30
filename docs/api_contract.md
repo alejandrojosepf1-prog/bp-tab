@@ -63,10 +63,14 @@ otherwise be invisible everywhere in the app.
 
 ## Rounds / Debates / Results (public/read-only)
 
-- `GET /tournaments/{id}/rounds` -> `Round[]` `{id, seq, name, stage, status}` (`stage`:
+- `GET /tournaments/{id}/rounds` -> `Round[]`
+  `{id, seq, name, stage, status, motion_text, info_slide}` (`stage`:
   `preliminary|elimination`; `status`: `draft|released|completed` -- `draft` means not yet
   drawn, `released` means drawn/in progress with no judged debate yet, `completed` means at
-  least one debate in the round has a judged outcome)
+  least one debate in the round has a judged outcome). `motion_text`/`info_slide` mirror the
+  tournament's public `/motions/` page and are `null` until that round's motion is released --
+  distinct from the per-debate `motion_text` on debate detail below, which comes off the ballot
+  and therefore only exists once the debate has already been judged.
 - `GET /tournaments/{id}/rounds/{round_id}/debates` -> `Debate[]` (summary: id, room name, teams w/ position+rank+points)
 - `GET /tournaments/{id}/debates/{debate_id}` -> `Debate` full detail:
   `{id, round: Round, room: {name}|null, status, motion_text, ballot_source_url,
@@ -104,10 +108,21 @@ still prices and settles exactly as before) but are no longer offered for NEW ma
 - `round_winner`: `{debate_id, team_id}` (who wins one specific debate). Requires
   `target_round_id` at creation (400 otherwise); the debate named in a payload must belong to
   that round (422 otherwise).
+  On an ELIMINATION round this means "does this team ADVANCE", and is priced as a top-N market
+  accordingly: BP out-rounds send 2 of the 4 teams through (1 in a single-room grand final), so
+  the prior is `app.domain.odds.top_n_probabilities` and the four quoted odds imply a total
+  probability of ~2.0, not 1.0. Pricing it as a one-winner market -- which is what happened
+  before -- made backing all four teams in a room a risk-free double-up. Elimination rounds also
+  blend against a much thinner `ELIMINATION_SEED`, so the crowd's money overrides the model far
+  faster than in a preliminary round (fewer rooms, more concentrated action).
 - `round_full_call`: `{debate_id, team_ids: [4 team ids, predicted 1st->4th order]}` -- the
   FULL finishing order of one debate (BP debates always have exactly 4 teams), not just the
   winner. Same `target_round_id` requirement/validation as `round_winner`. Priced via
   Plackett-Luce `sequence_probability` restricted to the debate's 4 teams.
+  **Cannot be created against an elimination round** (400): Tabbycat only records
+  advanced/not-advanced for an out-round, so `rank_in_debate` stays NULL forever and such a
+  market could take bets it would never be able to settle. Same restriction applies to
+  `round_head_to_head`.
 - `top_speaker_position`: `{speaker_id, position}` (`position`: `1|2|3`) -- does this speaker
   finish in EXACTLY this slot of the final top-3 speaker ranking (not "top 3 overall"). Priced
   via `app.domain.odds.positional_probabilities`, a marginal Plackett-Luce probability; each

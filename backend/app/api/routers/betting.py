@@ -19,7 +19,7 @@ from app.api.schemas.betting import (
     SettleResponse,
 )
 from app.db.session import get_db
-from app.models import BetMarket, Prediction, Tournament, User
+from app.models import BetMarket, Prediction, Round, Tournament, User
 from app.models.enums import BetMarketStatus
 from app.services.betting_service import (
     InsufficientBalanceError,
@@ -117,12 +117,22 @@ async def create_bet_market(
     _admin: User = Depends(require_admin),
 ) -> BetMarketOut:
     tournament = await _get_tournament_or_404(session, tournament_id)
+    target_round_stage = None
+    if payload.target_round_id is not None:
+        target_round = await session.get(Round, payload.target_round_id)
+        if target_round is None or target_round.tournament_id != tournament_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="La ronda elegida no pertenece a este torneo.",
+            )
+        target_round_stage = target_round.stage
     try:
         validate_market_creation(
             tournament,
             payload.bet_type,
             target_round_id=payload.target_round_id,
             target_break_category_id=payload.target_break_category_id,
+            target_round_stage=target_round_stage,
         )
     except MarketCreationError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc

@@ -13,6 +13,7 @@ import { Badge } from "@/components/ui/badge";
 import { OptionPicker } from "@/components/ui/option-picker";
 import { CountdownBadge } from "@/components/ui/countdown-badge";
 import { LoadingState } from "@/components/query-state";
+import { MotionPanel } from "@/components/tournament/motion-panel";
 import { cn } from "@/lib/utils";
 import { formatTokens } from "@/lib/format";
 import type {
@@ -418,7 +419,27 @@ function useRoundDebates(tournamentId: string, market: BetMarket) {
     enabled: !!roundId,
     staleTime: 30_000,
   });
-  return { round, debates: debates ?? [] };
+  return { round, debates: debates ?? [], isElimination: round?.stage === "elimination" };
+}
+
+/** La moción de la ronda del mercado, arriba del picker. Comparte queryKey con
+ * `useRoundDebates`, así que React Query lo deduplica: no agrega ni un request. */
+function RoundMotionBanner({
+  tournamentId,
+  market,
+}: {
+  tournamentId: string;
+  market: BetMarket;
+}) {
+  const { round } = useRoundDebates(tournamentId, market);
+  if (!market.target_round_id) return null;
+  return (
+    <MotionPanel
+      motionText={round?.motion_text}
+      infoSlide={round?.info_slide}
+      roundName={round?.name}
+    />
+  );
 }
 
 /** For multi-entity bet types, look up whether the user already has an OPEN/settled
@@ -442,7 +463,7 @@ function RoundWinnerPick({
   const [teamId, setTeamId] = useState<number | null>(null);
   const [subBetOpen, setSubBetOpen] = useState(false);
   const [speakerPoints, setSpeakerPoints] = useState<Record<number, string>>({});
-  const { round, debates } = useRoundDebates(tournamentId, market);
+  const { round, debates, isElimination } = useRoundDebates(tournamentId, market);
   const selectedDebate = debates.find((d) => String(d.id) === debateId);
   const selectedTeam = selectedDebate?.teams.find((dt) => dt.team.id === teamId)?.team;
   const existingForDebate = debateId
@@ -483,6 +504,16 @@ function RoundWinnerPick({
         Elegí el debate de <span className="font-medium text-foreground">{round?.name ?? "esta ronda"}</span> —
         podés apostar en varias salas de esta ronda, una apuesta por sala.
       </p>
+      {isElimination && (
+        // En eliminatorias el tab nunca publica el 1º-4º, sólo quién avanza -- y avanzan 2 de 4
+        // (1 en la final). El backend ya cotiza esto como top-N; acá se explicita para que nadie
+        // lea "ganador" como "salió primero".
+        <p className="rounded-lg border border-dashed border-primary/30 bg-primary/[0.04] px-3 py-2 text-xs text-muted-foreground">
+          Ronda eliminatoria: apostás a que el equipo{" "}
+          <span className="font-medium text-foreground">avanza</span> de su sala, no a que sale
+          primero. Avanzan 2 de 4 equipos (en la final, 1), y la cuota ya está calculada así.
+        </p>
+      )}
       <OptionPicker
         options={debates.map((d) => {
           const existing = findByEntityKey(myPredictions, "round_winner", `debate:${d.id}`);
@@ -515,7 +546,9 @@ function RoundWinnerPick({
 
       {selectedDebate && (
         <div className="flex flex-wrap items-stretch gap-2">
-          <span className="self-center text-xs text-muted-foreground">Ganador:</span>
+          <span className="self-center text-xs text-muted-foreground">
+            {isElimination ? "Avanza:" : "Ganador:"}
+          </span>
           {selectedDebate.teams.map((dt) => (
             <button
               key={dt.team.id}
@@ -1346,6 +1379,9 @@ export function MarketCard({
 
       {expanded && (
         <div className="flex flex-col gap-4 border-t border-border/60 p-4">
+          {/* Qué se debate, antes que cualquier número: sin esto había que abrir el tab en otra
+              pestaña para poder decidir una apuesta con criterio. */}
+          <RoundMotionBanner tournamentId={tournamentId} market={market} />
           <MarketBoardTable marketId={market.id} />
 
           {myPredictions.length > 0 && (

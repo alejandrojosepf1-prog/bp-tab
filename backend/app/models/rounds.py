@@ -26,6 +26,14 @@ class Round(Base, TournamentScopedMixin, TimestampMixin):
     )
     status: Mapped[RoundStatus] = mapped_column(default=RoundStatus.DRAFT, nullable=False)
 
+    # The round's motion and info slide, mirrored from the tournament's public /motions/ page so
+    # bettors can read what's actually being debated without leaving the app for the tab. NULL
+    # until that round's motion is released. Deliberately stored on Round rather than on
+    # Result.motion_text (which is per-debate and only exists once a ballot is published, i.e.
+    # after the debate is over -- useless for anyone deciding a bet).
+    motion_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    info_slide: Mapped[str | None] = mapped_column(Text, nullable=True)
+
     debates = relationship("Debate", back_populates="round", order_by="Debate.external_id")
 
 

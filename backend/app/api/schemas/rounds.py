@@ -19,6 +19,11 @@ class RoundOut(BaseModel):
     name: str
     stage: RoundStage
     status: RoundStatus
+    # Mirrored from the tournament's public /motions/ page -- NULL until that round's motion is
+    # released. Lets the betting UI show what's being debated inline instead of sending people
+    # to the tab in another tab.
+    motion_text: str | None = None
+    info_slide: str | None = None
 
 
 class RoomOut(BaseModel):

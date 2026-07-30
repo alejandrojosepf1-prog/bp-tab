@@ -55,6 +55,7 @@ def _mock_cmude_tournament(httpx_mock) -> None:
         f"{BASE_URL}/open/break/adjudicators/": (200, "break_adjudicators.html"),
         # No public draw between rounds -> scraper skips active-round ingestion.
         f"{BASE_URL}/open/draw/": (403, None),
+        f"{BASE_URL}/open/motions/": (200, "motions.html"),
     }
     for url, (status_code, fixture_name) in pages.items():
         text = _fixture(fixture_name) if fixture_name else None

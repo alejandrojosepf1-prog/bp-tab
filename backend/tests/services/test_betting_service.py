@@ -1479,3 +1479,121 @@ async def test_round_winner_sub_bet_odds_rejects_malformed_speaker_scores(db_ses
 
     # No sub_bet at all -- None, same as every other bet type.
     assert await quote_sub_bet_odds(db_session, market, base_payload) is None
+
+
+def test_validate_market_creation_blocks_unsettleable_bet_types_on_elimination_rounds() -> None:
+    """Tabbycat records only advanced/not-advanced for an out-round -- `rank_in_debate` stays
+    NULL forever (verified against the real tab), so a full-call or head-to-head market on an
+    elimination round would take bets it could never pay out. Refused at creation instead."""
+    tournament = Tournament(
+        name="T", slug="t", source_base_url="https://x", source_slug="o",
+        status=TournamentStatus.ELIMINATIONS,
+    )
+    for bet_type in (BetType.ROUND_FULL_CALL, BetType.ROUND_HEAD_TO_HEAD):
+        with pytest.raises(MarketCreationError):
+            validate_market_creation(
+                tournament,
+                bet_type,
+                target_round_id=1,
+                target_break_category_id=None,
+                target_round_stage=RoundStage.ELIMINATION,
+            )
+        # The very same type is fine on a preliminary round.
+        validate_market_creation(
+            tournament,
+            bet_type,
+            target_round_id=1,
+            target_break_category_id=None,
+            target_round_stage=RoundStage.PRELIMINARY,
+        )
+
+
+def test_validate_market_creation_allows_round_winner_on_elimination_rounds() -> None:
+    """round_winner is the one round-scoped type that DOES resolve on an out-round: it falls
+    back to "did my team advance" (see build_prediction_specific_outcome)."""
+    tournament = Tournament(
+        name="T", slug="t", source_base_url="https://x", source_slug="o",
+        status=TournamentStatus.ELIMINATIONS,
+    )
+    validate_market_creation(
+        tournament,
+        BetType.ROUND_WINNER,
+        target_round_id=1,
+        target_break_category_id=None,
+        target_round_stage=RoundStage.ELIMINATION,
+    )  # does not raise
+
+
+async def _make_elimination_round(db_session, tournament, *, num_debates: int):
+    """An out-round with `num_debates` rooms of 4 teams each -- 8 rooms is an octofinal, 1 room
+    is the grand final. `odds_service._advancing_count` reads the room count to decide whether 2
+    teams advance per room or just 1."""
+    elim = Round(
+        tournament_id=tournament.id, seq=10, name="Octavos de Final",
+        stage=RoundStage.ELIMINATION, status=RoundStatus.RELEASED,
+    )
+    db_session.add(elim)
+    await db_session.flush()
+    positions = (
+        BPPosition.OPENING_GOVERNMENT, BPPosition.OPENING_OPPOSITION,
+        BPPosition.CLOSING_GOVERNMENT, BPPosition.CLOSING_OPPOSITION,
+    )
+    debates, all_teams = [], []
+    for d in range(num_debates):
+        debate = Debate(tournament_id=tournament.id, round_id=elim.id, external_id=100 + d)
+        db_session.add(debate)
+        await db_session.flush()
+        teams = [
+            Team(tournament_id=tournament.id, external_id=1000 + d * 4 + i, name=f"T{d}-{i}")
+            for i in range(4)
+        ]
+        db_session.add_all(teams)
+        await db_session.flush()
+        for team, position in zip(teams, positions, strict=True):
+            db_session.add(DebateTeam(debate_id=debate.id, team_id=team.id, position=position))
+        debates.append(debate)
+        all_teams.append(teams)
+    await db_session.flush()
+    return elim, debates, all_teams
+
+
+async def test_elimination_round_winner_prices_as_top_two_not_single_winner(db_session) -> None:
+    """The arbitrage regression, end to end: in an octofinal 2 of 4 teams advance, so the four
+    quoted odds must imply ~2.0 total probability. When they implied 1.0 (one-winner pricing),
+    backing the whole room returned double the stake risk-free."""
+    from app.services.odds_service import quote_odds
+
+    tournament = await _make_tournament(db_session, status=TournamentStatus.ELIMINATIONS)
+    elim, debates, all_teams = await _make_elimination_round(db_session, tournament, num_debates=8)
+    market = await _make_market(
+        db_session, tournament, BetType.ROUND_WINNER, target_round_id=elim.id
+    )
+    await db_session.commit()
+
+    room, teams = debates[0], all_teams[0]
+    implied = 0.0
+    for team in teams:
+        odds = await quote_odds(db_session, market, {"debate_id": room.id, "team_id": team.id})
+        implied += 1 / odds
+    assert implied == pytest.approx(2.0, rel=0.05)
+
+
+async def test_grand_final_round_winner_still_prices_as_a_single_winner(db_session) -> None:
+    """A one-room out-round is the grand final: exactly one team advances, so the book goes back
+    to summing to 1.0 -- the top-N pricing must not blanket-double every elimination round."""
+    from app.services.odds_service import quote_odds
+
+    tournament = await _make_tournament(db_session, status=TournamentStatus.ELIMINATIONS)
+    elim, debates, all_teams = await _make_elimination_round(db_session, tournament, num_debates=1)
+    market = await _make_market(
+        db_session, tournament, BetType.ROUND_WINNER, target_round_id=elim.id
+    )
+    await db_session.commit()
+
+    implied = 0.0
+    for team in all_teams[0]:
+        odds = await quote_odds(
+            db_session, market, {"debate_id": debates[0].id, "team_id": team.id}
+        )
+        implied += 1 / odds
+    assert implied == pytest.approx(1.0, rel=0.05)

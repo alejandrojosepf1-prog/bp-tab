@@ -40,7 +40,13 @@ from app.models import (
     User,
 )
 from app.models.betting import BetMarket
-from app.models.enums import BetMarketStatus, BetType, PredictionStatus, TournamentStatus
+from app.models.enums import (
+    BetMarketStatus,
+    BetType,
+    PredictionStatus,
+    RoundStage,
+    TournamentStatus,
+)
 from app.repositories.upsert import upsert_by_natural_key
 from app.services.odds_service import quote_odds, quote_sub_bet_odds
 from app.services.ranking_service import get_standings
@@ -66,6 +72,15 @@ CREATABLE_BET_TYPES = (
 _ROUND_SCOPED_BET_TYPES = {
     BetType.ROUND_WINNER, BetType.ROUND_FULL_CALL, BetType.ROUND_HEAD_TO_HEAD
 }
+
+# Round-scoped types that can NEVER resolve against an elimination round. Tabbycat only records
+# advanced/not-advanced for an out-round (BP elims send 2 of 4 teams through) -- `rank_in_debate`
+# stays NULL forever, verified against the real tab. Both of these need that rank: ROUND_FULL_CALL
+# needs the whole 1st-4th order, ROUND_HEAD_TO_HEAD needs to compare two teams' ranks. A market of
+# either type on an out-round would take bets and then never pay them out, so creation is refused
+# up front. ROUND_WINNER is deliberately NOT here: it already falls back to "did my team advance"
+# (see build_prediction_specific_outcome), which is exactly the right question for an out-round.
+_ELIMINATION_UNSETTLEABLE_BET_TYPES = {BetType.ROUND_FULL_CALL, BetType.ROUND_HEAD_TO_HEAD}
 
 # Bet types whose optional sub-bet resolves in the SAME instant as the base pick (see
 # app.models.betting.Prediction's sub_bet_* docstring) -- all-or-nothing: missing the modifier
@@ -96,10 +111,11 @@ def validate_market_creation(
     *,
     target_round_id: int | None,
     target_break_category_id: int | None,
+    target_round_stage: RoundStage | None = None,
 ) -> None:
     """Enforces the creation-time constraints for each of the five creatable bet types (see
     `CREATABLE_BET_TYPES`). Called before a BetMarket row is even constructed -- nothing here
-    touches the database itself."""
+    touches the database itself; the caller looks up `target_round_stage` and passes it in."""
     if bet_type not in CREATABLE_BET_TYPES:
         raise MarketCreationError(
             f"'{bet_type.value}' ya no se puede crear desde el panel de admin."
@@ -112,6 +128,15 @@ def validate_market_creation(
         raise MarketCreationError("Este tipo de mercado requiere elegir una ronda.")
     if bet_type == BetType.TEAM_BREAK and target_break_category_id is None:
         raise MarketCreationError("Este tipo de mercado requiere elegir una categoría de break.")
+    if (
+        target_round_stage == RoundStage.ELIMINATION
+        and bet_type in _ELIMINATION_UNSETTLEABLE_BET_TYPES
+    ):
+        raise MarketCreationError(
+            f"'{bet_type.value}' no se puede liquidar en una ronda eliminatoria: el tab solo "
+            "publica qué equipos avanzan, nunca el orden 1º-4º. Usá 'Ganador de debate', que en "
+            "eliminatorias significa 'este equipo avanza'."
+        )
 
 
 async def auto_close_pretournament_markets(session: AsyncSession, tournament: Tournament) -> int:

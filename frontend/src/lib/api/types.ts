@@ -95,6 +95,11 @@ export interface Round {
   name: string;
   stage: RoundStage;
   status: string;
+  /** Espejo de la página pública de mociones del tab. `null` hasta que se libera la moción
+   * de esa ronda — no confundir con `Debate.motion_text`, que sale del ballot y por lo tanto
+   * recién existe DESPUÉS del debate. */
+  motion_text: string | null;
+  info_slide: string | null;
 }
 
 export type BpPosition = "OG" | "OO" | "CG" | "CO";

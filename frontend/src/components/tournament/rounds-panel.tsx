@@ -6,6 +6,7 @@ import { ChevronDown, DoorOpen, Swords } from "lucide-react";
 import { api } from "@/lib/api/client";
 import { queryKeys } from "@/lib/api/query-keys";
 import { LoadingState, ErrorState, EmptyState } from "@/components/query-state";
+import { MotionPanel } from "@/components/tournament/motion-panel";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 import type { DebateSummary, Round } from "@/lib/api/types";
@@ -117,6 +118,9 @@ function RoundDebates({ tournamentId, roundId }: { tournamentId: string; roundId
   );
 }
 
+const ELIMINATION_HINT =
+  "Ronda eliminatoria: no hay 1º-4º, sólo qué equipos avanzan.";
+
 /**
  * Todas las rondas del torneo como filas expandibles: click en una ronda (pasada o actual)
  * despliega sus debates y resultados AHÍ MISMO — sin navegar y sin páginas en blanco.
@@ -172,8 +176,9 @@ export function RoundsPanel({
                 <Swords className="size-4 shrink-0 text-muted-foreground" />
                 <span className="min-w-0 flex-1">
                   <span className="block truncate text-sm font-semibold">{round.name}</span>
-                  <span className="block text-xs text-muted-foreground">
+                  <span className="block truncate text-xs text-muted-foreground">
                     #{round.seq} · {round.stage === "preliminary" ? "Preliminar" : "Eliminatoria"}
+                    {round.motion_text ? ` · ${round.motion_text}` : ""}
                   </span>
                 </span>
                 <RoundStatusBadge status={round.status} />
@@ -187,7 +192,15 @@ export function RoundsPanel({
                 )}
               </button>
               {open && expandable && (
-                <div className="border-t border-border/60 p-3">
+                <div className="flex flex-col gap-3 border-t border-border/60 p-3">
+                  <MotionPanel
+                    motionText={round.motion_text}
+                    infoSlide={round.info_slide}
+                    roundName={round.name}
+                  />
+                  {round.stage === "elimination" && (
+                    <p className="text-xs text-muted-foreground">{ELIMINATION_HINT}</p>
+                  )}
                   <RoundDebates tournamentId={tournamentId} roundId={round.id} />
                 </div>
               )}

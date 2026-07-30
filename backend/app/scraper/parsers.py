@@ -25,6 +25,7 @@ from app.scraper.dtos import (
     ScrapedDrawDebate,
     ScrapedDrawTeamEntry,
     ScrapedInstitution,
+    ScrapedMotion,
     ScrapedRoundRef,
     ScrapedSpeaker,
     ScrapedSpeakerScore,
@@ -624,6 +625,45 @@ def _round_seq_from_href(href: str) -> int | None:
 def _looks_like_elimination(name: str) -> bool:
     lowered = name.lower()
     return any(kw in lowered for kw in _ELIMINATION_KEYWORDS)
+
+
+def parse_motions(html: str) -> list[ScrapedMotion]:
+    """Parses the tournament-wide `/motions/` page: one card per round, each holding the motion
+    and (optionally) its info slide.
+
+    Plain semantic HTML, not a vueData table, so this uses BeautifulSoup like `parse_ballot`.
+    A card whose motion hasn't been released yet still renders (that's how an upcoming
+    out-round is announced) -- those are skipped rather than stored as an empty motion, so
+    "not published yet" never overwrites a real motion on a later re-scrape.
+
+    The info slide's paragraphs/list items are flattened into newline-separated plain text:
+    the frontend renders it as prose, and keeping the tab's raw HTML would mean trusting
+    third-party markup straight into the page.
+    """
+    soup = BeautifulSoup(html, "lxml")
+    motions: list[ScrapedMotion] = []
+    for card in soup.select("div.card"):
+        title = card.select_one("h4.card-title")
+        if title is None:
+            continue
+        round_name = title.get_text(" ", strip=True)
+        motion_el = card.select_one("div.mr-auto.lead")
+        motion_text = motion_el.get_text(" ", strip=True) if motion_el else ""
+        if not round_name or not motion_text:
+            continue
+        slide_el = card.select_one("div.modal-body")
+        info_slide = None
+        if slide_el is not None:
+            blocks = [
+                block.get_text(" ", strip=True) for block in slide_el.select("p, li")
+            ]
+            info_slide = "\n".join(b for b in blocks if b) or None
+        motions.append(
+            ScrapedMotion(
+                round_name=round_name, motion_text=motion_text, info_slide=info_slide
+            )
+        )
+    return motions
 
 
 def parse_break_category_nav(html: str) -> list[ScrapedBreakCategoryRef]:

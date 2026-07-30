@@ -166,3 +166,27 @@ def test_parse_draw_extracts_active_round_with_rooms_and_positions(fixture_html)
 def test_parse_draw_rejects_page_without_draw(fixture_html) -> None:
     with pytest.raises(ParseError):
         parsers.parse_draw(fixture_html("institutions_list.html"))
+
+
+def test_parse_motions_reads_motion_and_info_slide_per_round(fixture_html) -> None:
+    motions = parsers.parse_motions(fixture_html("motions.html"))
+    assert len(motions) == 9  # Rondas 1-9 (see the skip test below for the 10th card)
+    by_round = {m.round_name: m for m in motions}
+
+    first = by_round["Ronda 1"]
+    assert "mercados de predicción" in first.motion_text
+    assert first.info_slide is not None
+    assert "contratos" in first.info_slide
+
+
+def test_parse_motions_skips_rounds_whose_motion_is_not_released_yet(fixture_html) -> None:
+    """The motions page lists an upcoming out-round BEFORE its motion is public -- that's how
+    'Octavos de Final' is announced. Such a card must be skipped entirely, never stored as an
+    empty motion, so a re-scrape can't blank out a motion that was already published."""
+    html = fixture_html("motions.html")
+    assert "Octavos de Final" in html  # the card really is on the page...
+    assert "Octavos de Final" not in {m.round_name for m in parsers.parse_motions(html)}
+
+
+def test_parse_motions_on_a_page_with_no_cards_is_empty_not_an_error() -> None:
+    assert parsers.parse_motions("<html><body><p>nada</p></body></html>") == []

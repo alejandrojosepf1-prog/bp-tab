@@ -302,6 +302,12 @@ class IngestionService:
         self, tournament: Tournament, snapshot: TournamentSnapshot
     ) -> dict[int, int]:
         ids: dict[int, int] = {}
+        # The /motions/ page has no round seq to join on -- only the round's display name, which
+        # is the same string the results nav gives us (see ScrapedMotion). Names are compared
+        # case/whitespace-insensitively since the two pages are rendered by different templates.
+        motion_by_name = {
+            " ".join(m.round_name.split()).casefold(): m for m in snapshot.motions
+        }
         for round_ref in snapshot.rounds:
             debates = snapshot.debates_by_round.get(round_ref.seq) or ()
             # A round is only COMPLETED once at least one of its debates actually carries a
@@ -318,17 +324,25 @@ class IngestionService:
                 status = RoundStatus.RELEASED
             else:
                 status = RoundStatus.DRAFT
+            values = {
+                "name": round_ref.name,
+                "stage": RoundStage.ELIMINATION
+                if round_ref.is_elimination
+                else RoundStage.PRELIMINARY,
+                "status": status,
+            }
+            # Only written when the tab actually publishes one. An unreleased motion must never
+            # blank out a motion already stored -- `parse_motions` skips empty cards for the same
+            # reason, and the /motions/ page being briefly unreachable yields no entries at all.
+            motion = motion_by_name.get(" ".join(round_ref.name.split()).casefold())
+            if motion is not None:
+                values["motion_text"] = motion.motion_text
+                values["info_slide"] = motion.info_slide
             result = await upsert_by_natural_key(
                 self.session,
                 Round,
                 lookup={"tournament_id": tournament.id, "seq": round_ref.seq},
-                values={
-                    "name": round_ref.name,
-                    "stage": RoundStage.ELIMINATION
-                    if round_ref.is_elimination
-                    else RoundStage.PRELIMINARY,
-                    "status": status,
-                },
+                values=values,
             )
             await self._track(tournament.id, "Round", result)
             ids[round_ref.seq] = result.instance.id
