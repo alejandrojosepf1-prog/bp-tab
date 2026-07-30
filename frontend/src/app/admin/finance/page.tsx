@@ -31,13 +31,18 @@ function StatCard({
   tone?: "neutral" | "positive" | "negative";
 }) {
   return (
-    <div className="flex flex-col gap-1.5 rounded-xl border border-border/70 bg-card/50 p-4">
+    // min-w-0: without it, a flex/grid child sizes to its content's min-content width by
+    // default -- a long token count in font-mono can force this card wider than its 2-column
+    // grid track at narrow viewports, blowing out the whole page's horizontal scroll instead of
+    // wrapping. break-words + a smaller base size on the value give the number somewhere to go
+    // instead.
+    <div className="flex min-w-0 flex-col gap-1.5 rounded-xl border border-border/70 bg-card/50 p-4">
       <span className="flex items-center gap-1.5 text-xs uppercase tracking-wider text-muted-foreground">
-        <Icon className="size-3.5" /> {label}
+        <Icon className="size-3.5 shrink-0" /> {label}
       </span>
       <span
         className={cn(
-          "font-mono text-xl font-bold",
+          "break-words font-mono text-lg font-bold sm:text-xl",
           tone === "positive" && "text-primary",
           tone === "negative" && "text-destructive"
         )}
@@ -148,7 +153,7 @@ export default function AdminFinancePage() {
                         Pool: <span className="font-mono">{fmt(m.pool_total)}</span>
                       </p>
                     </div>
-                    <div className="flex gap-4 text-sm">
+                    <div className="flex flex-wrap gap-x-4 gap-y-1 text-sm">
                       <span className="font-mono font-medium text-destructive">
                         peor: −{fmt(Math.abs(m.worst_case))}
                       </span>

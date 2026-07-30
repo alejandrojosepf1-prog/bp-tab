@@ -1,14 +1,9 @@
 "use client";
 
-import {
-  createContext,
-  useCallback,
-  useContext,
-  useEffect,
-  useMemo,
-  useState,
-} from "react";
+import { createContext, useCallback, useContext, useMemo } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ApiError, api, clearToken, getToken, setToken as persistToken } from "@/lib/api/client";
+import { queryKeys } from "@/lib/api/query-keys";
 import type { User } from "@/lib/api/types";
 
 interface AuthContextValue {
@@ -25,46 +20,39 @@ interface AuthContextValue {
 const AuthContext = createContext<AuthContextValue | undefined>(undefined);
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
-  const [user, setUser] = useState<User | null>(null);
-  // Lazy initializer: reading the token synchronously at mount (not inside an effect) is the
-  // sanctioned way to seed state from an external, impure source in React -- if there's no
-  // token there's nothing to load, so we start already "not loading" instead of flipping it
-  // off from inside an effect.
-  const [isLoading, setIsLoading] = useState(() => !!getToken());
+  const queryClient = useQueryClient();
 
-  const loadMe = useCallback(async () => {
-    // Only ever invoked when a token is known to exist (see the effect below), and its first
-    // statement is an `await`, so no setState call happens synchronously within the effect
-    // that calls it.
-    try {
-      const me = await api.auth.me();
-      setUser(me);
-    } catch (err) {
-      if (err instanceof ApiError && (err.status === 401 || err.status === 403)) {
-        clearToken();
+  // Backed by React Query (not local state) specifically so `queryClient.invalidateQueries({
+  // queryKey: queryKeys.me })` -- already called after every place a bet/prize/raffle entry can
+  // change `balance` -- actually does something. Before this, `user` lived in plain useState and
+  // nothing ever subscribed to the `me` query key, so those invalidations were silent no-ops and
+  // the sidebar balance never updated after a bet without a full page reload.
+  const { data: user = null, isLoading } = useQuery({
+    queryKey: queryKeys.me,
+    queryFn: async () => {
+      try {
+        return await api.auth.me();
+      } catch (err) {
+        if (err instanceof ApiError && (err.status === 401 || err.status === 403)) {
+          clearToken();
+        }
+        throw err;
       }
-      setUser(null);
-    } finally {
-      setIsLoading(false);
-    }
-  }, []);
+    },
+    enabled: !!getToken(),
+    retry: false,
+    staleTime: 10_000,
+  });
 
-  useEffect(() => {
-    if (!getToken()) return;
-    // This is the standard "fetch on mount" effect pattern -- `loadMe`'s own setState calls
-    // all happen after its internal `await`, never synchronously within this effect's call
-    // frame, but the lint rule's static check can't see across that await boundary and flags
-    // the call site itself. Session bootstrapping on mount is exactly what effects are for.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    loadMe();
-  }, [loadMe]);
-
-  const login = useCallback(async (email: string, password: string) => {
-    const res = await api.auth.login({ email, password });
-    persistToken(res.access_token);
-    const me = await api.auth.me();
-    setUser(me);
-  }, []);
+  const login = useCallback(
+    async (email: string, password: string) => {
+      const res = await api.auth.login({ email, password });
+      persistToken(res.access_token);
+      const me = await api.auth.me();
+      queryClient.setQueryData(queryKeys.me, me);
+    },
+    [queryClient]
+  );
 
   const register = useCallback(
     async (email: string, password: string, displayName: string) => {
@@ -76,8 +64,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const logout = useCallback(() => {
     clearToken();
-    setUser(null);
-  }, []);
+    queryClient.setQueryData(queryKeys.me, null);
+  }, [queryClient]);
+
+  const refreshUser = useCallback(async () => {
+    await queryClient.invalidateQueries({ queryKey: queryKeys.me });
+  }, [queryClient]);
 
   const value = useMemo<AuthContextValue>(
     () => ({
@@ -88,9 +80,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       login,
       register,
       logout,
-      refreshUser: loadMe,
+      refreshUser,
     }),
-    [user, isLoading, login, register, logout, loadMe]
+    [user, isLoading, login, register, logout, refreshUser]
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

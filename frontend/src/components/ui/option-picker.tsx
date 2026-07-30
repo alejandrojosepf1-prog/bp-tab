@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { Check, Search } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Input } from "@/components/ui/input";
@@ -39,6 +39,7 @@ export function OptionPicker({
 }) {
   const [query, setQuery] = useState("");
   const showSearch = searchable ?? options.length > 7;
+  const optionRefs = useRef<(HTMLButtonElement | null)[]>([]);
 
   const filtered = useMemo(() => {
     if (!query.trim()) return options;
@@ -49,6 +50,42 @@ export function OptionPicker({
     );
   }, [options, query]);
 
+  // Flechas arriba/abajo (+Home/End) mueven el foco entre opciones -- sin esto, `role="listbox"`
+  // prometía navegación de teclado tipo lista que en realidad no existía: solo Tab, un botón a
+  // la vez. Flecha abajo desde el buscador salta directo a la primera opción.
+  const focusOption = (index: number) => {
+    const clamped = Math.max(0, Math.min(index, filtered.length - 1));
+    optionRefs.current[clamped]?.focus();
+  };
+
+  const handleSearchKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "ArrowDown" && filtered.length > 0) {
+      e.preventDefault();
+      focusOption(0);
+    }
+  };
+
+  const handleOptionKeyDown = (e: React.KeyboardEvent<HTMLButtonElement>, index: number) => {
+    switch (e.key) {
+      case "ArrowDown":
+        e.preventDefault();
+        focusOption(index + 1);
+        break;
+      case "ArrowUp":
+        e.preventDefault();
+        focusOption(index - 1);
+        break;
+      case "Home":
+        e.preventDefault();
+        focusOption(0);
+        break;
+      case "End":
+        e.preventDefault();
+        focusOption(filtered.length - 1);
+        break;
+    }
+  };
+
   return (
     <div className="flex w-full flex-col gap-2">
       {showSearch && (
@@ -57,6 +94,7 @@ export function OptionPicker({
           <Input
             value={query}
             onChange={(e) => setQuery(e.target.value)}
+            onKeyDown={handleSearchKeyDown}
             placeholder={placeholder}
             className="h-8 pl-8 text-sm"
           />
@@ -73,17 +111,22 @@ export function OptionPicker({
         {filtered.length === 0 && (
           <p className="px-2 py-3 text-center text-xs text-muted-foreground">{emptyLabel}</p>
         )}
-        {filtered.map((option) => {
+        {filtered.map((option, index) => {
           const selected = option.value === value;
           return (
             <button
               key={option.value}
+              ref={(el) => {
+                optionRefs.current[index] = el;
+              }}
               type="button"
               role="option"
               aria-selected={selected}
               onClick={() => onChange(option.value)}
+              onKeyDown={(e) => handleOptionKeyDown(e, index)}
               className={cn(
                 "flex items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-sm transition-colors",
+                "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50",
                 selected
                   ? "bg-primary/15 text-primary ring-1 ring-primary/40"
                   : "hover:bg-accent"

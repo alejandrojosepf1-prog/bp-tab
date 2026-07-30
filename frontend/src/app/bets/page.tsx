@@ -6,10 +6,37 @@ import Link from "next/link";
 import { ChevronDown, Lock, Ticket, Unlock } from "lucide-react";
 import { api } from "@/lib/api/client";
 import { queryKeys } from "@/lib/api/query-keys";
-import { LoadingState, ErrorState, EmptyState } from "@/components/query-state";
+import { ErrorState, EmptyState } from "@/components/query-state";
 import { MarketCard } from "@/components/betting/market-card";
+import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 import type { BetMarket, Tournament } from "@/lib/api/types";
+
+/** Misma forma que una MarketCard colapsada (borde redondeado, título + subtítulo + badge a la
+ * derecha) para que no haya salto de layout al pasar de esqueleto a mercados reales. */
+function MarketCardSkeleton() {
+  return (
+    <div className="flex items-center gap-3 rounded-xl border border-border bg-card/70 px-4 py-3">
+      <div className="flex min-w-0 flex-1 flex-col gap-1.5">
+        <Skeleton className="h-4 w-40" />
+        <Skeleton className="h-3 w-56" />
+      </div>
+      <Skeleton className="h-5 w-16 shrink-0 rounded-full" />
+    </div>
+  );
+}
+
+function MarketsSectionSkeleton() {
+  return (
+    <div className="flex flex-col gap-3">
+      <Skeleton className="h-4 w-40" />
+      <div className="flex flex-col gap-3">
+        <MarketCardSkeleton />
+        <MarketCardSkeleton />
+      </div>
+    </div>
+  );
+}
 
 /** Un torneo's markets filtered to just `statusFilter`, as MarketCard blocks -- reused by both
  * accordion sections (Abiertos/Cerrados) below; TanStack Query dedupes the underlying fetch. */
@@ -57,7 +84,7 @@ function TournamentMarketsGroup({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [markets, filtered.length, tournament.id]);
 
-  if (isLoading) return <LoadingState label="Cargando mercados…" />;
+  if (isLoading) return <MarketsSectionSkeleton />;
   if (!filtered.length) return null;
 
   return (
@@ -182,7 +209,12 @@ export default function BetsPage() {
         </p>
       </div>
 
-      {isLoading && <LoadingState label="Cargando torneos…" />}
+      {isLoading && (
+        <div className="flex flex-col gap-3 rounded-2xl border border-border bg-card/40 p-4">
+          <Skeleton className="h-6 w-40" />
+          <MarketsSectionSkeleton />
+        </div>
+      )}
       {error && <ErrorState error={error} />}
       {tournaments && withMarkets.length === 0 && (
         <EmptyState

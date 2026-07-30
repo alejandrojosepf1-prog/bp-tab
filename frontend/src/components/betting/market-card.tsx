@@ -1536,8 +1536,15 @@ export function MarketCard({
   return (
     <div
       className={cn(
-        "rounded-xl border bg-card/70 transition-colors",
-        expanded ? "border-primary/30" : "border-border"
+        "rounded-xl border bg-card/70 transition-all",
+        expanded
+          ? "border-primary/30"
+          : // Colapsado, un mercado cerrado/liquidado se atenúa para que los abiertos dominen
+            // la vista -- al expandirlo vuelve a opacidad completa, para que revisarlo no sea
+            // incómodo de leer.
+            isOpen
+            ? "border-border"
+            : "border-border/50 opacity-70 hover:opacity-100"
       )}
     >
       <button

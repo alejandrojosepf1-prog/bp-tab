@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   LayoutDashboard,
   Ticket,
@@ -56,6 +56,29 @@ function Wordmark() {
   );
 }
 
+/** Flashea el balance cuando cambia -- verde si sube (ganó una apuesta, cobró un premio), rojo
+ * si baja (apostó). `null` en el primer render y cada vez que el flash termina, así el balance
+ * inicial nunca "flashea" solo por montar. */
+function useBalanceFlash(balance: number | undefined) {
+  const [flash, setFlash] = useState<"up" | "down" | null>(null);
+  const prevRef = useRef(balance);
+
+  useEffect(() => {
+    if (balance === undefined || prevRef.current === undefined) {
+      prevRef.current = balance;
+      return;
+    }
+    if (balance !== prevRef.current) {
+      setFlash(balance > prevRef.current ? "up" : "down");
+      prevRef.current = balance;
+      const timeout = setTimeout(() => setFlash(null), 900);
+      return () => clearTimeout(timeout);
+    }
+  }, [balance]);
+
+  return flash;
+}
+
 function NavLink({
   href,
   label,
@@ -90,6 +113,7 @@ function SidebarBody({ onNavigate }: { onNavigate?: () => void }) {
   const pathname = usePathname();
   const router = useRouter();
   const { user, isAuthenticated, isAdmin, logout } = useAuth();
+  const balanceFlash = useBalanceFlash(user?.balance);
 
   const isActive = (href: string) =>
     pathname === href || pathname.startsWith(`${href}/`);
@@ -149,11 +173,26 @@ function SidebarBody({ onNavigate }: { onNavigate?: () => void }) {
                 <LogOut className="size-4" />
               </button>
             </div>
-            <div className="flex items-baseline justify-between rounded-lg bg-primary/10 px-2.5 py-1.5">
+            <div
+              className={cn(
+                "flex items-baseline justify-between rounded-lg px-2.5 py-1.5 transition-colors duration-500",
+                balanceFlash === "up" && "bg-emerald-500/20",
+                balanceFlash === "down" && "bg-destructive/15",
+                !balanceFlash && "bg-primary/10"
+              )}
+            >
               <span className="text-[0.7rem] uppercase tracking-wider text-primary/80">
                 Tokens
               </span>
-              <span className="font-mono text-sm font-semibold text-primary">
+              <span
+                className={cn(
+                  "font-mono text-sm font-semibold transition-transform duration-300",
+                  balanceFlash && "scale-110",
+                  balanceFlash === "up" && "text-emerald-400",
+                  balanceFlash === "down" && "text-destructive",
+                  !balanceFlash && "text-primary"
+                )}
+              >
                 {formatTokens(user?.balance ?? 0)}
               </span>
             </div>

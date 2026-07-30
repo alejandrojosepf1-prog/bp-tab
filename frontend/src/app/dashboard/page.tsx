@@ -7,8 +7,9 @@ import { useQuery } from "@tanstack/react-query";
 import { ArrowRight, ChevronDown, Swords, Ticket, Trophy, Users } from "lucide-react";
 import { api } from "@/lib/api/client";
 import { queryKeys } from "@/lib/api/query-keys";
-import { LoadingState, ErrorState, EmptyState } from "@/components/query-state";
+import { ErrorState, EmptyState } from "@/components/query-state";
 import { Badge } from "@/components/ui/badge";
+import { Skeleton } from "@/components/ui/skeleton";
 import { RoundsPanel, RoundStatusBadge } from "@/components/tournament/rounds-panel";
 import { TeamsPanel } from "@/components/tournament/teams-panel";
 import { cn } from "@/lib/utils";
@@ -23,6 +24,43 @@ const TOURNAMENT_STATUS_LABEL: Record<string, string> = {
 };
 
 const LIVE_STATUSES = new Set(["in_progress", "break_pending", "eliminations"]);
+
+/** Misma forma que TournamentCard (borde redondeado, cabecera + fila de chips + tab bar) para
+ * que no haya salto de layout cuando cambia de esqueleto a la tarjeta real. */
+function TournamentCardSkeleton() {
+  return (
+    <div className="flex flex-col overflow-hidden rounded-2xl border border-border bg-card/80">
+      <div className="flex flex-col gap-3 p-5">
+        <div className="flex items-start justify-between gap-3">
+          <div className="flex min-w-0 flex-1 flex-col gap-2">
+            <Skeleton className="h-5 w-48" />
+            <Skeleton className="h-3 w-32" />
+          </div>
+          <Skeleton className="h-5 w-20 shrink-0 rounded-full" />
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <Skeleton className="h-7 w-28 rounded-lg" />
+          <Skeleton className="h-7 w-24 rounded-lg" />
+          <Skeleton className="h-7 w-32 rounded-lg" />
+        </div>
+      </div>
+      <div className="flex border-t border-border/60">
+        <Skeleton className="m-2 h-7 flex-1 rounded-md" />
+        <Skeleton className="m-2 h-7 flex-1 rounded-md" />
+      </div>
+    </div>
+  );
+}
+
+function RoundsPanelSkeleton() {
+  return (
+    <div className="flex flex-col gap-2">
+      {[0, 1, 2].map((i) => (
+        <Skeleton key={i} className="h-12 w-full rounded-xl" />
+      ))}
+    </div>
+  );
+}
 
 function TournamentCard({ tournament }: { tournament: Tournament }) {
   const router = useRouter();
@@ -136,7 +174,7 @@ function TournamentCard({ tournament }: { tournament: Tournament }) {
               defaultOpenRoundId={dashboard.current_round?.id ?? null}
             />
           ) : (
-            <LoadingState label="Cargando rondas…" />
+            <RoundsPanelSkeleton />
           )}
         </div>
       )}
@@ -169,7 +207,12 @@ export default function DashboardPage() {
         </p>
       </div>
 
-      {isLoading && <LoadingState label="Cargando torneos…" />}
+      {isLoading && (
+        <div className="flex flex-col gap-4">
+          <TournamentCardSkeleton />
+          <TournamentCardSkeleton />
+        </div>
+      )}
       {error && <ErrorState error={error} />}
       {tournaments && tournaments.length === 0 && (
         <EmptyState

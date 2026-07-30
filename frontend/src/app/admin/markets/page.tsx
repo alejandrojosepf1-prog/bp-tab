@@ -204,8 +204,8 @@ function BreakSizeInput({
   const valid = value !== "" && Number.isInteger(parsed) && parsed > 0;
 
   return (
-    <div className="flex items-center gap-2 rounded-lg border border-dashed border-amber-500/40 bg-amber-500/5 px-3 py-2">
-      <p className="flex-1 text-xs text-amber-600 dark:text-amber-400">
+    <div className="flex flex-wrap items-center gap-2 rounded-lg border border-dashed border-amber-500/40 bg-amber-500/5 px-3 py-2">
+      <p className="min-w-40 flex-1 text-xs text-amber-600 dark:text-amber-400">
         &ldquo;{category.name}&rdquo; todavía no tiene tamaño de break — el tab no lo publica
         hasta que rompe. Escribilo a mano para poder crear el mercado.
       </p>
@@ -214,7 +214,7 @@ function BreakSizeInput({
         min="1"
         step="1"
         placeholder="32"
-        className="h-8 w-20 font-mono"
+        className="h-8 w-20 shrink-0 font-mono"
         value={value}
         onChange={(e) => setValue(e.target.value)}
       />
@@ -270,7 +270,7 @@ function MarketPreview({
             </Badge>
           </div>
         </div>
-        <div className="mt-2 flex gap-2 text-xs text-muted-foreground">
+        <div className="mt-2 flex flex-wrap gap-2 text-xs text-muted-foreground">
           <span className="flex items-center gap-1 rounded-md bg-primary/10 px-2 py-1 text-primary">
             <Coins className="size-3" /> Pool 0 tokens
           </span>
@@ -676,7 +676,7 @@ export default function AdminMarketsPage() {
 
             <MarketPreview form={form} roundName={roundName} categoryName={categoryName} />
 
-            <div className="flex items-center gap-3">
+            <div className="flex flex-wrap items-center gap-3">
               <Button type="submit" disabled={createMutation.isPending || (touched && !isValid)}>
                 {createMutation.isPending && <Loader2 className="size-4 animate-spin" />}
                 Publicar mercado
