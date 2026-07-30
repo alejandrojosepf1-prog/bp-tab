@@ -49,6 +49,9 @@ interface BetTypeOption {
   needsRound?: boolean;
   needsBreakCategory?: boolean;
   requiresUpcoming?: boolean;
+  /** Sólo tiene sentido sobre una ronda eliminatoria (ver backend
+   * `_ELIMINATION_ONLY_BET_TYPES`) -- el selector de ronda se filtra a solo esas. */
+  eliminationOnly?: boolean;
 }
 
 const BET_TYPES: BetTypeOption[] = [
@@ -92,6 +95,14 @@ const BET_TYPES: BetTypeOption[] = [
     hint: "Qué equipo queda arriba del otro en la misma sala — con apuesta específica opcional al puesto exacto",
     icon: Crosshair,
     needsRound: true,
+  },
+  {
+    value: "round_advancing_pair",
+    label: "Par exacto que avanza",
+    hint: "Solo eliminatorias — los 2 equipos EXACTOS que pasan de una sala (no importa el orden entre ellos)",
+    icon: Crosshair,
+    needsRound: true,
+    eliminationOnly: true,
   },
 ];
 
@@ -562,7 +573,10 @@ export default function AdminMarketsPage() {
             {selectedType?.needsRound && (
               <Field label="Ronda" error={touched ? errors.target_round_id : undefined}>
                 <div className="flex flex-wrap gap-1.5">
-                  {(rounds ?? []).map((r) => (
+                  {(selectedType.eliminationOnly
+                    ? (rounds ?? []).filter((r) => r.stage === "elimination")
+                    : (rounds ?? [])
+                  ).map((r) => (
                     <button
                       key={r.id}
                       type="button"
@@ -577,7 +591,13 @@ export default function AdminMarketsPage() {
                       {r.name}
                     </button>
                   ))}
-                  {!rounds?.length && (
+                  {selectedType.eliminationOnly &&
+                    !(rounds ?? []).some((r) => r.stage === "elimination") && (
+                      <p className="text-xs text-muted-foreground">
+                        Este torneo todavía no tiene rondas eliminatorias.
+                      </p>
+                    )}
+                  {!selectedType.eliminationOnly && !rounds?.length && (
                     <p className="text-xs text-muted-foreground">
                       Este torneo todavía no tiene rondas.
                     </p>

@@ -95,7 +95,8 @@ otherwise be invisible everywhere in the app.
 ## Betting
 
 **Bet types offered by the admin panel (`CREATABLE_BET_TYPES` in `app.services.betting_service`):**
-`champion | round_winner | round_full_call | top_speaker_position | team_break`. The older
+`champion | round_winner | round_full_call | top_speaker_position | team_break |
+round_head_to_head | round_advancing_pair`. The older
 `top_n_break | top_n_speakers | head_to_head | breakout_team | best_institution` remain valid
 `BetType` enum members (a market/prediction of one of these created before this list existed
 still prices and settles exactly as before) but are no longer offered for NEW markets.
@@ -134,6 +135,17 @@ still prices and settles exactly as before) but are no longer offered for NEW ma
   once a round is judged, else a naive `break_size/num_teams` base rate) with **no pari-mutuel
   pool blending**: pool-blending assumes competing candidates' priors sum to 1 across a shared
   compartment, which holds for "exactly one winner" markets but would be wrong here.
+- `round_advancing_pair`: `{debate_id, team_ids: [2 team ids, the pair that advances TOGETHER,
+  order doesn't matter]}`. **Elimination rounds only** -- requires `target_round_stage ==
+  ELIMINATION` at creation (400 otherwise), the mirror image of `round_full_call`/
+  `round_head_to_head`'s "not on elimination" restriction, since "which pair advances" is
+  meaningless in a preliminary room where all 4 teams stay in the tournament regardless of
+  placement. Quoting a debate with only 1 advancing slot (the single-room grand final) also 400s
+  -- there's no "pair" there. Priced via `app.domain.odds.pair_top_two_probability` (sum of both
+  Plackett-Luce orderings of the pair occupying the top 2), blended against the debate's own pool
+  with `ELIMINATION_SEED` like `round_winner` on an out-round. Settles against the same
+  `advancing_team_ids` outcome `round_winner`'s elimination fallback uses -- exact set match, 2
+  of 2.
 
 **Unit convention:** every dollar amount below (`User.balance`, `Prediction.stake_amount`,
 `potential_payout`, `points_awarded`, `LeaderboardEntry.total_points`, `BetMarket.pool_total`)

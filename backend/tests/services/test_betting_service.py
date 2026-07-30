@@ -1,4 +1,5 @@
 import datetime
+import itertools
 
 import pytest
 from sqlalchemy import select
@@ -22,6 +23,7 @@ from app.models.enums import (
     BetType,
     BPPosition,
     BreakStatus,
+    DebateStatus,
     PredictionStatus,
     RoundStage,
     RoundStatus,
@@ -1597,3 +1599,125 @@ async def test_grand_final_round_winner_still_prices_as_a_single_winner(db_sessi
         )
         implied += 1 / odds
     assert implied == pytest.approx(1.0, rel=0.05)
+
+
+# --- ROUND_ADVANCING_PAIR: elimination-only "exact pair advances" market -----------------
+
+
+def test_validate_market_creation_round_advancing_pair_requires_elimination_round() -> None:
+    """Mirror image of the elimination-UNsettleable block above: this type ONLY makes sense on
+    an elimination round (all 4 preliminary teams stay in the tournament regardless of rank)."""
+    tournament = Tournament(
+        name="T", slug="t", source_base_url="https://x", source_slug="o",
+        status=TournamentStatus.ELIMINATIONS,
+    )
+    with pytest.raises(MarketCreationError):
+        validate_market_creation(
+            tournament,
+            BetType.ROUND_ADVANCING_PAIR,
+            target_round_id=1,
+            target_break_category_id=None,
+            target_round_stage=RoundStage.PRELIMINARY,
+        )
+    validate_market_creation(
+        tournament,
+        BetType.ROUND_ADVANCING_PAIR,
+        target_round_id=1,
+        target_break_category_id=None,
+        target_round_stage=RoundStage.ELIMINATION,
+    )  # does not raise
+
+
+async def test_round_advancing_pair_prices_all_six_pairs_close_to_one(db_session) -> None:
+    """No pool blending peculiarities: with zero stakes on a fresh market, the 6 possible pairs'
+    quoted odds should still imply a total probability close to 1.0 -- exactly one pair is truly
+    "the" advancing pair, so this is a proper one-winner-among-six market."""
+    from app.services.odds_service import quote_odds
+
+    tournament = await _make_tournament(db_session, status=TournamentStatus.ELIMINATIONS)
+    elim, debates, all_teams = await _make_elimination_round(db_session, tournament, num_debates=8)
+    market = await _make_market(
+        db_session, tournament, BetType.ROUND_ADVANCING_PAIR, target_round_id=elim.id
+    )
+    await db_session.commit()
+
+    room, teams = debates[0], all_teams[0]
+    implied = 0.0
+    for a, b in itertools.combinations(teams, 2):
+        odds = await quote_odds(
+            db_session, market, {"debate_id": room.id, "team_ids": [a.id, b.id]}
+        )
+        implied += 1 / odds
+    assert implied == pytest.approx(1.0, rel=0.05)
+
+
+async def test_round_advancing_pair_quote_rejects_a_single_advancing_room(db_session) -> None:
+    """The grand final sends 1 team through, not 2 -- 'which pair advances' is meaningless
+    there, so pricing it must fail loudly rather than silently return a bogus number."""
+    from app.services.odds_service import UnpriceableMarketError, quote_odds
+
+    tournament = await _make_tournament(db_session, status=TournamentStatus.ELIMINATIONS)
+    # num_debates=1 is exactly what makes this a single-room final -- _advancing_count infers
+    # the round's advancing-count from how many debates it has, and a 1-debate round is the
+    # grand final shape (1 advances), not a normal 8-of-32 octofinal room (2 advance).
+    elim, debates, all_teams = await _make_elimination_round(db_session, tournament, num_debates=1)
+    market = await _make_market(
+        db_session, tournament, BetType.ROUND_ADVANCING_PAIR, target_round_id=elim.id
+    )
+    await db_session.commit()
+    room, teams = debates[0], all_teams[0]
+    with pytest.raises(UnpriceableMarketError):
+        await quote_odds(
+            db_session, market, {"debate_id": room.id, "team_ids": [teams[0].id, teams[1].id]}
+        )
+
+
+async def test_round_advancing_pair_settles_the_exact_advancing_pair_and_only_that_pair(
+    db_session,
+) -> None:
+    """End-to-end: place a bet on the real advancing pair and on a wrong pair, settle the
+    debate, confirm only the correct pair pays out."""
+    tournament = await _make_tournament(db_session, status=TournamentStatus.ELIMINATIONS)
+    elim, debates, all_teams = await _make_elimination_round(db_session, tournament, num_debates=8)
+    market = await _make_market(
+        db_session, tournament, BetType.ROUND_ADVANCING_PAIR, target_round_id=elim.id
+    )
+    room, teams = debates[0], all_teams[0]
+    advancing = teams[:2]
+    for dt in (
+        await db_session.execute(
+            select(DebateTeam).where(DebateTeam.debate_id == room.id)
+        )
+    ).scalars():
+        dt.advanced = dt.team_id in {t.id for t in advancing}
+    room.status = DebateStatus.CONFIRMED
+
+    alice = await _make_user(db_session, "alice-pair@example.com")
+    bob = await _make_user(db_session, "bob-pair@example.com")
+    correct = _prediction(
+        BetType.ROUND_ADVANCING_PAIR,
+        market_id=market.id, user_id=alice.id,
+        payload={"debate_id": room.id, "team_ids": [advancing[0].id, advancing[1].id]},
+        stake_amount=10.0, odds=3.0,
+    )
+    wrong = _prediction(
+        BetType.ROUND_ADVANCING_PAIR,
+        market_id=market.id, user_id=bob.id,
+        payload={"debate_id": room.id, "team_ids": [teams[2].id, teams[3].id]},
+        stake_amount=10.0, odds=3.0,
+    )
+    db_session.add_all([correct, wrong])
+    await db_session.commit()
+
+    settled = await settle_market(db_session, market)
+    await db_session.commit()
+
+    # Both predictions on this market target the one room that's resolved -- nobody bet on the
+    # other 7 rooms of this octofinal, so there's nothing else pending and the market settles.
+    assert settled is True
+    await db_session.refresh(correct)
+    await db_session.refresh(wrong)
+    assert correct.status == PredictionStatus.SETTLED
+    assert correct.points_awarded == pytest.approx(30.0)
+    assert wrong.status == PredictionStatus.SETTLED
+    assert wrong.points_awarded == 0.0

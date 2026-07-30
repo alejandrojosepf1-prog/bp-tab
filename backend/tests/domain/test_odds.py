@@ -16,6 +16,7 @@ from app.domain.odds import (
     positional_probabilities,
     sequence_probability,
     single_candidate_odds,
+    pair_top_two_probability,
     softmax_probabilities,
     top_n_probabilities,
 )
@@ -335,3 +336,41 @@ def test_backing_every_team_in_an_elimination_room_is_not_free_money() -> None:
     for advancing in itertools.combinations(probs, 2):
         payout = sum(stakes[t] * decimal_odds_from_probability(probs[t]) for t in advancing)
         assert payout == pytest.approx(cost, rel=0.02)
+
+
+# --- Elimination rounds: exact pair advances ---------------------------------------------
+
+
+def test_pair_top_two_probability_sums_to_one_across_the_room() -> None:
+    """Exactly one of the 6 possible pairs in a 4-team room is the one that actually advances --
+    the 6 pair probabilities must sum to 1.0, same as any other mutually exclusive market."""
+    power = {"a": 18.0, "b": 15.0, "c": 13.0, "d": 11.0}
+    total = sum(
+        pair_top_two_probability(power, x, y, temperature=5.0)
+        for x, y in itertools.combinations(power, 2)
+    )
+    assert math.isclose(total, 1.0, rel_tol=1e-9)
+
+
+def test_pair_top_two_probability_is_symmetric_in_its_two_arguments() -> None:
+    power = {"a": 18.0, "b": 15.0, "c": 13.0, "d": 11.0}
+    assert pair_top_two_probability(power, "a", "b", temperature=5.0) == pytest.approx(
+        pair_top_two_probability(power, "b", "a", temperature=5.0)
+    )
+
+
+def test_pair_top_two_probability_favors_the_two_strongest_teams() -> None:
+    power = {"a": 18.0, "b": 15.0, "c": 13.0, "d": 11.0}
+    strongest_pair = pair_top_two_probability(power, "a", "b", temperature=5.0)
+    weakest_pair = pair_top_two_probability(power, "c", "d", temperature=5.0)
+    assert strongest_pair > weakest_pair
+
+
+def test_pair_top_two_probability_rejects_same_candidate() -> None:
+    with pytest.raises(ValueError):
+        pair_top_two_probability({"a": 1.0, "b": 1.0}, "a", "a")
+
+
+def test_pair_top_two_probability_unknown_candidate_raises() -> None:
+    with pytest.raises(KeyError):
+        pair_top_two_probability({"a": 1.0, "b": 1.0}, "a", "ghost")

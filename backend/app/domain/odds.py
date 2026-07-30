@@ -236,6 +236,39 @@ def top_n_probabilities(
     return totals
 
 
+def pair_top_two_probability(
+    power_by_candidate: dict[CandidateT, float],
+    a: CandidateT,
+    b: CandidateT,
+    *,
+    temperature: float | None = None,
+) -> float:
+    """P(candidates `a` and `b` occupy the top 2 slots, in EITHER order) -- the "exact pair
+    advances" proposition in a 4-team BP elimination room, where 2 of 4 go through and which
+    ONE of them finished ahead of the other doesn't matter for this bet.
+
+    `sequence_probability(power, [x, y])` is the Plackett-Luce marginal P(x is EXACTLY 1st AND y
+    is EXACTLY 2nd) -- the sequential draw-without-replacement formula is exact for any ranking
+    PREFIX, correctly marginalizing over how the untouched remaining candidates end up ordered.
+    Summing both orderings of the pair gives P(the pair occupies the top 2 at all), which is
+    exactly what a "does this router of two advance" market needs to price -- as opposed to
+    `positional_probabilities`, which answers "does ONE specific candidate land at ONE specific
+    slot", not "do these two occupy the two slots together".
+
+    Raises KeyError if either id isn't in `power_by_candidate`, or ValueError if `a == b`.
+    """
+    if a not in power_by_candidate or b not in power_by_candidate:
+        raise KeyError((a, b))
+    if a == b:
+        raise ValueError("a and b must be different candidates")
+    temp = temperature if temperature is not None else adaptive_temperature(
+        power_by_candidate.values()
+    )
+    return sequence_probability(
+        power_by_candidate, [a, b], temperature=temp
+    ) + sequence_probability(power_by_candidate, [b, a], temperature=temp)
+
+
 def decimal_odds_from_probability(probability: float) -> float:
     """"Pays 1.85x"-style decimal odds: stake * odds = total returned (including the stake
     itself) if the bet wins.

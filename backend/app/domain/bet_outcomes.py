@@ -101,6 +101,15 @@ def _team_break(payload: dict, outcome: dict) -> bool:
     return team_id in (outcome.get("breaking_team_ids") or [])
 
 
+def _round_advancing_pair(payload: dict, outcome: dict) -> bool:
+    team_ids = payload.get("team_ids")
+    if payload.get("debate_id") is None or not team_ids or len(team_ids) != 2:
+        return False
+    if outcome.get("debate_id") != payload["debate_id"]:
+        return False
+    return set(team_ids) == set(outcome.get("advancing_team_ids") or [])
+
+
 def _round_head_to_head(payload: dict, outcome: dict) -> bool:
     if payload.get("debate_id") is None or payload.get("predicted_higher_id") is None:
         return False
@@ -122,6 +131,7 @@ _STRATEGIES: dict[BetType, Callable[[dict, dict], bool]] = {
     BetType.TOP_SPEAKER_POSITION: _top_speaker_position,
     BetType.TEAM_BREAK: _team_break,
     BetType.ROUND_HEAD_TO_HEAD: _round_head_to_head,
+    BetType.ROUND_ADVANCING_PAIR: _round_advancing_pair,
 }
 
 

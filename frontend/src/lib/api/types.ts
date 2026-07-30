@@ -199,6 +199,7 @@ export type BetType =
   | "top_speaker_position"
   | "team_break"
   | "round_head_to_head"
+  | "round_advancing_pair"
   // Retired from the admin "create market" UI (see backend app.models.enums.BetType) but kept
   // here since a market created before the redesign could still be open/settled.
   | "top_n_break"

@@ -56,6 +56,7 @@ _PER_PREDICTION_BET_TYPES = {
     BetType.ROUND_WINNER,
     BetType.ROUND_FULL_CALL,
     BetType.ROUND_HEAD_TO_HEAD,
+    BetType.ROUND_ADVANCING_PAIR,
 }
 
 # Bet types still creatable from the admin panel -- see app.models.enums.BetType for why
@@ -67,10 +68,14 @@ CREATABLE_BET_TYPES = (
     BetType.TOP_SPEAKER_POSITION,
     BetType.TEAM_BREAK,
     BetType.ROUND_HEAD_TO_HEAD,
+    BetType.ROUND_ADVANCING_PAIR,
 )
 
 _ROUND_SCOPED_BET_TYPES = {
-    BetType.ROUND_WINNER, BetType.ROUND_FULL_CALL, BetType.ROUND_HEAD_TO_HEAD
+    BetType.ROUND_WINNER,
+    BetType.ROUND_FULL_CALL,
+    BetType.ROUND_HEAD_TO_HEAD,
+    BetType.ROUND_ADVANCING_PAIR,
 }
 
 # Round-scoped types that can NEVER resolve against an elimination round. Tabbycat only records
@@ -81,6 +86,11 @@ _ROUND_SCOPED_BET_TYPES = {
 # up front. ROUND_WINNER is deliberately NOT here: it already falls back to "did my team advance"
 # (see build_prediction_specific_outcome), which is exactly the right question for an out-round.
 _ELIMINATION_UNSETTLEABLE_BET_TYPES = {BetType.ROUND_FULL_CALL, BetType.ROUND_HEAD_TO_HEAD}
+
+# The mirror image: types that ONLY make sense on an elimination round, so creation is refused
+# everywhere else. "Which exact pair advances" (2 of 4) isn't a coherent question in a
+# preliminary room, where all 4 teams stay in the tournament regardless of how they place.
+_ELIMINATION_ONLY_BET_TYPES = {BetType.ROUND_ADVANCING_PAIR}
 
 # Bet types whose optional sub-bet resolves in the SAME instant as the base pick (see
 # app.models.betting.Prediction's sub_bet_* docstring) -- all-or-nothing: missing the modifier
@@ -137,6 +147,12 @@ def validate_market_creation(
             "publica qué equipos avanzan, nunca el orden 1º-4º. Usá 'Ganador de debate', que en "
             "eliminatorias significa 'este equipo avanza'."
         )
+    if bet_type in _ELIMINATION_ONLY_BET_TYPES and target_round_stage != RoundStage.ELIMINATION:
+        raise MarketCreationError(
+            f"'{bet_type.value}' solo se puede crear sobre una ronda eliminatoria: en "
+            "preliminares los 4 equipos de la sala siguen en el torneo pase lo que pase, así "
+            "que 'quién avanza' no aplica."
+        )
 
 
 async def auto_close_pretournament_markets(session: AsyncSession, tournament: Tournament) -> int:
@@ -170,7 +186,7 @@ def _entity_key(bet_type: BetType, payload: dict) -> str:
     already validate payload shape via `quote_odds` before this runs, so that should never
     happen in practice; this is deliberately not more defensive than that.
     """
-    if bet_type in (BetType.ROUND_WINNER, BetType.ROUND_FULL_CALL):
+    if bet_type in (BetType.ROUND_WINNER, BetType.ROUND_FULL_CALL, BetType.ROUND_ADVANCING_PAIR):
         return f"debate:{payload['debate_id']}"
     if bet_type == BetType.TOP_SPEAKER_POSITION:
         return f"position:{payload['position']}"
@@ -334,6 +350,28 @@ async def build_market_outcome(session: AsyncSession, bet_market: BetMarket) -> 
     )
 
 
+async def _advancing_outcome(session: AsyncSession, debate_id: int) -> dict | None:
+    """`{debate_id, advancing_team_ids}` for an elimination debate -- shared by ROUND_WINNER's
+    elimination fallback and ROUND_ADVANCING_PAIR, both of which need exactly this: which teams
+    have `DebateTeam.advanced = True`. Returns None while any team's advanced flag is still
+    unknown (not yet judged) or if the debate has no rows at all."""
+    rows = (
+        await session.execute(
+            select(DebateTeam.advanced, DebateTeam.team_id).where(
+                DebateTeam.debate_id == debate_id
+            )
+        )
+    ).all()
+    if not rows:
+        return None
+    if any(advanced is None for advanced, _team_id in rows):
+        return None  # still pending -- advance status not fully known yet
+    advancing_team_ids = [team_id for advanced, team_id in rows if advanced]
+    if not advancing_team_ids:
+        return None
+    return {"debate_id": debate_id, "advancing_team_ids": advancing_team_ids}
+
+
 async def build_prediction_specific_outcome(
     session: AsyncSession, bet_market: BetMarket, payload: dict
 ) -> dict | None:
@@ -370,12 +408,13 @@ async def build_prediction_specific_outcome(
         # teams, so "who wins this debate" means "did MY team advance", not "who placed 1st",
         # which doesn't exist here). Falls through to this once a real ballot never arrives and
         # an admin resolves the debate manually instead.
-        if any(advanced is None for _rank, advanced, _team_id in rows):
-            return None  # still pending -- advance/rank status not fully known yet
-        advancing_team_ids = [team_id for _rank, advanced, team_id in rows if advanced]
-        if not advancing_team_ids:
+        return await _advancing_outcome(session, debate_id)
+
+    if bet_market.bet_type == BetType.ROUND_ADVANCING_PAIR:
+        debate_id = payload.get("debate_id")
+        if debate_id is None:
             return None
-        return {"debate_id": debate_id, "advancing_team_ids": advancing_team_ids}
+        return await _advancing_outcome(session, debate_id)
 
     if bet_market.bet_type == BetType.ROUND_FULL_CALL:
         debate_id = payload.get("debate_id")

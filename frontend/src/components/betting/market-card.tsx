@@ -33,6 +33,7 @@ export const BET_TYPE_LABELS: Record<string, string> = {
   top_speaker_position: "Posición en el top 3 de oradores",
   team_break: "Equipo que hace break",
   round_head_to_head: "Enfrentamiento directo en sala",
+  round_advancing_pair: "Par exacto que avanza (eliminatorias)",
   // Retirados de la creación de mercados, pero un mercado viejo todavía podría existir.
   top_n_break: "Top 3 equipos que rompen (en orden)",
   top_n_speakers: "Top 3 speakers (en orden)",
@@ -59,6 +60,7 @@ function entityKeyForPayload(
   switch (betType) {
     case "round_winner":
     case "round_full_call":
+    case "round_advancing_pair":
       return payload.debate_id != null ? `debate:${payload.debate_id}` : null;
     case "top_speaker_position":
       return payload.position != null ? `position:${payload.position}` : null;
@@ -894,6 +896,119 @@ function HeadToHeadRoomPick({
   );
 }
 
+/** Eliminatorias, "par exacto que avanza": elegí la sala y los 2 EQUIPOS EXACTOS (no importa el
+ * orden) que pasan a la siguiente ronda -- distinto de RoundWinnerPick (un equipo, gana/avanza
+ * solo) y de RoundFullCallPick (los 4 equipos EN ORDEN). El backend ya valida que esta sala
+ * tenga exactamente 2 cupos de avance (no aplica a la final, donde avanza 1). */
+function AdvancingPairPick({
+  tournamentId,
+  market,
+  myPredictions,
+  onPayloadChange,
+}: PickerProps) {
+  const [debateId, setDebateId] = useState<string | null>(null);
+  const [teamIds, setTeamIds] = useState<number[]>([]);
+  const { round, debates } = useRoundDebates(tournamentId, market);
+  const selectedDebate = debates.find((d) => String(d.id) === debateId);
+  const existingForDebate = debateId
+    ? findByEntityKey(myPredictions, "round_advancing_pair", `debate:${debateId}`)
+    : undefined;
+
+  if (!market.target_round_id) {
+    return <p className="text-xs text-muted-foreground">Este mercado no tiene ronda asignada.</p>;
+  }
+
+  function toggleTeam(teamId: number) {
+    setTeamIds((prev) => {
+      // Elegir un 3er equipo reemplaza al primero elegido -- una pareja siempre tiene 2, nunca
+      // más, así que no hace falta destildar a mano antes de cambiar de opinión.
+      const next = prev.includes(teamId)
+        ? prev.filter((id) => id !== teamId)
+        : prev.length < 2
+          ? [...prev, teamId]
+          : [prev[1], teamId];
+      onPayloadChange(
+        debateId && next.length === 2 ? { debate_id: Number(debateId), team_ids: next } : null
+      );
+      return next;
+    });
+  }
+
+  return (
+    <div className="flex flex-col gap-3">
+      <p className="text-xs text-muted-foreground">
+        Elegí el debate de{" "}
+        <span className="font-medium text-foreground">{round?.name ?? "esta ronda"}</span> y los
+        2 equipos EXACTOS que avanzan de esa sala (el orden entre ellos no importa).
+      </p>
+      <OptionPicker
+        options={debates.map((d) => {
+          const existing = findByEntityKey(
+            myPredictions,
+            "round_advancing_pair",
+            `debate:${d.id}`
+          );
+          return {
+            value: String(d.id),
+            label: d.room?.name ? `Sala ${d.room.name}` : `Debate #${d.id}`,
+            hint:
+              d.teams.map((t) => t.team.name).join(" · ") +
+              (existing ? ` · ya apostaste ${formatTokens(existing.stake_amount)}` : ""),
+          };
+        })}
+        value={debateId}
+        onChange={(v) => {
+          setDebateId(v);
+          setTeamIds([]);
+          onPayloadChange(null);
+        }}
+        placeholder="Buscar sala…"
+        maxHeight="max-h-40"
+      />
+
+      {existingForDebate && (
+        <p className="text-xs text-muted-foreground">
+          Ya tenés {formatTokens(existingForDebate.stake_amount)} apostados en esta sala — elegir
+          de nuevo reemplaza esa apuesta.
+        </p>
+      )}
+
+      {selectedDebate && (
+        <div className="flex flex-wrap items-stretch gap-2">
+          <span className="self-center text-xs text-muted-foreground">
+            Avanzan ({teamIds.length}/2):
+          </span>
+          {selectedDebate.teams.map((dt) => {
+            const picked = teamIds.includes(dt.team.id);
+            return (
+              <button
+                key={dt.team.id}
+                type="button"
+                onClick={() => toggleTeam(dt.team.id)}
+                className={cn(
+                  "flex flex-col items-start rounded-lg border px-3 py-1.5 text-sm transition-colors",
+                  picked
+                    ? "border-primary/50 bg-primary/10 text-primary"
+                    : "border-border bg-card hover:border-primary/50 hover:bg-primary/10"
+                )}
+              >
+                <span>
+                  {dt.team.emoji} {dt.team.name}
+                </span>
+                {dt.team.speakers.length > 0 && (
+                  <span className="text-xs text-muted-foreground">
+                    {dt.team.speakers.map((s) => s.name).join(" · ")}
+                  </span>
+                )}
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function SpeakerPositionPick({ speakers, myPredictions, onPayloadChange }: PickerProps) {
   const [speakerId, setSpeakerId] = useState<string | null>(null);
   const [position, setPosition] = useState<number | null>(null);
@@ -1330,6 +1445,9 @@ export function MarketCard({
       break;
     case "round_head_to_head":
       picker = <HeadToHeadRoomPick {...pickerProps} />;
+      break;
+    case "round_advancing_pair":
+      picker = <AdvancingPairPick {...pickerProps} />;
       break;
   }
 

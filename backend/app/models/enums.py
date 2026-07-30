@@ -74,6 +74,13 @@ class BetType(str, enum.Enum):
     # specific drawn room). Round-scoped like ROUND_WINNER/ROUND_FULL_CALL.
     ROUND_HEAD_TO_HEAD = "round_head_to_head"
 
+    # Elimination-only: bet on the EXACT pair of teams that advances out of a 4-team out-round
+    # debate (2 of 4 go through). Only makes sense where "advance" is a real concept -- see
+    # `_ELIMINATION_ONLY_BET_TYPES` in betting_service, which is why this is the mirror image of
+    # ROUND_FULL_CALL/ROUND_HEAD_TO_HEAD (those are blocked ON elimination rounds; this one is
+    # blocked everywhere ELSE).
+    ROUND_ADVANCING_PAIR = "round_advancing_pair"
+
     # Retired from the admin "create market" UI in favor of the five types above, but kept as
     # valid enum members -- and their pricing/settlement code kept working -- so any market of
     # these types created before the redesign (and its predictions) keeps resolving correctly.
