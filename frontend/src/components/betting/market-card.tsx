@@ -24,6 +24,7 @@ import type {
   Round,
   Speaker,
   Team,
+  TeamStanding,
 } from "@/lib/api/types";
 
 export const BET_TYPE_LABELS: Record<string, string> = {
@@ -117,6 +118,9 @@ function MarketBoardTable({ marketId }: { marketId: number }) {
             <thead>
               <tr className="border-b border-border/60 bg-muted/40 text-left text-[0.7rem] uppercase tracking-wider text-muted-foreground">
                 <th className="px-2.5 py-1.5 font-medium">Opción</th>
+                <th className="hidden px-2.5 py-1.5 text-right font-medium sm:table-cell">
+                  Prob. implícita
+                </th>
                 <th className="px-2.5 py-1.5 text-right font-medium">Apostado</th>
                 <th className="px-2.5 py-1.5 text-right font-medium">Cuota</th>
                 <th className="hidden px-2.5 py-1.5 text-right font-medium sm:table-cell">
@@ -125,11 +129,22 @@ function MarketBoardTable({ marketId }: { marketId: number }) {
               </tr>
             </thead>
             <tbody>
-              {board.options.slice(0, 10).map((option) => (
-                <tr key={option.key} className="border-b border-border/40 last:border-b-0">
-                  <td className="max-w-0 truncate px-2.5 py-1.5" style={{ width: "50%" }}>
+              {board.options.slice(0, 10).map((option, i) => (
+                <tr
+                  key={option.key}
+                  className={cn(
+                    "border-b border-border/40 last:border-b-0",
+                    // La opción más cara del board (favorita) resalta un poco -- de un vistazo
+                    // se ve a quién le está creyendo la plata, sin tener que leer cada fila.
+                    i === 0 && "bg-primary/[0.03]"
+                  )}
+                >
+                  <td className="max-w-0 truncate px-2.5 py-1.5" style={{ width: "40%" }}>
                     {option.emoji && <span className="mr-1">{option.emoji}</span>}
                     {option.label}
+                  </td>
+                  <td className="hidden px-2.5 py-1.5 text-right font-mono text-xs text-muted-foreground sm:table-cell">
+                    {Math.round((1 / option.odds) * 100)}%
                   </td>
                   <td className="px-2.5 py-1.5 text-right font-mono text-xs">
                     {formatTokens(option.stake)}
@@ -163,6 +178,9 @@ interface PickerProps {
   teams: Team[];
   speakers: Speaker[];
   institutions: Institution[];
+  /** Standings al momento, por team id -- para dar contexto (posición/puntos) al elegir un
+   * equipo, en vez de que el usuario tenga que adivinar quién es fuerte por el nombre solo. */
+  standingsByTeamId: Map<number, TeamStanding>;
   /** The single existing prediction's payload, for single-entity bet types where a user can
    * only ever hold one (champion, best_institution, head_to_head, ...). */
   existingPayload: Record<string, unknown> | undefined;
@@ -173,21 +191,45 @@ interface PickerProps {
   onPayloadChange: (payload: Record<string, unknown> | null) => void;
 }
 
-const teamOptions = (teams: Team[]) =>
-  teams.map((t) => ({
-    value: String(t.id),
-    label: t.name,
-    emoji: t.emoji,
-    hint: t.speakers.map((s) => s.name).join(" · ") || undefined,
-  }));
+/** "#3 · 18 pts", o undefined si el equipo todavía no tiene standing (antes de la ronda 1). */
+function standingLabel(standingsByTeamId: Map<number, TeamStanding>, teamId: number) {
+  const s = standingsByTeamId.get(teamId);
+  return s ? `#${s.rank} · ${s.team_points} pts` : undefined;
+}
 
-function TeamPick({ teams, existingPayload, onPayloadChange }: PickerProps) {
+/** Badge compacto de standing, reusado en cada botón de equipo de los pickers por sala --
+ * contexto rápido (posición, puntos) para decidir sin tener que abrir standings aparte. */
+function TeamStandingBadge({
+  standingsByTeamId,
+  teamId,
+}: {
+  standingsByTeamId: Map<number, TeamStanding>;
+  teamId: number;
+}) {
+  const label = standingLabel(standingsByTeamId, teamId);
+  if (!label) return null;
+  return <span className="font-mono text-[0.65rem] text-muted-foreground">{label}</span>;
+}
+
+const teamOptions = (teams: Team[], standingsByTeamId: Map<number, TeamStanding>) =>
+  teams.map((t) => {
+    const roster = t.speakers.map((s) => s.name).join(" · ");
+    const standing = standingLabel(standingsByTeamId, t.id);
+    return {
+      value: String(t.id),
+      label: t.name,
+      emoji: t.emoji,
+      hint: [standing, roster].filter(Boolean).join(" · ") || undefined,
+    };
+  });
+
+function TeamPick({ teams, standingsByTeamId, existingPayload, onPayloadChange }: PickerProps) {
   const [teamId, setTeamId] = useState<string | null>(
     existingPayload?.team_id ? String(existingPayload.team_id) : null
   );
   return (
     <OptionPicker
-      options={teamOptions(teams)}
+      options={teamOptions(teams, standingsByTeamId)}
       value={teamId}
       onChange={(v) => {
         setTeamId(v);
@@ -299,13 +341,13 @@ function OrderedPick({
   );
 }
 
-function TopTeamsPick({ teams, existingPayload, onPayloadChange }: PickerProps) {
+function TopTeamsPick({ teams, standingsByTeamId, existingPayload, onPayloadChange }: PickerProps) {
   const existing = Array.isArray(existingPayload?.team_ids)
     ? (existingPayload.team_ids as number[]).map(String)
     : [];
   return (
     <OrderedPick
-      options={teamOptions(teams)}
+      options={teamOptions(teams, standingsByTeamId)}
       existingIds={existing}
       itemLabel="equipo"
       onChange={(ids) => onPayloadChange(ids ? { team_ids: ids.map(Number) } : null)}
@@ -327,7 +369,7 @@ function TopSpeakersPick({ speakers, existingPayload, onPayloadChange }: PickerP
   );
 }
 
-function HeadToHeadPick({ teams, existingPayload, onPayloadChange }: PickerProps) {
+function HeadToHeadPick({ teams, standingsByTeamId, existingPayload, onPayloadChange }: PickerProps) {
   const [teamA, setTeamA] = useState<string | null>(
     existingPayload?.team_a_id ? String(existingPayload.team_a_id) : null
   );
@@ -355,7 +397,7 @@ function HeadToHeadPick({ teams, existingPayload, onPayloadChange }: PickerProps
         <div className="flex flex-col gap-1.5">
           <span className="text-xs font-medium text-muted-foreground">Equipo A</span>
           <OptionPicker
-            options={teamOptions(teams)}
+            options={teamOptions(teams, standingsByTeamId)}
             value={teamA}
             onChange={(v) => {
               setTeamA(v);
@@ -369,7 +411,7 @@ function HeadToHeadPick({ teams, existingPayload, onPayloadChange }: PickerProps
         <div className="flex flex-col gap-1.5">
           <span className="text-xs font-medium text-muted-foreground">Equipo B</span>
           <OptionPicker
-            options={teamOptions(teams).filter((o) => o.value !== teamA)}
+            options={teamOptions(teams, standingsByTeamId).filter((o) => o.value !== teamA)}
             value={teamB}
             onChange={(v) => {
               setTeamB(v);
@@ -458,6 +500,7 @@ function findByEntityKey(
 function RoundWinnerPick({
   tournamentId,
   market,
+  standingsByTeamId,
   myPredictions,
   onPayloadChange,
 }: PickerProps) {
@@ -571,6 +614,7 @@ function RoundWinnerPick({
               <span>
                 {dt.team.emoji} {dt.team.name}
               </span>
+              <TeamStandingBadge standingsByTeamId={standingsByTeamId} teamId={dt.team.id} />
               {dt.team.speakers.length > 0 && (
                 <span className="text-xs text-muted-foreground">
                   {dt.team.speakers.map((s) => s.name).join(" · ")}
@@ -635,6 +679,7 @@ function RoundWinnerPick({
 function RoundFullCallPick({
   tournamentId,
   market,
+  standingsByTeamId,
   myPredictions,
   onPayloadChange,
 }: PickerProps) {
@@ -689,7 +734,13 @@ function RoundFullCallPick({
             value: String(dt.team.id),
             label: dt.team.name,
             emoji: dt.team.emoji,
-            hint: dt.team.speakers.map((s) => s.name).join(" · ") || undefined,
+            hint:
+              [
+                standingLabel(standingsByTeamId, dt.team.id),
+                dt.team.speakers.map((s) => s.name).join(" · ") || undefined,
+              ]
+                .filter(Boolean)
+                .join(" · ") || undefined,
           }))}
           existingIds={[]}
           itemLabel="equipo"
@@ -708,6 +759,7 @@ const RANK_GAP_OPTIONS = [1, 2, 3];
 function HeadToHeadRoomPick({
   tournamentId,
   market,
+  standingsByTeamId,
   myPredictions,
   onPayloadChange,
 }: PickerProps) {
@@ -750,7 +802,13 @@ function HeadToHeadRoomPick({
         value: String(dt.team.id),
         label: dt.team.name,
         emoji: dt.team.emoji,
-        hint: dt.team.speakers.map((s) => s.name).join(" · ") || undefined,
+        hint:
+          [
+            standingLabel(standingsByTeamId, dt.team.id),
+            dt.team.speakers.map((s) => s.name).join(" · ") || undefined,
+          ]
+            .filter(Boolean)
+            .join(" · ") || undefined,
       }));
 
   const nameOf = (id: string | null) =>
@@ -903,6 +961,7 @@ function HeadToHeadRoomPick({
 function AdvancingPairPick({
   tournamentId,
   market,
+  standingsByTeamId,
   myPredictions,
   onPayloadChange,
 }: PickerProps) {
@@ -995,6 +1054,7 @@ function AdvancingPairPick({
                 <span>
                   {dt.team.emoji} {dt.team.name}
                 </span>
+                <TeamStandingBadge standingsByTeamId={standingsByTeamId} teamId={dt.team.id} />
                 {dt.team.speakers.length > 0 && (
                   <span className="text-xs text-muted-foreground">
                     {dt.team.speakers.map((s) => s.name).join(" · ")}
@@ -1363,6 +1423,18 @@ export function MarketCard({
     staleTime: 10_000,
   });
 
+  // Mismo queryKey/queryFn que la tabla de standings de la página del torneo -- React Query
+  // dedupea el fetch entre ahí y cada MarketCard abierta, así que esto no agrega requests.
+  const { data: standings = [] } = useQuery({
+    queryKey: queryKeys.standings(tournamentId),
+    queryFn: () => api.standings.list(tournamentId),
+    staleTime: 15_000,
+  });
+  const standingsByTeamId = useMemo(
+    () => new Map(standings.map((s) => [s.team.id, s])),
+    [standings]
+  );
+
   const mutation = useMutation({
     mutationFn: (stakeAmount: number) => {
       if (!payload) throw new Error("no payload");
@@ -1406,11 +1478,21 @@ export function MarketCard({
       teams,
       speakers,
       institutions,
+      standingsByTeamId,
       existingPayload: singleExistingPayload,
       myPredictions,
       onPayloadChange: setPayload,
     }),
-    [tournamentId, market, teams, speakers, institutions, singleExistingPayload, myPredictions]
+    [
+      tournamentId,
+      market,
+      teams,
+      speakers,
+      institutions,
+      standingsByTeamId,
+      singleExistingPayload,
+      myPredictions,
+    ]
   );
 
   let picker: React.ReactNode = null;
