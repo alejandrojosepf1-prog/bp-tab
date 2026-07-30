@@ -208,6 +208,42 @@ while still open)
   `{team_a_id, team_b_id, predicted_winner_id}`, `breakout_team` `{team_id}`, `best_institution`
   `{institution_code}`
 
+## Prizes
+
+Admin-run token giveaways independent of betting outcomes -- see `app.services.prize_service`
+for the mechanics behind each `type`. Lifecycle is one-way: `open` -> `resolved`, never back.
+
+- `GET /tournaments/{id}/prize-events` -> `PrizeEvent[]` (public)
+- `POST /tournaments/{id}/prize-events` **(admin)**
+  `{type: manual_award|raffle|activity_bonus, title, description?, config?, closes_at?}` ->
+  `PrizeEvent`. `config` shape by type: `raffle` `{num_winners, prize_per_winner, ticket_cost?}`
+  (`ticket_cost` omitted/0 = free entry); `activity_bonus` `{bonus_amount}`; `manual_award` `{}`
+  (each entry carries its own amount instead of a shared config).
+- `GET /prize-events/{id}` -> `PrizeEvent & {entries: PrizeEntry[]}` (public)
+- `POST /prize-events/{id}/manual-awards` **(admin)** `{user_id, amount}` -> `PrizeEntry`.
+  `manual_award` events only (400 otherwise). Queues an award without crediting anything yet --
+  re-calling for the same user REPLACES the queued amount rather than stacking. Nothing is
+  credited until `/resolve`.
+- `POST /prize-events/{id}/enter` `{tickets}` -> `PrizeEntry`. `raffle` events only (400
+  otherwise), requires auth. Re-entering tops up to the new ticket total and only charges the
+  DIFFERENCE against balance (400 `InsufficientBalanceError` if it can't cover that). Free if
+  the event's `ticket_cost` is unset.
+- `POST /prize-events/{id}/resolve` **(admin)** -> `PrizeEvent & {entries: PrizeEntry[]}`. 400 if
+  already resolved. Per type:
+  - `manual_award`: credits every queued entry's amount.
+  - `raffle`: draws `num_winners` winners weighted by ticket count (no replacement at the user
+    level -- one user can win at most once even with many tickets), using a seed persisted on
+    `rng_seed` so the draw is independently reproducible. Every entry gets `awarded_amount` set
+    (the prize for winners, `0` for everyone else), so "did I win" never needs a separate query.
+  - `activity_bonus`: computes qualifying users itself at resolve time (nobody "enters" this
+    type) -- anyone who placed a prediction on this tournament between the event's `created_at`
+    and `closes_at` gets a `PrizeEntry` created with the flat `bonus_amount`.
+
+`PrizeEvent` shape: `{id, tournament_id, type, title, description, status, config, closes_at,
+resolved_at, rng_seed, entry_count, total_tickets}` (`entry_count`/`total_tickets` computed by
+the router, like `BetMarket.pool_total`). `PrizeEntry` shape: `{id, user, tickets,
+awarded_amount}` (`awarded_amount` is `null` until resolved).
+
 ## Leaderboard
 
 - `GET /tournaments/{id}/leaderboard` -> `LeaderboardEntry[]` `{user: {id, display_name}, total_points, rank, computed_at}`

@@ -119,3 +119,18 @@ class ScrapeStrategy(str, enum.Enum):
 class ChangeType(str, enum.Enum):
     CREATED = "created"
     UPDATED = "updated"
+
+
+class PrizeEventType(str, enum.Enum):
+    # Admin queues named awards with their own amount each; resolving credits them all at once.
+    MANUAL_AWARD = "manual_award"
+    # Users buy in with tickets; resolving draws winners weighted by ticket count.
+    RAFFLE = "raffle"
+    # No entries until resolve -- resolving itself computes who qualified (placed at least one
+    # bet on the tournament in the event's window) and credits every qualifying user a flat bonus.
+    ACTIVITY_BONUS = "activity_bonus"
+
+
+class PrizeEventStatus(str, enum.Enum):
+    OPEN = "open"
+    RESOLVED = "resolved"

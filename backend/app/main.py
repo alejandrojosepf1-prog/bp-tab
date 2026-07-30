@@ -16,6 +16,7 @@ from app.api.routers import (
     dashboard,
     leaderboard,
     participants,
+    prizes,
     rounds,
     standings,
     tournaments,
@@ -87,6 +88,7 @@ app.include_router(breaks.router, prefix=API_PREFIX)
 app.include_router(betting.router, prefix=API_PREFIX)
 app.include_router(leaderboard.router, prefix=API_PREFIX)
 app.include_router(dashboard.router, prefix=API_PREFIX)
+app.include_router(prizes.router, prefix=API_PREFIX)
 app.include_router(admin.router, prefix=API_PREFIX)
 
 

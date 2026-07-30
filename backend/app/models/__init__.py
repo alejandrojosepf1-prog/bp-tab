@@ -17,6 +17,7 @@ from app.models.participants import (
     Team,
     TeamBreakCategory,
 )
+from app.models.prizes import PrizeEntry, PrizeEvent
 from app.models.rounds import (
     Debate,
     DebateAdjudicator,
@@ -54,6 +55,8 @@ __all__ = [
     "BetMarket",
     "Prediction",
     "LeaderboardEntry",
+    "PrizeEvent",
+    "PrizeEntry",
     "ScrapeLog",
     "ChangeEvent",
 ]

@@ -18,6 +18,9 @@ import type {
   OddsQuote,
   PendingEliminationDebate,
   Prediction,
+  PrizeEvent,
+  PrizeEventDetail,
+  PrizeEventType,
   Round,
   ScrapeLog,
   Speaker,
@@ -238,6 +241,28 @@ export const api = {
       }),
     quoteOdds: (marketId: number | string, payload: object) =>
       post<OddsQuote>(`/bet-markets/${marketId}/quote`, { payload }),
+  },
+
+  prizeEvents: {
+    list: (tournamentId: number | string) =>
+      get<PrizeEvent[]>(`/tournaments/${tournamentId}/prize-events`),
+    get: (eventId: number | string) => get<PrizeEventDetail>(`/prize-events/${eventId}`),
+    create: (
+      tournamentId: number | string,
+      data: {
+        type: PrizeEventType;
+        title: string;
+        description?: string;
+        config?: object;
+        closes_at?: string;
+      }
+    ) => post<PrizeEvent>(`/tournaments/${tournamentId}/prize-events`, data),
+    queueManualAward: (eventId: number | string, data: { user_id: number; amount: number }) =>
+      post<PrizeEvent>(`/prize-events/${eventId}/manual-awards`, data),
+    enter: (eventId: number | string, tickets: number) =>
+      post<PrizeEvent>(`/prize-events/${eventId}/enter`, { tickets }),
+    resolve: (eventId: number | string) =>
+      post<PrizeEventDetail>(`/prize-events/${eventId}/resolve`),
   },
 
   leaderboard: {

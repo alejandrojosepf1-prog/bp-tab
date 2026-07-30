@@ -6,6 +6,7 @@ import { RequireAdmin } from "@/components/auth/require-admin";
 
 const TITLES: Record<string, string> = {
   "/admin/markets": "Mercados de apuestas",
+  "/admin/prizes": "Premios",
   "/admin/tournaments": "Torneos",
   "/admin/results": "Resultados manuales",
   "/admin/users": "Usuarios",

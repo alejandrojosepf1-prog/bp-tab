@@ -31,6 +31,9 @@ export const queryKeys = {
   marketBoard: (marketId: Id) => ["bet-markets", marketId, "board"] as const,
   myPrediction: (marketId: Id) => ["bet-markets", marketId, "predictions", "me"] as const,
 
+  prizeEvents: (tournamentId: Id) => ["tournaments", tournamentId, "prize-events"] as const,
+  prizeEvent: (eventId: Id) => ["prize-events", eventId] as const,
+
   leaderboard: (tournamentId: Id) => ["tournaments", tournamentId, "leaderboard"] as const,
   globalLeaderboard: ["leaderboard", "global"] as const,
   dashboard: (tournamentId: Id) => ["tournaments", tournamentId, "dashboard"] as const,

@@ -19,6 +19,39 @@ export interface User {
   created_at: string;
 }
 
+// ---------- Premios ----------
+
+export type PrizeEventType = "manual_award" | "raffle" | "activity_bonus";
+export type PrizeEventStatus = "open" | "resolved";
+
+export interface PrizeEntry {
+  id: number;
+  user: User;
+  tickets: number;
+  awarded_amount: number | null;
+}
+
+export interface PrizeEvent {
+  id: number;
+  tournament_id: number;
+  type: PrizeEventType;
+  title: string;
+  description: string | null;
+  status: PrizeEventStatus;
+  /** raffle: {num_winners, prize_per_winner, ticket_cost?} · activity_bonus: {bonus_amount} ·
+   * manual_award: {} (cada entry trae su propio monto). */
+  config: Record<string, number | undefined>;
+  closes_at: string | null;
+  resolved_at: string | null;
+  rng_seed: string | null;
+  entry_count: number;
+  total_tickets: number;
+}
+
+export interface PrizeEventDetail extends PrizeEvent {
+  entries: PrizeEntry[];
+}
+
 export interface LoginResponse {
   access_token: string;
   token_type: "bearer";

@@ -18,6 +18,7 @@ import {
   X,
   Gem,
   Landmark,
+  Gift,
 } from "lucide-react";
 import { useAuth } from "@/lib/auth/auth-context";
 import { cn } from "@/lib/utils";
@@ -26,6 +27,7 @@ import { formatTokens } from "@/lib/format";
 const MAIN_ITEMS = [
   { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
   { href: "/bets", label: "Apuestas", icon: Ticket },
+  { href: "/prizes", label: "Premios", icon: Gift },
   { href: "/ranking", label: "Ranking", icon: Trophy },
   { href: "/account", label: "Cuenta", icon: UserRound },
   { href: "/settings", label: "Configuración", icon: Settings },
@@ -33,6 +35,7 @@ const MAIN_ITEMS = [
 
 const ADMIN_ITEMS = [
   { href: "/admin/markets", label: "Mercados", icon: Ticket },
+  { href: "/admin/prizes", label: "Premios", icon: Gift },
   { href: "/admin/tournaments", label: "Torneos", icon: Trophy },
   { href: "/admin/results", label: "Resultados", icon: ClipboardCheck },
   { href: "/admin/users", label: "Usuarios", icon: Users },
