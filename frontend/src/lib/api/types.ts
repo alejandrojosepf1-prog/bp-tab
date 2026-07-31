@@ -232,14 +232,17 @@ export type BetType =
   | "top_speaker_position"
   | "team_break"
   | "round_head_to_head"
-  | "round_advancing_pair"
   // Retired from the admin "create market" UI (see backend app.models.enums.BetType) but kept
   // here since a market created before the redesign could still be open/settled.
   | "top_n_break"
   | "top_n_speakers"
   | "head_to_head"
   | "breakout_team"
-  | "best_institution";
+  | "best_institution"
+  // "Exact pair that advances" folded into round_winner itself (a `team_ids` payload on an
+  // elimination debate, alongside the single-team `team_id` shape) -- never created as its own
+  // bet_type, kept only for type-safety against the Postgres enum value that still exists.
+  | "round_advancing_pair";
 
 export type BetMarketStatus = "open" | "closed" | "settled";
 

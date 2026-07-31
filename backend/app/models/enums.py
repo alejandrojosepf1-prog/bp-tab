@@ -74,13 +74,6 @@ class BetType(str, enum.Enum):
     # specific drawn room). Round-scoped like ROUND_WINNER/ROUND_FULL_CALL.
     ROUND_HEAD_TO_HEAD = "round_head_to_head"
 
-    # Elimination-only: bet on the EXACT pair of teams that advances out of a 4-team out-round
-    # debate (2 of 4 go through). Only makes sense where "advance" is a real concept -- see
-    # `_ELIMINATION_ONLY_BET_TYPES` in betting_service, which is why this is the mirror image of
-    # ROUND_FULL_CALL/ROUND_HEAD_TO_HEAD (those are blocked ON elimination rounds; this one is
-    # blocked everywhere ELSE).
-    ROUND_ADVANCING_PAIR = "round_advancing_pair"
-
     # Retired from the admin "create market" UI in favor of the five types above, but kept as
     # valid enum members -- and their pricing/settlement code kept working -- so any market of
     # these types created before the redesign (and its predictions) keeps resolving correctly.
@@ -90,6 +83,13 @@ class BetType(str, enum.Enum):
     HEAD_TO_HEAD = "head_to_head"
     BREAKOUT_TEAM = "breakout_team"
     BEST_INSTITUTION = "best_institution"
+    # Bet on the EXACT pair of teams that advances out of a 4-team out-round debate. Retired in
+    # favor of folding this into ROUND_WINNER itself (a `team_ids` payload on an elimination
+    # debate now prices/settles the same proposition -- see betting_service._entity_key,
+    # odds_service.quote_odds, and domain.bet_outcomes._round_winner). Kept here only because
+    # this is a native Postgres enum type and no market of this type was ever created, so there
+    # is no data to migrate -- same "kept but unreferenced" treatment as the block above.
+    ROUND_ADVANCING_PAIR = "round_advancing_pair"
 
 
 class BetMarketStatus(str, enum.Enum):

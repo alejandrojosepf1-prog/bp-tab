@@ -34,13 +34,14 @@ export const BET_TYPE_LABELS: Record<string, string> = {
   top_speaker_position: "Posición en el top 3 de oradores",
   team_break: "Equipo que hace break",
   round_head_to_head: "Enfrentamiento directo en sala",
-  round_advancing_pair: "Par exacto que avanza (eliminatorias)",
   // Retirados de la creación de mercados, pero un mercado viejo todavía podría existir.
   top_n_break: "Top 3 equipos que rompen (en orden)",
   top_n_speakers: "Top 3 speakers (en orden)",
   head_to_head: "Cara a cara entre equipos",
   breakout_team: "Equipo revelación",
   best_institution: "Mejor institución",
+  // "Par exacto que avanza" ahora es una modalidad DENTRO de round_winner, no un bet_type propio.
+  round_advancing_pair: "Par exacto que avanza (eliminatorias)",
 };
 
 const MARKET_STATUS_LABEL: Record<string, string> = {
@@ -59,9 +60,21 @@ function entityKeyForPayload(
 ): string | null {
   if (!payload) return null;
   switch (betType) {
-    case "round_winner":
+    case "round_winner": {
+      // Two payload shapes share this bet_type: a single-team pick (`team_id`) and, on an
+      // elimination round, an exact-pair pick (`team_ids`). A pair gets one key for the whole
+      // room; a single-team pick is keyed per TEAM so a user can hold up to 2 independent picks
+      // in the same room (backend caps it at 2) instead of one replacing the other.
+      const teamIds = payload.team_ids as number[] | undefined;
+      if (Array.isArray(teamIds) && teamIds.length === 2) {
+        const [x, y] = [...teamIds].sort((m, n) => m - n);
+        return payload.debate_id != null ? `debate:${payload.debate_id}:pair:${x}:${y}` : null;
+      }
+      return payload.debate_id != null && payload.team_id != null
+        ? `debate:${payload.debate_id}:team:${payload.team_id}`
+        : null;
+    }
     case "round_full_call":
-    case "round_advancing_pair":
       return payload.debate_id != null ? `debate:${payload.debate_id}` : null;
     case "top_speaker_position":
       return payload.position != null ? `position:${payload.position}` : null;
@@ -505,14 +518,38 @@ function RoundWinnerPick({
   onPayloadChange,
 }: PickerProps) {
   const [debateId, setDebateId] = useState<string | null>(null);
+  const [mode, setMode] = useState<"single" | "pair">("single");
   const [teamId, setTeamId] = useState<number | null>(null);
+  const [pairTeamIds, setPairTeamIds] = useState<number[]>([]);
   const [subBetOpen, setSubBetOpen] = useState(false);
   const [speakerPoints, setSpeakerPoints] = useState<Record<number, string>>({});
   const { round, debates, isElimination } = useRoundDebates(tournamentId, market);
   const selectedDebate = debates.find((d) => String(d.id) === debateId);
   const selectedTeam = selectedDebate?.teams.find((dt) => dt.team.id === teamId)?.team;
-  const existingForDebate = debateId
-    ? findByEntityKey(myPredictions, "round_winner", `debate:${debateId}`)
+  // Same heuristic the backend's _advancing_count uses: a round with only 1 debate is the
+  // Grand Final (1 team advances) -- "exact pair" isn't a coherent bet there.
+  const canPickPair = isElimination && debates.length > 1;
+
+  const singlePicksForDebate = debateId
+    ? myPredictions.filter(
+        (p) =>
+          p.status === "open" &&
+          p.payload.debate_id === Number(debateId) &&
+          p.payload.team_id != null
+      )
+    : [];
+  const existingForTeam =
+    debateId && teamId != null
+      ? singlePicksForDebate.find((p) => p.payload.team_id === teamId)
+      : undefined;
+  const pairKey =
+    debateId && pairTeamIds.length === 2
+      ? entityKeyForPayload("round_winner", { debate_id: Number(debateId), team_ids: pairTeamIds })
+      : null;
+  const existingForPair = pairKey
+    ? myPredictions.find(
+        (p) => p.status === "open" && entityKeyForPayload("round_winner", p.payload) === pairKey
+      )
     : undefined;
 
   if (!market.target_round_id) {
@@ -543,11 +580,28 @@ function RoundWinnerPick({
     onPayloadChange(payload);
   }
 
+  function togglePairTeam(nextTeamId: number) {
+    setPairTeamIds((prev) => {
+      // Elegir un 3er equipo reemplaza al primero elegido -- una pareja siempre tiene 2, nunca
+      // más, así que no hace falta destildar a mano antes de cambiar de opinión.
+      const next = prev.includes(nextTeamId)
+        ? prev.filter((id) => id !== nextTeamId)
+        : prev.length < 2
+          ? [...prev, nextTeamId]
+          : [prev[1], nextTeamId];
+      onPayloadChange(
+        debateId && next.length === 2 ? { debate_id: Number(debateId), team_ids: next } : null
+      );
+      return next;
+    });
+  }
+
   return (
     <div className="flex flex-col gap-3">
       <p className="text-xs text-muted-foreground">
         Elegí el debate de <span className="font-medium text-foreground">{round?.name ?? "esta ronda"}</span> —
-        podés apostar en varias salas de esta ronda, una apuesta por sala.
+        podés apostar en varias salas de esta ronda
+        {mode === "single" ? ", hasta 2 equipos por separado en la misma sala" : ""}.
       </p>
       {isElimination && (
         // En eliminatorias el tab nunca publica el 1º-4º, sólo quién avanza -- y avanzan 2 de 4
@@ -561,19 +615,30 @@ function RoundWinnerPick({
       )}
       <OptionPicker
         options={debates.map((d) => {
-          const existing = findByEntityKey(myPredictions, "round_winner", `debate:${d.id}`);
+          const dSingles = myPredictions.filter(
+            (p) => p.status === "open" && p.payload.debate_id === d.id && p.payload.team_id != null
+          );
+          const dPair = myPredictions.find(
+            (p) =>
+              p.status === "open" &&
+              p.payload.debate_id === d.id &&
+              Array.isArray(p.payload.team_ids)
+          );
+          const totalStake =
+            dSingles.reduce((sum, p) => sum + p.stake_amount, 0) + (dPair?.stake_amount ?? 0);
           return {
             value: String(d.id),
             label: d.room?.name ? `Sala ${d.room.name}` : `Debate #${d.id}`,
             hint:
               d.teams.map((t) => t.team.name).join(" · ") +
-              (existing ? ` · ya apostaste ${formatTokens(existing.stake_amount)}` : ""),
+              (totalStake > 0 ? ` · ya apostaste ${formatTokens(totalStake)}` : ""),
           };
         })}
         value={debateId}
         onChange={(v) => {
           setDebateId(v);
           setTeamId(null);
+          setPairTeamIds([]);
           setSubBetOpen(false);
           setSpeakerPoints({});
           onPayloadChange(null);
@@ -582,50 +647,137 @@ function RoundWinnerPick({
         maxHeight="max-h-40"
       />
 
-      {existingForDebate && (
+      {canPickPair && selectedDebate && (
+        <div className="flex gap-1.5">
+          <Button
+            type="button"
+            size="sm"
+            variant={mode === "single" ? "default" : "outline"}
+            onClick={() => {
+              setMode("single");
+              setPairTeamIds([]);
+              onPayloadChange(null);
+            }}
+          >
+            Un equipo
+          </Button>
+          <Button
+            type="button"
+            size="sm"
+            variant={mode === "pair" ? "default" : "outline"}
+            onClick={() => {
+              setMode("pair");
+              setTeamId(null);
+              setSubBetOpen(false);
+              setSpeakerPoints({});
+              onPayloadChange(null);
+            }}
+          >
+            Par exacto
+          </Button>
+        </div>
+      )}
+
+      {mode === "single" && singlePicksForDebate.length > 0 && (
         <p className="text-xs text-muted-foreground">
-          Ya tenés {formatTokens(existingForDebate.stake_amount)} apostados en esta sala — elegir
+          Ya tenés {singlePicksForDebate.length}/2 apuestas individuales en esta sala.
+        </p>
+      )}
+      {mode === "single" && existingForTeam && (
+        <p className="text-xs text-muted-foreground">
+          Ya tenés {formatTokens(existingForTeam.stake_amount)} apostados a este equipo — elegir
           de nuevo reemplaza esa apuesta.
         </p>
       )}
+      {mode === "pair" && existingForPair && (
+        <p className="text-xs text-muted-foreground">
+          Ya tenés {formatTokens(existingForPair.stake_amount)} apostados a este par — elegir de
+          nuevo reemplaza esa apuesta.
+        </p>
+      )}
 
-      {selectedDebate && (
+      {mode === "pair" && selectedDebate && (
+        <div className="flex flex-wrap items-stretch gap-2">
+          <span className="self-center text-xs text-muted-foreground">
+            Avanzan ({pairTeamIds.length}/2):
+          </span>
+          {selectedDebate.teams.map((dt) => {
+            const picked = pairTeamIds.includes(dt.team.id);
+            return (
+              <button
+                key={dt.team.id}
+                type="button"
+                onClick={() => togglePairTeam(dt.team.id)}
+                className={cn(
+                  "flex flex-col items-start rounded-lg border px-3 py-1.5 text-sm transition-colors",
+                  picked
+                    ? "border-primary/50 bg-primary/10 text-primary"
+                    : "border-border bg-card hover:border-primary/50 hover:bg-primary/10"
+                )}
+              >
+                <span>
+                  {dt.team.emoji} {dt.team.name}
+                </span>
+                <TeamStandingBadge standingsByTeamId={standingsByTeamId} teamId={dt.team.id} />
+                {dt.team.speakers.length > 0 && (
+                  <span className="text-xs text-muted-foreground">
+                    {dt.team.speakers.map((s) => s.name).join(" · ")}
+                  </span>
+                )}
+              </button>
+            );
+          })}
+        </div>
+      )}
+
+      {mode === "single" && selectedDebate && (
         <div className="flex flex-wrap items-stretch gap-2">
           <span className="self-center text-xs text-muted-foreground">
             {isElimination ? "Avanza:" : "Ganador:"}
           </span>
-          {selectedDebate.teams.map((dt) => (
-            <button
-              key={dt.team.id}
-              type="button"
-              onClick={() => {
-                setTeamId(dt.team.id);
-                setSubBetOpen(false);
-                setSpeakerPoints({});
-                onPayloadChange({ debate_id: Number(debateId), team_id: dt.team.id });
-              }}
-              className={cn(
-                "flex flex-col items-start rounded-lg border px-3 py-1.5 text-sm transition-colors",
-                teamId === dt.team.id
-                  ? "border-primary/50 bg-primary/10 text-primary"
-                  : "border-border bg-card hover:border-primary/50 hover:bg-primary/10"
-              )}
-            >
-              <span>
-                {dt.team.emoji} {dt.team.name}
-              </span>
-              <TeamStandingBadge standingsByTeamId={standingsByTeamId} teamId={dt.team.id} />
-              {dt.team.speakers.length > 0 && (
-                <span className="text-xs text-muted-foreground">
-                  {dt.team.speakers.map((s) => s.name).join(" · ")}
+          {selectedDebate.teams.map((dt) => {
+            const alreadyPicked = singlePicksForDebate.some(
+              (p) => p.payload.team_id === dt.team.id
+            );
+            const capReached =
+              !alreadyPicked && teamId !== dt.team.id && singlePicksForDebate.length >= 2;
+            return (
+              <button
+                key={dt.team.id}
+                type="button"
+                disabled={capReached}
+                title={capReached ? "Ya tenés 2 apuestas individuales en esta sala" : undefined}
+                onClick={() => {
+                  setTeamId(dt.team.id);
+                  setSubBetOpen(false);
+                  setSpeakerPoints({});
+                  onPayloadChange({ debate_id: Number(debateId), team_id: dt.team.id });
+                }}
+                className={cn(
+                  "flex flex-col items-start rounded-lg border px-3 py-1.5 text-sm transition-colors",
+                  teamId === dt.team.id
+                    ? "border-primary/50 bg-primary/10 text-primary"
+                    : capReached
+                      ? "cursor-not-allowed border-border bg-card opacity-40"
+                      : "border-border bg-card hover:border-primary/50 hover:bg-primary/10"
+                )}
+              >
+                <span>
+                  {dt.team.emoji} {dt.team.name}
                 </span>
-              )}
-            </button>
-          ))}
+                <TeamStandingBadge standingsByTeamId={standingsByTeamId} teamId={dt.team.id} />
+                {dt.team.speakers.length > 0 && (
+                  <span className="text-xs text-muted-foreground">
+                    {dt.team.speakers.map((s) => s.name).join(" · ")}
+                  </span>
+                )}
+              </button>
+            );
+          })}
         </div>
       )}
 
-      {selectedTeam && selectedTeam.speakers.length === 2 && (
+      {!isElimination && selectedTeam && selectedTeam.speakers.length === 2 && (
         <div className="flex flex-col gap-2 rounded-lg border border-dashed border-border px-3 py-2">
           <button
             type="button"
@@ -948,121 +1100,6 @@ function HeadToHeadRoomPick({
               </div>
             </>
           )}
-        </div>
-      )}
-    </div>
-  );
-}
-
-/** Eliminatorias, "par exacto que avanza": elegí la sala y los 2 EQUIPOS EXACTOS (no importa el
- * orden) que pasan a la siguiente ronda -- distinto de RoundWinnerPick (un equipo, gana/avanza
- * solo) y de RoundFullCallPick (los 4 equipos EN ORDEN). El backend ya valida que esta sala
- * tenga exactamente 2 cupos de avance (no aplica a la final, donde avanza 1). */
-function AdvancingPairPick({
-  tournamentId,
-  market,
-  standingsByTeamId,
-  myPredictions,
-  onPayloadChange,
-}: PickerProps) {
-  const [debateId, setDebateId] = useState<string | null>(null);
-  const [teamIds, setTeamIds] = useState<number[]>([]);
-  const { round, debates } = useRoundDebates(tournamentId, market);
-  const selectedDebate = debates.find((d) => String(d.id) === debateId);
-  const existingForDebate = debateId
-    ? findByEntityKey(myPredictions, "round_advancing_pair", `debate:${debateId}`)
-    : undefined;
-
-  if (!market.target_round_id) {
-    return <p className="text-xs text-muted-foreground">Este mercado no tiene ronda asignada.</p>;
-  }
-
-  function toggleTeam(teamId: number) {
-    setTeamIds((prev) => {
-      // Elegir un 3er equipo reemplaza al primero elegido -- una pareja siempre tiene 2, nunca
-      // más, así que no hace falta destildar a mano antes de cambiar de opinión.
-      const next = prev.includes(teamId)
-        ? prev.filter((id) => id !== teamId)
-        : prev.length < 2
-          ? [...prev, teamId]
-          : [prev[1], teamId];
-      onPayloadChange(
-        debateId && next.length === 2 ? { debate_id: Number(debateId), team_ids: next } : null
-      );
-      return next;
-    });
-  }
-
-  return (
-    <div className="flex flex-col gap-3">
-      <p className="text-xs text-muted-foreground">
-        Elegí el debate de{" "}
-        <span className="font-medium text-foreground">{round?.name ?? "esta ronda"}</span> y los
-        2 equipos EXACTOS que avanzan de esa sala (el orden entre ellos no importa).
-      </p>
-      <OptionPicker
-        options={debates.map((d) => {
-          const existing = findByEntityKey(
-            myPredictions,
-            "round_advancing_pair",
-            `debate:${d.id}`
-          );
-          return {
-            value: String(d.id),
-            label: d.room?.name ? `Sala ${d.room.name}` : `Debate #${d.id}`,
-            hint:
-              d.teams.map((t) => t.team.name).join(" · ") +
-              (existing ? ` · ya apostaste ${formatTokens(existing.stake_amount)}` : ""),
-          };
-        })}
-        value={debateId}
-        onChange={(v) => {
-          setDebateId(v);
-          setTeamIds([]);
-          onPayloadChange(null);
-        }}
-        placeholder="Buscar sala…"
-        maxHeight="max-h-40"
-      />
-
-      {existingForDebate && (
-        <p className="text-xs text-muted-foreground">
-          Ya tenés {formatTokens(existingForDebate.stake_amount)} apostados en esta sala — elegir
-          de nuevo reemplaza esa apuesta.
-        </p>
-      )}
-
-      {selectedDebate && (
-        <div className="flex flex-wrap items-stretch gap-2">
-          <span className="self-center text-xs text-muted-foreground">
-            Avanzan ({teamIds.length}/2):
-          </span>
-          {selectedDebate.teams.map((dt) => {
-            const picked = teamIds.includes(dt.team.id);
-            return (
-              <button
-                key={dt.team.id}
-                type="button"
-                onClick={() => toggleTeam(dt.team.id)}
-                className={cn(
-                  "flex flex-col items-start rounded-lg border px-3 py-1.5 text-sm transition-colors",
-                  picked
-                    ? "border-primary/50 bg-primary/10 text-primary"
-                    : "border-border bg-card hover:border-primary/50 hover:bg-primary/10"
-                )}
-              >
-                <span>
-                  {dt.team.emoji} {dt.team.name}
-                </span>
-                <TeamStandingBadge standingsByTeamId={standingsByTeamId} teamId={dt.team.id} />
-                {dt.team.speakers.length > 0 && (
-                  <span className="text-xs text-muted-foreground">
-                    {dt.team.speakers.map((s) => s.name).join(" · ")}
-                  </span>
-                )}
-              </button>
-            );
-          })}
         </div>
       )}
     </div>
@@ -1529,7 +1566,9 @@ export function MarketCard({
       picker = <HeadToHeadRoomPick {...pickerProps} />;
       break;
     case "round_advancing_pair":
-      picker = <AdvancingPairPick {...pickerProps} />;
+      // Folded into round_winner's own "team_ids" pair-mode payload -- never routed here for
+      // a market created after the redesign, kept only so the switch stays exhaustive over
+      // BetType.
       break;
   }
 

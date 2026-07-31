@@ -96,10 +96,12 @@ otherwise be invisible everywhere in the app.
 
 **Bet types offered by the admin panel (`CREATABLE_BET_TYPES` in `app.services.betting_service`):**
 `champion | round_winner | round_full_call | top_speaker_position | team_break |
-round_head_to_head | round_advancing_pair`. The older
-`top_n_break | top_n_speakers | head_to_head | breakout_team | best_institution` remain valid
-`BetType` enum members (a market/prediction of one of these created before this list existed
-still prices and settles exactly as before) but are no longer offered for NEW markets.
+round_head_to_head`. The older
+`top_n_break | top_n_speakers | head_to_head | breakout_team | best_institution |
+round_advancing_pair` remain valid `BetType` enum members (a market/prediction of one of these
+created before this list existed still prices and settles exactly as before) but are no longer
+offered for NEW markets. `round_advancing_pair`'s proposition ("the exact pair that advances")
+was folded into `round_winner` itself -- see below -- rather than staying a separate bet_type.
 
 - `champion`: `{team_id}`. **Only creatable while `Tournament.status == "upcoming"`** (400
   otherwise) -- `validate_market_creation` enforces this at creation, and
@@ -116,6 +118,24 @@ still prices and settles exactly as before) but are no longer offered for NEW ma
   before -- made backing all four teams in a room a risk-free double-up. Elimination rounds also
   blend against a much thinner `ELIMINATION_SEED`, so the crowd's money overrides the model far
   faster than in a preliminary round (fewer rooms, more concentrated action).
+  A single-team pick is capped at **2 independent picks per debate** per user (each team gets
+  its own `entity_key`, `debate:{id}:team:{team_id}` -- a 3rd distinct team in the same debate
+  gets a 400 `TooManyPicksError`; re-picking one of the 2 already held is still just an edit).
+  This lets a bettor hedge two teams in the same room independently -- if one doesn't advance
+  the other still pays.
+  On an ELIMINATION round with exactly 2 advancing slots (i.e. not the single-room grand final),
+  `round_winner` ALSO accepts an exact-pair payload: `{debate_id, team_ids: [2 team ids, order
+  doesn't matter]}`, betting that BOTH named teams advance together -- harder than either
+  single-team pick, so it pays more. Priced via `app.domain.odds.pair_top_two_probability` (sum
+  of both Plackett-Luce orderings of the pair occupying the top 2), blended against its own
+  compartment of the debate's pool with `ELIMINATION_SEED`. A pair payload gets one `entity_key`
+  for the whole room (`debate:{id}:pair:{a}:{b}`), not the 2-per-debate cap above. Settles
+  against the same `advancing_team_ids` outcome the single-team elimination case uses -- exact
+  set match, 2 of 2. Quoting a pair on a debate with only 1 advancing slot, or on a preliminary
+  round, 400s.
+  The optional speaker-points sub-bet (below) is **rejected on an elimination-round debate**
+  (400) -- CalicoTab never publishes per-speaker scores for an out-round, so the sub-bet could
+  never resolve there.
 - `round_full_call`: `{debate_id, team_ids: [4 team ids, predicted 1st->4th order]}` -- the
   FULL finishing order of one debate (BP debates always have exactly 4 teams), not just the
   winner. Same `target_round_id` requirement/validation as `round_winner`. Priced via
@@ -135,17 +155,6 @@ still prices and settles exactly as before) but are no longer offered for NEW ma
   once a round is judged, else a naive `break_size/num_teams` base rate) with **no pari-mutuel
   pool blending**: pool-blending assumes competing candidates' priors sum to 1 across a shared
   compartment, which holds for "exactly one winner" markets but would be wrong here.
-- `round_advancing_pair`: `{debate_id, team_ids: [2 team ids, the pair that advances TOGETHER,
-  order doesn't matter]}`. **Elimination rounds only** -- requires `target_round_stage ==
-  ELIMINATION` at creation (400 otherwise), the mirror image of `round_full_call`/
-  `round_head_to_head`'s "not on elimination" restriction, since "which pair advances" is
-  meaningless in a preliminary room where all 4 teams stay in the tournament regardless of
-  placement. Quoting a debate with only 1 advancing slot (the single-room grand final) also 400s
-  -- there's no "pair" there. Priced via `app.domain.odds.pair_top_two_probability` (sum of both
-  Plackett-Luce orderings of the pair occupying the top 2), blended against the debate's own pool
-  with `ELIMINATION_SEED` like `round_winner` on an out-round. Settles against the same
-  `advancing_team_ids` outcome `round_winner`'s elimination fallback uses -- exact set match, 2
-  of 2.
 
 **Unit convention:** every dollar amount below (`User.balance`, `Prediction.stake_amount`,
 `potential_payout`, `points_awarded`, `LeaderboardEntry.total_points`, `BetMarket.pool_total`)
@@ -168,7 +177,7 @@ stat) -- they're just not retroactive for bets already placed.
 - `GET /tournaments/{id}/bet-markets` -> `BetMarket[]`
   `{id, bet_type, label, description, opens_at, closes_at, status, target_round_id, target_break_category_id, pool_total, bettors_count}`
   (`bet_type`: see the creatable set above; a legacy market can also carry
-  `top_n_break|top_n_speakers|head_to_head|breakout_team|best_institution`)
+  `top_n_break|top_n_speakers|head_to_head|breakout_team|best_institution|round_advancing_pair`)
   (`status`: `open|closed|settled`)
 - `POST /tournaments/{id}/bet-markets` **(admin)** `{bet_type, label, description?, opens_at, closes_at, points_rule?, target_round_id?, target_break_category_id?}` -> `BetMarket`
   (validated by `validate_market_creation` per bet_type -- see the creatable set above for what
@@ -199,14 +208,16 @@ while still open)
 ### Payload shape per bet_type (both request body when creating and what's stored)
 
 - `champion`: `{team_id}`
-- `round_winner`: `{debate_id, team_id}`
+- `round_winner`: `{debate_id, team_id}` (single-team pick), or on an elimination round with 2
+  advancing slots, `{debate_id, team_ids: [2 team ids]}` (exact-pair pick -- see above)
 - `round_full_call`: `{debate_id, team_ids: number[]}` (exactly the debate's 4 teams, 1st->4th)
 - `top_speaker_position`: `{speaker_id, position}` (`position`: `1|2|3`)
 - `team_break`: `{team_id}`
 - Legacy (still valid on an existing market/prediction, not creatable anymore): `top_n_break`
   `{team_ids: number[]}`, `top_n_speakers` `{speaker_ids: number[]}`, `head_to_head`
   `{team_a_id, team_b_id, predicted_winner_id}`, `breakout_team` `{team_id}`, `best_institution`
-  `{institution_code}`
+  `{institution_code}`, `round_advancing_pair` `{debate_id, team_ids: number[]}` (same shape a
+  `round_winner` exact-pair pick now uses)
 
 ## Prizes
 

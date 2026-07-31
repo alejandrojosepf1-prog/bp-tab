@@ -43,9 +43,19 @@ def _top_n_speakers(payload: dict, outcome: dict) -> bool:
 
 
 def _round_winner(payload: dict, outcome: dict) -> bool:
-    if payload.get("debate_id") is None or payload.get("team_id") is None:
+    if payload.get("debate_id") is None:
         return False
     if outcome.get("debate_id") != payload["debate_id"]:
+        return False
+    # Exact-pair pick ("both these teams advance together") -- folded in from what used to be
+    # the standalone ROUND_ADVANCING_PAIR bet_type. Same `advancing_team_ids` outcome a
+    # single-team elimination pick checks below, just set-equality instead of membership.
+    team_ids = payload.get("team_ids")
+    if team_ids is not None:
+        if len(team_ids) != 2:
+            return False
+        return set(team_ids) == set(outcome.get("advancing_team_ids") or [])
+    if payload.get("team_id") is None:
         return False
     if "winning_team_id" in outcome:
         return payload["team_id"] == outcome["winning_team_id"]
@@ -101,15 +111,6 @@ def _team_break(payload: dict, outcome: dict) -> bool:
     return team_id in (outcome.get("breaking_team_ids") or [])
 
 
-def _round_advancing_pair(payload: dict, outcome: dict) -> bool:
-    team_ids = payload.get("team_ids")
-    if payload.get("debate_id") is None or not team_ids or len(team_ids) != 2:
-        return False
-    if outcome.get("debate_id") != payload["debate_id"]:
-        return False
-    return set(team_ids) == set(outcome.get("advancing_team_ids") or [])
-
-
 def _round_head_to_head(payload: dict, outcome: dict) -> bool:
     if payload.get("debate_id") is None or payload.get("predicted_higher_id") is None:
         return False
@@ -131,7 +132,6 @@ _STRATEGIES: dict[BetType, Callable[[dict, dict], bool]] = {
     BetType.TOP_SPEAKER_POSITION: _top_speaker_position,
     BetType.TEAM_BREAK: _team_break,
     BetType.ROUND_HEAD_TO_HEAD: _round_head_to_head,
-    BetType.ROUND_ADVANCING_PAIR: _round_advancing_pair,
 }
 
 

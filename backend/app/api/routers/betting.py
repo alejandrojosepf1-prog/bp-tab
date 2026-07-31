@@ -24,6 +24,7 @@ from app.models.enums import BetMarketStatus
 from app.services.betting_service import (
     InsufficientBalanceError,
     MarketCreationError,
+    TooManyPicksError,
     place_prediction,
     set_bet_market_status,
     settle_market,
@@ -306,6 +307,9 @@ async def create_prediction(
             detail=f"invalid pick for this market: {exc}",
         ) from exc
     except InsufficientBalanceError as exc:
+        await session.rollback()
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except TooManyPicksError as exc:
         await session.rollback()
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 

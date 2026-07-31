@@ -328,8 +328,8 @@ def _debate_sequence_pool_from_stakes(
 def _debate_pair_pool_from_stakes(
     open_stakes: list[tuple[dict, float]], debate_id: int, team_ids: tuple[int, int]
 ) -> tuple[float, float]:
-    """Like `_debate_sequence_pool_from_stakes`, but for ROUND_ADVANCING_PAIR: which 2 of the
-    4 teams advance TOGETHER, unordered -- {a, b} and {b, a} are the same pick, unlike
+    """Like `_debate_sequence_pool_from_stakes`, but for ROUND_WINNER's exact-pair pick: which 2
+    of the 4 teams advance TOGETHER, unordered -- {a, b} and {b, a} are the same pick, unlike
     ROUND_FULL_CALL's exact-order sequences. Payloads are compared as sets for that reason."""
     target = frozenset(team_ids)
     candidate_stake = 0.0
@@ -595,6 +595,45 @@ async def quote_odds(
     if bet_type == BetType.ROUND_WINNER:
         debate_id = payload["debate_id"]
         await _require_debate_in_round(session, debate_id, bet_market.target_round_id)
+
+        # Exact-pair pick ("both these teams advance together") -- only coherent on an
+        # elimination debate with exactly 2 advancing slots (rejects preliminary rounds, where
+        # nobody "advances", and the Grand Final's single room, where only 1 team advances).
+        # Folded in from what used to be the standalone ROUND_ADVANCING_PAIR bet_type -- see
+        # domain.bet_outcomes._round_winner and betting_service._entity_key for the other two
+        # places this same team_id/team_ids payload-shape split matters.
+        team_ids = payload.get("team_ids")
+        if team_ids is not None:
+            advancing_count = await _advancing_count(session, debate_id)
+            if advancing_count != 2:
+                raise UnpriceableMarketError(
+                    "esta sala no tiene exactamente 2 cupos de avance para un mercado de pareja"
+                )
+            if len(team_ids) != 2 or team_ids[0] == team_ids[1]:
+                raise ValueError("team_ids must name exactly 2 distinct teams")
+            power = await compute_team_power_ratings(session, bet_market.tournament_id)
+            debate_team_ids = (
+                (
+                    await session.execute(
+                        select(DebateTeam.team_id).where(DebateTeam.debate_id == debate_id)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            debate_power = {t: power[t] for t in debate_team_ids if t in power}
+            if len(debate_power) < len(debate_team_ids) or len(debate_power) < 2:
+                raise UnpriceableMarketError("not enough priced teams in this debate yet")
+            a, b = team_ids
+            if a not in debate_power or b not in debate_power:
+                raise KeyError((a, b))
+            temperature = adaptive_temperature(power.values())
+            prior = pair_top_two_probability(debate_power, a, b, temperature=temperature)
+            candidate_stake, debate_stake = await _debate_pair_pool(
+                session, bet_market.id, debate_id, (a, b), exclude_user_id=exclude_user_id
+            )
+            return pari_mutuel_odds(candidate_stake, debate_stake, prior, seed=ELIMINATION_SEED)
+
         power = await compute_team_power_ratings(session, bet_market.tournament_id)
         debate_team_ids = (
             (
@@ -678,42 +717,6 @@ async def quote_odds(
             debate_id=debate_id,
         )
         return pari_mutuel_odds(candidate_stake, pair_stake, prior)
-
-    if bet_type == BetType.ROUND_ADVANCING_PAIR:
-        debate_id = payload["debate_id"]
-        await _require_debate_in_round(session, debate_id, bet_market.target_round_id)
-        advancing_count = await _advancing_count(session, debate_id)
-        if advancing_count != 2:
-            # Not an elimination debate, or a single-room final where only 1 team advances --
-            # "which pair advances" isn't a coherent question either way.
-            raise UnpriceableMarketError(
-                "esta sala no tiene exactamente 2 cupos de avance para un mercado de pareja"
-            )
-        team_ids = payload["team_ids"]
-        if len(team_ids) != 2 or team_ids[0] == team_ids[1]:
-            raise ValueError("team_ids must name exactly 2 distinct teams")
-        power = await compute_team_power_ratings(session, bet_market.tournament_id)
-        debate_team_ids = (
-            (
-                await session.execute(
-                    select(DebateTeam.team_id).where(DebateTeam.debate_id == debate_id)
-                )
-            )
-            .scalars()
-            .all()
-        )
-        debate_power = {t: power[t] for t in debate_team_ids if t in power}
-        if len(debate_power) < len(debate_team_ids) or len(debate_power) < 2:
-            raise UnpriceableMarketError("not enough priced teams in this debate yet")
-        a, b = team_ids
-        if a not in debate_power or b not in debate_power:
-            raise KeyError((a, b))
-        temperature = adaptive_temperature(power.values())
-        prior = pair_top_two_probability(debate_power, a, b, temperature=temperature)
-        candidate_stake, debate_stake = await _debate_pair_pool(
-            session, bet_market.id, debate_id, (a, b), exclude_user_id=exclude_user_id
-        )
-        return pari_mutuel_odds(candidate_stake, debate_stake, prior, seed=ELIMINATION_SEED)
 
     if bet_type == BetType.TOP_SPEAKER_POSITION:
         power = await compute_speaker_power_ratings(session, bet_market.tournament_id)
@@ -879,6 +882,17 @@ async def quote_sub_bet_odds(
         return rank_odds
 
     if bet_type == BetType.ROUND_WINNER:
+        # CalicoTab/Tabbycat never publishes per-speaker scores for an elimination out-round
+        # (only advanced/not-advanced) -- so a speaker-points sub-bet placed there could never
+        # resolve. `_advancing_count` already answers "is this debate's round elimination?"
+        # (None for preliminary, a number for elimination) for the base pick's own pricing, so
+        # reuse it here instead of a second round-stage lookup.
+        debate_id = payload.get("debate_id")
+        if debate_id is not None and (await _advancing_count(session, debate_id)) is not None:
+            raise ValueError(
+                "no se apuesta a puntos de oradores en rondas eliminatorias -- el tab no "
+                "puntúa oradores ahí"
+            )
         # Deferred family (see betting_service.settle_pending_sub_bets) -- no pool blending and
         # no per-payload probability model at all, just like DEFAULT_EXACT_POINTS_SUB_BET_ODDS
         # above; the shape is still validated here so a malformed sub_bet fails fast at quote
@@ -961,6 +975,10 @@ def format_payload_label(
         b, _ = team(payload.get("team_b_id"))
         return f"{winner} gana ({a} vs. {b})", emoji
     if bet_type == BetType.ROUND_WINNER:
+        team_ids = payload.get("team_ids")
+        if team_ids:
+            names = " y ".join(team(tid)[0] for tid in team_ids)
+            return f"Avanzan {names}" if names else "—", None
         name, emoji = team(payload.get("team_id"))
         sub_bet = payload.get("sub_bet") or {}
         entries = sub_bet.get("speaker_scores") or []
@@ -992,9 +1010,6 @@ def format_payload_label(
         sub_bet = payload.get("sub_bet") or {}
         gap_suffix = f" por {sub_bet['rank_gap']} puesto(s)" if "rank_gap" in sub_bet else ""
         return f"{higher} arriba{gap_suffix} ({a} vs. {b})", emoji
-    if bet_type == BetType.ROUND_ADVANCING_PAIR:
-        names = " y ".join(team(tid)[0] for tid in payload.get("team_ids", []))
-        return f"Avanzan {names}" if names else "—", None
     return "|".join(f"{k}={payload[k]}" for k in sorted(payload)) or "—", None
 
 
@@ -1033,7 +1048,6 @@ async def _generic_fallback_options(
         BetType.ROUND_WINNER,
         BetType.ROUND_FULL_CALL,
         BetType.ROUND_HEAD_TO_HEAD,
-        BetType.ROUND_ADVANCING_PAIR,
         BetType.TOP_N_BREAK,
     ):
         power = await compute_team_power_ratings(
@@ -1064,7 +1078,6 @@ async def _generic_fallback_options(
             BetType.ROUND_WINNER,
             BetType.ROUND_FULL_CALL,
             BetType.ROUND_HEAD_TO_HEAD,
-            BetType.ROUND_ADVANCING_PAIR,
         )
         and payload.get("debate_id") is not None
     }
@@ -1132,9 +1145,33 @@ async def _generic_fallback_options(
                     and round_by_debate.get(debate_id) != bet_market.target_round_id
                 ):
                     continue
-                debate_power = {
-                    t: power[t] for t in teams_by_debate.get(debate_id, []) if t in power
-                }
+                debate_team_ids = teams_by_debate.get(debate_id, [])
+                debate_power = {t: power[t] for t in debate_team_ids if t in power}
+
+                # Exact-pair pick -- folded in from the old ROUND_ADVANCING_PAIR bet_type, see
+                # the matching branch in quote_odds for the full explanation.
+                pair_team_ids = payload.get("team_ids")
+                if pair_team_ids is not None:
+                    if advancing_by_round.get(round_by_debate.get(debate_id)) != 2:
+                        continue
+                    if len(pair_team_ids) != 2:
+                        continue
+                    a, b = pair_team_ids
+                    if (
+                        len(debate_power) < len(debate_team_ids)
+                        or a not in debate_power
+                        or b not in debate_power
+                    ):
+                        continue
+                    prior = pair_top_two_probability(debate_power, a, b, temperature=temperature)
+                    candidate_stake, compartment_stake = _debate_pair_pool_from_stakes(
+                        open_stakes, debate_id, (a, b)
+                    )
+                    odds_by_key[key] = pari_mutuel_odds(
+                        candidate_stake, compartment_stake, prior, seed=ELIMINATION_SEED
+                    )
+                    continue
+
                 if len(debate_power) < 2:
                     continue
                 team_id = payload["team_id"]
@@ -1195,36 +1232,6 @@ async def _generic_fallback_options(
                     predicted_field="predicted_higher_id",
                     debate_id=debate_id,
                 )
-
-            elif bet_type == BetType.ROUND_ADVANCING_PAIR:
-                debate_id = payload["debate_id"]
-                if (
-                    bet_market.target_round_id is not None
-                    and round_by_debate.get(debate_id) != bet_market.target_round_id
-                ):
-                    continue
-                if advancing_by_round.get(round_by_debate.get(debate_id)) != 2:
-                    continue
-                team_ids = payload.get("team_ids")
-                if not team_ids or len(team_ids) != 2:
-                    continue
-                a, b = team_ids
-                debate_team_ids = teams_by_debate.get(debate_id, [])
-                debate_power = {t: power[t] for t in debate_team_ids if t in power}
-                if (
-                    len(debate_power) < len(debate_team_ids)
-                    or a not in debate_power
-                    or b not in debate_power
-                ):
-                    continue
-                prior = pair_top_two_probability(debate_power, a, b, temperature=temperature)
-                candidate_stake, compartment_stake = _debate_pair_pool_from_stakes(
-                    open_stakes, debate_id, (a, b)
-                )
-                odds_by_key[key] = pari_mutuel_odds(
-                    candidate_stake, compartment_stake, prior, seed=ELIMINATION_SEED
-                )
-                continue
 
             elif bet_type == BetType.TOP_SPEAKER_POSITION:
                 speaker_id = payload["speaker_id"]

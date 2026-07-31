@@ -676,10 +676,16 @@ async def test_place_prediction_allows_one_bet_per_debate_in_a_round_market(db_s
         .all()
     )
     assert len(predictions) == 2  # one sala bet per debate -- NOT collapsed into one
-    assert {p.entity_key for p in predictions} == {f"debate:{debate_a.id}", f"debate:{debate_b.id}"}
+    assert {p.entity_key for p in predictions} == {
+        f"debate:{debate_a.id}:team:{teams[0].id}",
+        f"debate:{debate_b.id}:team:{teams[2].id}",
+    }
 
 
-async def test_place_prediction_same_debate_replaces_not_duplicates(db_session) -> None:
+async def test_place_prediction_same_team_same_debate_replaces_not_duplicates(db_session) -> None:
+    """Re-submitting the SAME team in the same debate is an edit (one entity_key), unlike
+    picking a DIFFERENT team in that debate, which is a second independent pick -- see
+    `test_round_winner_allows_up_to_two_independent_single_team_picks_per_room`."""
     from app.services.betting_service import place_prediction
 
     tournament = await _make_tournament(db_session)
@@ -695,10 +701,10 @@ async def test_place_prediction_same_debate_replaces_not_duplicates(db_session) 
         db_session, market, alice, {"debate_id": debate_a.id, "team_id": teams[0].id}, 10.0
     )
     await db_session.commit()
-    # Same debate, different pick and stake -- must REPLACE, not create a second row, and must
+    # Same debate, SAME team, different stake -- must REPLACE, not create a second row, and must
     # refund the first stake before charging the new one (no double-charge).
     await place_prediction(
-        db_session, market, alice, {"debate_id": debate_a.id, "team_id": teams[1].id}, 25.0
+        db_session, market, alice, {"debate_id": debate_a.id, "team_id": teams[0].id}, 25.0
     )
     await db_session.commit()
 
@@ -714,7 +720,7 @@ async def test_place_prediction_same_debate_replaces_not_duplicates(db_session) 
         .all()
     )
     assert len(predictions) == 1
-    assert predictions[0].payload == {"debate_id": debate_a.id, "team_id": teams[1].id}
+    assert predictions[0].payload == {"debate_id": debate_a.id, "team_id": teams[0].id}
     assert predictions[0].stake_amount == 25.0
     await db_session.refresh(alice)
     assert alice.balance == balance_before - 25.0
@@ -1601,34 +1607,15 @@ async def test_grand_final_round_winner_still_prices_as_a_single_winner(db_sessi
     assert implied == pytest.approx(1.0, rel=0.05)
 
 
-# --- ROUND_ADVANCING_PAIR: elimination-only "exact pair advances" market -----------------
+# --- ROUND_WINNER's exact-pair pick: elimination-only "team_ids" payload shape -----------
+# Folded in from what used to be the standalone ROUND_ADVANCING_PAIR bet_type -- same market,
+# same round, a ROUND_WINNER payload just optionally names 2 teams instead of 1. There is no
+# creation-time "must be an elimination round" check anymore (unlike the old bet_type): a
+# ROUND_WINNER market can be created for any round, and a `team_ids` payload is only accepted
+# at quote/bet time, gated by `_advancing_count(debate_id) == 2` (see the rejection test below).
 
 
-def test_validate_market_creation_round_advancing_pair_requires_elimination_round() -> None:
-    """Mirror image of the elimination-UNsettleable block above: this type ONLY makes sense on
-    an elimination round (all 4 preliminary teams stay in the tournament regardless of rank)."""
-    tournament = Tournament(
-        name="T", slug="t", source_base_url="https://x", source_slug="o",
-        status=TournamentStatus.ELIMINATIONS,
-    )
-    with pytest.raises(MarketCreationError):
-        validate_market_creation(
-            tournament,
-            BetType.ROUND_ADVANCING_PAIR,
-            target_round_id=1,
-            target_break_category_id=None,
-            target_round_stage=RoundStage.PRELIMINARY,
-        )
-    validate_market_creation(
-        tournament,
-        BetType.ROUND_ADVANCING_PAIR,
-        target_round_id=1,
-        target_break_category_id=None,
-        target_round_stage=RoundStage.ELIMINATION,
-    )  # does not raise
-
-
-async def test_round_advancing_pair_prices_all_six_pairs_close_to_one(db_session) -> None:
+async def test_round_winner_pair_pick_prices_all_six_pairs_close_to_one(db_session) -> None:
     """No pool blending peculiarities: with zero stakes on a fresh market, the 6 possible pairs'
     quoted odds should still imply a total probability close to 1.0 -- exactly one pair is truly
     "the" advancing pair, so this is a proper one-winner-among-six market."""
@@ -1637,7 +1624,7 @@ async def test_round_advancing_pair_prices_all_six_pairs_close_to_one(db_session
     tournament = await _make_tournament(db_session, status=TournamentStatus.ELIMINATIONS)
     elim, debates, all_teams = await _make_elimination_round(db_session, tournament, num_debates=8)
     market = await _make_market(
-        db_session, tournament, BetType.ROUND_ADVANCING_PAIR, target_round_id=elim.id
+        db_session, tournament, BetType.ROUND_WINNER, target_round_id=elim.id
     )
     await db_session.commit()
 
@@ -1651,7 +1638,7 @@ async def test_round_advancing_pair_prices_all_six_pairs_close_to_one(db_session
     assert implied == pytest.approx(1.0, rel=0.05)
 
 
-async def test_round_advancing_pair_quote_rejects_a_single_advancing_room(db_session) -> None:
+async def test_round_winner_pair_pick_quote_rejects_a_single_advancing_room(db_session) -> None:
     """The grand final sends 1 team through, not 2 -- 'which pair advances' is meaningless
     there, so pricing it must fail loudly rather than silently return a bogus number."""
     from app.services.odds_service import UnpriceableMarketError, quote_odds
@@ -1662,7 +1649,7 @@ async def test_round_advancing_pair_quote_rejects_a_single_advancing_room(db_ses
     # grand final shape (1 advances), not a normal 8-of-32 octofinal room (2 advance).
     elim, debates, all_teams = await _make_elimination_round(db_session, tournament, num_debates=1)
     market = await _make_market(
-        db_session, tournament, BetType.ROUND_ADVANCING_PAIR, target_round_id=elim.id
+        db_session, tournament, BetType.ROUND_WINNER, target_round_id=elim.id
     )
     await db_session.commit()
     room, teams = debates[0], all_teams[0]
@@ -1672,7 +1659,7 @@ async def test_round_advancing_pair_quote_rejects_a_single_advancing_room(db_ses
         )
 
 
-async def test_round_advancing_pair_settles_the_exact_advancing_pair_and_only_that_pair(
+async def test_round_winner_pair_pick_settles_the_exact_advancing_pair_and_only_that_pair(
     db_session,
 ) -> None:
     """End-to-end: place a bet on the real advancing pair and on a wrong pair, settle the
@@ -1680,7 +1667,7 @@ async def test_round_advancing_pair_settles_the_exact_advancing_pair_and_only_th
     tournament = await _make_tournament(db_session, status=TournamentStatus.ELIMINATIONS)
     elim, debates, all_teams = await _make_elimination_round(db_session, tournament, num_debates=8)
     market = await _make_market(
-        db_session, tournament, BetType.ROUND_ADVANCING_PAIR, target_round_id=elim.id
+        db_session, tournament, BetType.ROUND_WINNER, target_round_id=elim.id
     )
     room, teams = debates[0], all_teams[0]
     advancing = teams[:2]
@@ -1695,13 +1682,13 @@ async def test_round_advancing_pair_settles_the_exact_advancing_pair_and_only_th
     alice = await _make_user(db_session, "alice-pair@example.com")
     bob = await _make_user(db_session, "bob-pair@example.com")
     correct = _prediction(
-        BetType.ROUND_ADVANCING_PAIR,
+        BetType.ROUND_WINNER,
         market_id=market.id, user_id=alice.id,
         payload={"debate_id": room.id, "team_ids": [advancing[0].id, advancing[1].id]},
         stake_amount=10.0, odds=3.0,
     )
     wrong = _prediction(
-        BetType.ROUND_ADVANCING_PAIR,
+        BetType.ROUND_WINNER,
         market_id=market.id, user_id=bob.id,
         payload={"debate_id": room.id, "team_ids": [teams[2].id, teams[3].id]},
         stake_amount=10.0, odds=3.0,
@@ -1721,3 +1708,116 @@ async def test_round_advancing_pair_settles_the_exact_advancing_pair_and_only_th
     assert correct.points_awarded == pytest.approx(30.0)
     assert wrong.status == PredictionStatus.SETTLED
     assert wrong.points_awarded == 0.0
+
+
+async def test_round_winner_allows_up_to_two_independent_single_team_picks_per_room(
+    db_session,
+) -> None:
+    """A user can back 2 different teams independently in the same room (each gets its own
+    entity_key -- see _entity_key), so if one doesn't advance the other still pays. A 3rd
+    distinct team in the same room is rejected; re-picking one of the 2 already held is still
+    just an edit, not a 3rd pick."""
+    from app.services.betting_service import TooManyPicksError, place_prediction
+
+    tournament = await _make_tournament(db_session, status=TournamentStatus.ELIMINATIONS)
+    elim, debates, all_teams = await _make_elimination_round(db_session, tournament, num_debates=8)
+    market = await _make_market(
+        db_session, tournament, BetType.ROUND_WINNER, target_round_id=elim.id,
+        status=BetMarketStatus.OPEN,
+    )
+    room, teams = debates[0], all_teams[0]
+    alice = await _make_user(db_session, "alice-cap@example.com")
+    await db_session.commit()
+
+    await place_prediction(
+        db_session, market, alice, {"debate_id": room.id, "team_id": teams[0].id}, 10.0
+    )
+    await place_prediction(
+        db_session, market, alice, {"debate_id": room.id, "team_id": teams[1].id}, 10.0
+    )
+    await db_session.commit()
+
+    with pytest.raises(TooManyPicksError):
+        await place_prediction(
+            db_session, market, alice, {"debate_id": room.id, "team_id": teams[2].id}, 10.0
+        )
+
+    # Re-picking (editing) one of the 2 already-held teams is not a 3rd pick.
+    await place_prediction(
+        db_session, market, alice, {"debate_id": room.id, "team_id": teams[0].id}, 15.0
+    )
+    await db_session.commit()
+
+    open_predictions = (
+        await db_session.execute(
+            select(Prediction).where(
+                Prediction.bet_market_id == market.id,
+                Prediction.status == PredictionStatus.OPEN,
+            )
+        )
+    ).scalars().all()
+    assert len(open_predictions) == 2
+    assert {p.stake_amount for p in open_predictions} == {15.0, 10.0}
+
+
+async def test_round_winner_speaker_points_sub_bet_rejected_on_elimination_round(
+    db_session,
+) -> None:
+    """Tabbycat never publishes per-speaker scores for an elimination out-round -- the
+    sub-bet can never resolve there, so placing one must fail up front instead of silently
+    accepting a bet that could never pay its bonus."""
+    from app.services.odds_service import quote_sub_bet_odds
+
+    tournament = await _make_tournament(db_session, status=TournamentStatus.ELIMINATIONS)
+    elim, debates, all_teams = await _make_elimination_round(db_session, tournament, num_debates=8)
+    market = await _make_market(
+        db_session, tournament, BetType.ROUND_WINNER, target_round_id=elim.id
+    )
+    room, teams = debates[0], all_teams[0]
+    await db_session.commit()
+
+    payload = {
+        "debate_id": room.id,
+        "team_id": teams[0].id,
+        "sub_bet": {
+            "speaker_scores": [
+                {"speaker_id": 1, "points": 76.0},
+                {"speaker_id": 2, "points": 75.0},
+            ]
+        },
+    }
+    with pytest.raises(ValueError):
+        await quote_sub_bet_odds(db_session, market, payload)
+
+
+async def test_round_winner_speaker_points_sub_bet_still_works_on_preliminary_round(
+    db_session,
+) -> None:
+    """Regression guard for the elimination-round gate above: a preliminary-round ROUND_WINNER
+    sub-bet must keep pricing exactly as before."""
+    from app.services.odds_service import DEFAULT_SPEAKER_POINTS_SUB_BET_ODDS, quote_sub_bet_odds
+
+    tournament = await _make_tournament(db_session)
+    round_ = Round(tournament_id=tournament.id, seq=1, name="Ronda 1", stage=RoundStage.PRELIMINARY)
+    db_session.add(round_)
+    await db_session.flush()
+    debate = Debate(tournament_id=tournament.id, round_id=round_.id, external_id=1)
+    db_session.add(debate)
+    await db_session.flush()
+    market = await _make_market(
+        db_session, tournament, BetType.ROUND_WINNER, target_round_id=round_.id
+    )
+    await db_session.commit()
+
+    payload = {
+        "debate_id": debate.id,
+        "team_id": 1,
+        "sub_bet": {
+            "speaker_scores": [
+                {"speaker_id": 1, "points": 76.0},
+                {"speaker_id": 2, "points": 75.0},
+            ]
+        },
+    }
+    odds = await quote_sub_bet_odds(db_session, market, payload)
+    assert odds == DEFAULT_SPEAKER_POINTS_SUB_BET_ODDS

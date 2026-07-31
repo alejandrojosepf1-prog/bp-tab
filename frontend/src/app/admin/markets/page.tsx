@@ -65,7 +65,7 @@ const BET_TYPES: BetTypeOption[] = [
   {
     value: "round_winner",
     label: "Ganador de debate (por ronda)",
-    hint: "Quién gana una sala concreta",
+    hint: "Quién gana una sala concreta — en eliminatorias, los apostadores también pueden elegir el par exacto que avanza",
     icon: Swords,
     needsRound: true,
   },
@@ -95,14 +95,6 @@ const BET_TYPES: BetTypeOption[] = [
     hint: "Qué equipo queda arriba del otro en la misma sala — con apuesta específica opcional al puesto exacto",
     icon: Crosshair,
     needsRound: true,
-  },
-  {
-    value: "round_advancing_pair",
-    label: "Par exacto que avanza",
-    hint: "Solo eliminatorias — los 2 equipos EXACTOS que pasan de una sala (no importa el orden entre ellos)",
-    icon: Crosshair,
-    needsRound: true,
-    eliminationOnly: true,
   },
 ];
 
