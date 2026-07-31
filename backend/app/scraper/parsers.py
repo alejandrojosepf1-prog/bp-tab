@@ -676,9 +676,20 @@ def parse_break_category_nav(html: str) -> list[ScrapedBreakCategoryRef]:
         href = str(link["href"])
         name = link.get_text(strip=True)
         is_adj = href.rstrip("/").endswith("/adjudicators")
-        slug_match = re.search(r"/break/([^/]+)/?$", href)
-        slug = slug_match.group(1) if slug_match else name.lower().replace(" ", "-")
-        out.append(ScrapedBreakCategoryRef(slug=slug, name=name, is_adjudicator_break=is_adj))
+        # `href` is absolute from the site root and starts with the tournament's own slug (e.g.
+        # "/open/break/teams/open/") -- everything after that first segment is the break page's
+        # path relative to the tournament root, which orchestrator._path() needs verbatim to
+        # refetch it later. A TEAM break category sits one segment deeper
+        # ("break/teams/<slug>/") than the adjudicator break ("break/adjudicators/"), so slicing
+        # by the trailing "/break/<slug>" shape alone (as this used to do) silently missed that
+        # extra "teams/" segment and fell back to guessing a slug from the display name -- which
+        # then made every later refetch of the team break page 404.
+        segments = [s for s in href.split("/") if s]
+        path = "/".join(segments[1:]) + "/" if len(segments) > 1 else href.strip("/") + "/"
+        slug = segments[-1] if segments else name.lower().replace(" ", "-")
+        out.append(
+            ScrapedBreakCategoryRef(slug=slug, name=name, is_adjudicator_break=is_adj, path=path)
+        )
     return out
 
 

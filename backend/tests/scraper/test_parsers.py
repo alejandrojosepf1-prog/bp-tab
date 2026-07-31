@@ -139,6 +139,32 @@ def test_parse_break_category_nav(fixture_html) -> None:
     assert len(categories) == 1
     assert categories[0].is_adjudicator_break is True
     assert categories[0].slug == "adjudicators"
+    assert categories[0].path == "break/adjudicators/"
+
+
+def test_parse_break_category_nav_team_break_nests_under_teams_segment() -> None:
+    """Regression: CMUDE 2026's real break dropdown links the team break to
+    "/open/break/teams/open/" -- one path segment deeper than the adjudicator break
+    ("/open/break/adjudicators/"). The old regex only ever matched "/break/<slug>/" at the very
+    end of the href, so it missed the "teams/" segment, silently fell back to guessing a slug
+    from the display name ("Abierto" -> "abierto"), and every later attempt to refetch the page
+    hit the wrong URL and 404'd forever -- meaning the real break was never ingested."""
+    html = """
+    <div class="dropdown-menu" aria-labelledby="breakdrop">
+        <a class="dropdown-item" href="/open/break/teams/open/">Abierto</a>
+        <a class="dropdown-item" href="/open/break/adjudicators/">Adjudicators</a>
+    </div>
+    """
+    categories = parsers.parse_break_category_nav(html)
+    assert len(categories) == 2
+
+    team = next(c for c in categories if not c.is_adjudicator_break)
+    assert team.slug == "open"
+    assert team.path == "break/teams/open/"
+
+    adj = next(c for c in categories if c.is_adjudicator_break)
+    assert adj.slug == "adjudicators"
+    assert adj.path == "break/adjudicators/"
 
 
 def test_parse_draw_extracts_active_round_with_rooms_and_positions(fixture_html) -> None:

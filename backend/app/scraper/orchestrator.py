@@ -179,7 +179,7 @@ class TournamentScraper:
         if adj_category is None:
             return adjudicators
         try:
-            html = await self._client.get_text(self._path(f"break/{adj_category.slug}/"))
+            html = await self._client.get_text(self._path(adj_category.path))
         except PageNotAvailableError:
             return adjudicators
         broken_ids = {a.external_id for a in parsers.parse_adjudicators(html, broke=True)}
@@ -195,7 +195,7 @@ class TournamentScraper:
             if category.is_adjudicator_break:
                 continue
             try:
-                html = await self._client.get_text(self._path(f"break/{category.slug}/"))
+                html = await self._client.get_text(self._path(category.path))
             except PageNotAvailableError:
                 continue
             try:

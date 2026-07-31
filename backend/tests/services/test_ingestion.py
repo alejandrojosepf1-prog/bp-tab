@@ -246,7 +246,9 @@ async def test_ingest_team_break_for_a_never_before_seen_category_does_not_crash
     snapshot = TournamentSnapshot(
         teams=(ScrapedTeam(external_id=1, name="Team A", emoji=None),),
         break_categories=(
-            ScrapedBreakCategoryRef(slug="esl", name="ESL", is_adjudicator_break=False),
+            ScrapedBreakCategoryRef(
+                slug="esl", name="ESL", is_adjudicator_break=False, path="break/teams/esl/"
+            ),
         ),
         team_breaks={"esl": (ScrapedTeamBreakEntry(team_external_id=1, team_name="Team A", rank=1),)},
     )

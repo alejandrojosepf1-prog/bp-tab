@@ -178,6 +178,11 @@ class ScrapedBreakCategoryRef:
     slug: str
     name: str
     is_adjudicator_break: bool
+    # The break page's path relative to the tournament root, e.g. "break/teams/open/" or
+    # "break/adjudicators/" -- team breaks live one segment deeper ("break/teams/<slug>/") than
+    # the adjudicator break ("break/adjudicators/"), so `slug` alone isn't enough to refetch the
+    # right page (see parse_break_category_nav).
+    path: str
 
 
 @dataclass(frozen=True)
