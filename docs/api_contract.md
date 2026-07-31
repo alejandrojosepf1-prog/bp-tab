@@ -144,10 +144,19 @@ was folded into `round_winner` itself -- see below -- rather than staying a sepa
   advanced/not-advanced for an out-round, so `rank_in_debate` stays NULL forever and such a
   market could take bets it would never be able to settle. Same restriction applies to
   `round_head_to_head`.
-- `top_speaker_position`: `{speaker_id, position}` (`position`: `1|2|3`) -- does this speaker
-  finish in EXACTLY this slot of the final top-3 speaker ranking (not "top 3 overall"). Priced
-  via `app.domain.odds.positional_probabilities`, a marginal Plackett-Luce probability; each
-  position is its own independent pari-mutuel compartment (position 1/2/3 don't share a pool).
+- `top_speaker_position`: `{speaker_id, position}` (`position`: `1`-`10`, see
+  `app.services.odds_service.MAX_SPEAKER_POSITION`) -- does this speaker finish in EXACTLY this
+  slot of the final speaker ranking (not "top 10 overall"). Priced via
+  `app.domain.odds.positional_probabilities`, a marginal Plackett-Luce probability, for positions
+  1-3; that formula is O(N^position) by construction, intractable past 3 for a realistic speaker
+  field, so positions 4-10 are priced via `app.domain.odds.simulate_positional_probabilities`
+  (Monte Carlo, same "simulate the whole field, tally outcomes" pattern
+  `app.domain.break_predictor` uses) instead. Each position is its own independent pari-mutuel
+  compartment (positions don't share a pool). **Settles only once every PRELIMINARY round has
+  been judged** (speaker points never come from elimination rounds -- see the sub-bet rule in
+  `round_winner` below) -- `build_market_outcome` used to treat the ranking as final as soon as
+  any 3 speakers had a score at all (as early as Round 1), which could lock in a stale settlement
+  since settlement is one-way.
 - `team_break`: `{team_id}`. Requires `target_break_category_id` at creation (400 otherwise).
   An INDEPENDENT, non-mutually-exclusive proposition (several teams break simultaneously) --
   unlike every other bet type, priced directly from that team's own break probability
@@ -211,7 +220,7 @@ while still open)
 - `round_winner`: `{debate_id, team_id}` (single-team pick), or on an elimination round with 2
   advancing slots, `{debate_id, team_ids: [2 team ids]}` (exact-pair pick -- see above)
 - `round_full_call`: `{debate_id, team_ids: number[]}` (exactly the debate's 4 teams, 1st->4th)
-- `top_speaker_position`: `{speaker_id, position}` (`position`: `1|2|3`)
+- `top_speaker_position`: `{speaker_id, position}` (`position`: `1`-`10`)
 - `team_break`: `{team_id}`
 - Legacy (still valid on an existing market/prediction, not creatable anymore): `top_n_break`
   `{team_ids: number[]}`, `top_n_speakers` `{speaker_ids: number[]}`, `head_to_head`

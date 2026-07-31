@@ -37,6 +37,8 @@ pure "fair book" building block pari-mutuel pricing is layered on top of -- see
 
 import itertools
 import math
+import random
+from collections import defaultdict
 from collections.abc import Iterable
 from typing import TypeVar
 
@@ -201,6 +203,74 @@ def positional_probabilities(
                 acc += p_j_first * p_k_second_given_j * p_i_third
         result[i] = acc
     return result
+
+
+DEFAULT_POSITIONAL_SIMULATIONS = 1500
+
+
+def simulate_positional_probabilities(
+    power_by_candidate: dict[CandidateT, float],
+    max_position: int,
+    *,
+    temperature: float | None = None,
+    num_simulations: int = DEFAULT_POSITIONAL_SIMULATIONS,
+    seed: str = "positional-sim",
+) -> dict[int, dict[CandidateT, float]]:
+    """Monte Carlo estimate of `positional_probabilities` for positions beyond what the exact
+    recursive formula can reach -- see that function's docstring: it's O(N^position) by
+    construction, fine through position 3 but intractable past it for a realistic speaker field
+    (a few hundred candidates). Same "simulate the whole field, tally outcomes" pattern
+    `app.domain.break_predictor` already uses for an analogous problem (there: final standings
+    via points draws; here: full rankings via Plackett-Luce).
+
+    Each trial draws the field's first `max_position` places via the exact same sequential
+    weighted-without-replacement process `positional_probabilities` sums over in closed form:
+    pick one candidate weighted by softmax(power/temperature) among those not yet picked, remove
+    them, repeat. This IS the Plackett-Luce generative process (not an approximation of it), so
+    averaging enough trials converges to the same probabilities the exact formula would give --
+    verified in tests against `positional_probabilities` for positions 1-3, where both are
+    available.
+
+    Returns `{position: {candidate: probability}}` for every position in `1..max_position`, from
+    ONE shared simulation run -- callers needing several positions (e.g. pricing an entire
+    "top 10" market board) should request them together rather than re-simulating per position,
+    the same reason `build_break_report` runs one shared field simulation instead of one per team.
+
+    Deterministic for a given `seed` (default fixed, like `break_predictor`'s own hardcoded
+    seeds) -- this is a pricing model, not a fairness-critical draw, so reproducible output
+    across calls with the same inputs is more valuable here than per-call randomness.
+    """
+    if max_position < 1:
+        raise ValueError("max_position must be at least 1")
+    if not power_by_candidate:
+        return {}
+    temp = temperature if temperature is not None else adaptive_temperature(
+        power_by_candidate.values()
+    )
+    max_power = max(power_by_candidate.values())
+    base_weights = {
+        candidate: math.exp((power - max_power) / temp)
+        for candidate, power in power_by_candidate.items()
+    }
+    depth = min(max_position, len(base_weights))
+
+    rank_counts: dict[int, dict[CandidateT, int]] = {
+        position: defaultdict(int) for position in range(1, max_position + 1)
+    }
+    rng = random.Random(seed)
+    for _ in range(num_simulations):
+        remaining = dict(base_weights)
+        for position in range(1, depth + 1):
+            pick = rng.choices(
+                list(remaining.keys()), weights=list(remaining.values()), k=1
+            )[0]
+            rank_counts[position][pick] += 1
+            del remaining[pick]
+
+    return {
+        position: {candidate: count / num_simulations for candidate, count in counts.items()}
+        for position, counts in rank_counts.items()
+    }
 
 
 def top_n_probabilities(

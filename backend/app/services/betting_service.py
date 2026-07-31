@@ -48,8 +48,12 @@ from app.models.enums import (
     TournamentStatus,
 )
 from app.repositories.upsert import upsert_by_natural_key
-from app.services.odds_service import quote_odds, quote_sub_bet_odds
-from app.services.ranking_service import get_standings
+from app.services.odds_service import MAX_SPEAKER_POSITION, quote_odds, quote_sub_bet_odds
+from app.services.ranking_service import (
+    get_latest_completed_round_seq,
+    get_standings,
+    get_total_preliminary_rounds,
+)
 
 _PER_PREDICTION_BET_TYPES = {
     BetType.HEAD_TO_HEAD,
@@ -345,10 +349,34 @@ async def build_market_outcome(session: AsyncSession, bet_market: BetMarket) -> 
         return {"institution_code": institution.code} if institution else None
 
     if bet_market.bet_type == BetType.TOP_SPEAKER_POSITION:
-        speaker_ids = await _get_final_speaker_ranking(session, bet_market.tournament_id)
-        if len(speaker_ids) < 3:
+        # _get_final_speaker_ranking sums SpeakerScore across every judged debate SO FAR, not
+        # necessarily every preliminary debate there will ever be -- speaker points only come
+        # from preliminary rounds (eliminations don't get them, see quote_sub_bet_odds's
+        # ROUND_WINNER gate), so the ranking is only truly final once every preliminary round is
+        # judged. Without this gate, the old `len(speaker_ids) < 3` check let this settle as
+        # early as right after Round 1 (any 3 speakers with a score at all), locking in a
+        # snapshot ranking as permanent -- settlement is one-way, so an early speaker could lose
+        # their lead by Round 9 and the market would already be settled against the Round 1
+        # picture and never revisit it.
+        total_prelim_rounds = await get_total_preliminary_rounds(session, bet_market.tournament_id)
+        latest_completed_seq = await get_latest_completed_round_seq(
+            session, bet_market.tournament_id
+        )
+        if (
+            total_prelim_rounds == 0
+            or latest_completed_seq is None
+            or latest_completed_seq < total_prelim_rounds
+        ):
             return None
-        return {"position_winners": {1: speaker_ids[0], 2: speaker_ids[1], 3: speaker_ids[2]}}
+        speaker_ids = await _get_final_speaker_ranking(session, bet_market.tournament_id)
+        if not speaker_ids:
+            return None
+        return {
+            "position_winners": {
+                position: speaker_ids[position - 1]
+                for position in range(1, min(len(speaker_ids), MAX_SPEAKER_POSITION) + 1)
+            }
+        }
 
     if bet_market.bet_type == BetType.TEAM_BREAK:
         if bet_market.target_break_category_id is None:

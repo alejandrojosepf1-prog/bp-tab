@@ -622,9 +622,19 @@ async def test_top_speaker_position_quote_and_place_via_api(
     )
     assert prediction.status_code == 201
 
-    invalid_position = await client.post(
+    # Position 4 is now IN range (the "Tabla de oradores" market goes to 10, priced via
+    # simulation past position 3 -- see odds_service.MAX_SPEAKER_POSITION), so it must quote
+    # cleanly instead of rejecting.
+    deep_position = await client.post(
         f"/api/v1/bet-markets/{market_id}/quote",
         json={"payload": {"speaker_id": speaker_a.id, "position": 4}},
+        headers=auth_headers(user),
+    )
+    assert deep_position.status_code == 200
+
+    invalid_position = await client.post(
+        f"/api/v1/bet-markets/{market_id}/quote",
+        json={"payload": {"speaker_id": speaker_a.id, "position": 11}},
         headers=auth_headers(user),
     )
     assert invalid_position.status_code == 422

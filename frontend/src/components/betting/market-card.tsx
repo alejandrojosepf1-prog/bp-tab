@@ -31,7 +31,7 @@ export const BET_TYPE_LABELS: Record<string, string> = {
   champion: "Campeón del torneo",
   round_winner: "Ganador de debate",
   round_full_call: "Call completo de un debate",
-  top_speaker_position: "Posición en el top 3 de oradores",
+  top_speaker_position: "Posición en el top 10 de oradores",
   team_break: "Equipo que hace break",
   round_head_to_head: "Enfrentamiento directo en sala",
   // Retirados de la creación de mercados, pero un mercado viejo todavía podría existir.
@@ -1106,12 +1106,14 @@ function HeadToHeadRoomPick({
   );
 }
 
+const SPEAKER_POSITIONS = Array.from({ length: 10 }, (_, i) => i + 1);
+
 function SpeakerPositionPick({ speakers, myPredictions, onPayloadChange }: PickerProps) {
   const [speakerId, setSpeakerId] = useState<string | null>(null);
   const [position, setPosition] = useState<number | null>(null);
 
   const usedByPosition = new Map(
-    [1, 2, 3].map((p) => [
+    SPEAKER_POSITIONS.map((p) => [
       p,
       findByEntityKey(myPredictions, "top_speaker_position", `position:${p}`),
     ])
@@ -1140,10 +1142,10 @@ function SpeakerPositionPick({ speakers, myPredictions, onPayloadChange }: Picke
       {speakerId && (
         <div className="flex flex-col gap-1.5">
           <span className="text-xs text-muted-foreground">
-            ¿En qué puesto del top 3 termina? Cada puesto se asigna una sola vez.
+            ¿En qué puesto del top 10 termina? Cada puesto se asigna una sola vez.
           </span>
           <div className="flex flex-wrap items-center gap-2">
-            {[1, 2, 3].map((p) => {
+            {SPEAKER_POSITIONS.map((p) => {
               const usedBy = usedByPosition.get(p);
               const usedByName = speakers.find(
                 (s) => s.id === (usedBy?.payload.speaker_id as number | undefined)

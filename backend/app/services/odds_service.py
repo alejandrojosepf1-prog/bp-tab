@@ -12,6 +12,7 @@ tracks -- nothing here invents a new stat:
     team_points can't distinguish on its own. This is the "contra quién se han enfrentado" part.
 """
 
+import asyncio
 from collections import defaultdict
 from dataclasses import dataclass
 
@@ -28,6 +29,7 @@ from app.domain.odds import (
     pari_mutuel_probability,
     positional_probabilities,
     sequence_probability,
+    simulate_positional_probabilities,
     softmax_probabilities,
     top_n_probabilities,
 )
@@ -373,9 +375,9 @@ async def _debate_sequence_pool(
 def _speaker_position_pool_from_stakes(
     open_stakes: list[tuple[dict, float]], position: int, speaker_id: int
 ) -> tuple[float, float]:
-    """Compartment = money staked on THIS position (position 1/2/3 are independent coin-flips,
-    not one shared 3-way pool -- see `top_speaker_position` in `quote_odds`), candidate = stakes
-    naming this exact speaker for it."""
+    """Compartment = money staked on THIS position (every position is its own independent
+    coin-flip, not one shared N-way pool -- see `top_speaker_position` in `quote_odds`),
+    candidate = stakes naming this exact speaker for it."""
     candidate_stake = 0.0
     total = 0.0
     for payload, stake in open_stakes:
@@ -724,13 +726,15 @@ async def quote_odds(
             raise UnpriceableMarketError("no speaker scores yet to price this market from")
         speaker_id = payload["speaker_id"]
         position = payload["position"]
-        if position not in (1, 2, 3):
-            raise ValueError("position must be 1, 2, or 3")
+        if not (1 <= position <= MAX_SPEAKER_POSITION):
+            raise ValueError(f"position must be between 1 and {MAX_SPEAKER_POSITION}")
         if speaker_id not in power:
             raise KeyError(speaker_id)
         temperature = adaptive_temperature(power.values())
-        probabilities = positional_probabilities(power, position, temperature=temperature)
-        prior = probabilities[speaker_id]
+        probabilities = await _speaker_position_probabilities(
+            power, position, temperature=temperature
+        )
+        prior = probabilities.get(speaker_id, 0.0)
         candidate_stake, compartment_stake = await _speaker_position_pool(
             session, bet_market.id, position, speaker_id, exclude_user_id=exclude_user_id
         )
@@ -935,7 +939,29 @@ class MarketBoard:
 
 _BOARD_MAX_UNSTAKED_OPTIONS = 12
 
-_POSITION_LABELS = {1: "1º", 2: "2º", 3: "3º"}
+# How deep the "Tabla de oradores" market's exact-slot betting goes. Positions 1-3 price via
+# `positional_probabilities`'s exact recursive formula; 4-10 via
+# `simulate_positional_probabilities` (Monte Carlo) -- see `_speaker_position_probabilities`.
+MAX_SPEAKER_POSITION = 10
+
+_POSITION_LABELS = {i: f"{i}º" for i in range(1, MAX_SPEAKER_POSITION + 1)}
+
+
+async def _speaker_position_probabilities(
+    power: dict[int, float], position: int, *, temperature: float
+) -> dict[int, float]:
+    """P(each speaker finishes exactly at `position`) -- positions 1-3 exactly
+    (`positional_probabilities`), 4-`MAX_SPEAKER_POSITION` via Monte Carlo simulation (the exact
+    formula is O(N^position), intractable past 3 for a realistic speaker field). The simulation
+    is CPU-bound Python, so it runs in a worker thread (`asyncio.to_thread`) rather than blocking
+    the event loop -- same reason `break_service.recompute_break_predictions` does the same for
+    its own Monte Carlo call."""
+    if position <= 3:
+        return positional_probabilities(power, position, temperature=temperature)
+    simulated = await asyncio.to_thread(
+        simulate_positional_probabilities, power, position, temperature=temperature
+    )
+    return simulated.get(position, {})
 
 
 def format_payload_label(
@@ -1122,6 +1148,25 @@ async def _generic_fallback_options(
                     else (1 if debate_count <= 1 else 2)
                 )
 
+    # One shared simulation for every position 4-10 these payloads touch, instead of one per
+    # payload -- `simulate_positional_probabilities` isn't cheap enough to redo per prediction
+    # the way the exact positions-1-3 formula below is. `positions_needing_simulation` name-drops
+    # nothing sensitive; it's just which slots (4-10) this board's payloads actually asked about.
+    simulated_positions: dict[int, dict[int, float]] = {}
+    if bet_type == BetType.TOP_SPEAKER_POSITION:
+        positions_needing_simulation = {
+            payload["position"]
+            for payload in payload_by_key.values()
+            if isinstance(payload.get("position"), int) and payload["position"] > 3
+        }
+        if positions_needing_simulation:
+            simulated_positions = await asyncio.to_thread(
+                simulate_positional_probabilities,
+                power,
+                max(positions_needing_simulation),
+                temperature=temperature,
+            )
+
     odds_by_key: dict[str, float] = {}
     for key, payload in payload_by_key.items():
         try:
@@ -1236,10 +1281,14 @@ async def _generic_fallback_options(
             elif bet_type == BetType.TOP_SPEAKER_POSITION:
                 speaker_id = payload["speaker_id"]
                 position = payload["position"]
-                if position not in (1, 2, 3) or speaker_id not in power:
+                if not (1 <= position <= MAX_SPEAKER_POSITION) or speaker_id not in power:
                     continue
-                probabilities = positional_probabilities(power, position, temperature=temperature)
-                prior = probabilities[speaker_id]
+                probabilities = (
+                    positional_probabilities(power, position, temperature=temperature)
+                    if position <= 3
+                    else simulated_positions.get(position, {})
+                )
+                prior = probabilities.get(speaker_id, 0.0)
                 candidate_stake, compartment_stake = _speaker_position_pool_from_stakes(
                     open_stakes, position, speaker_id
                 )

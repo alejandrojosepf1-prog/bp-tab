@@ -79,7 +79,7 @@ const BET_TYPES: BetTypeOption[] = [
   {
     value: "top_speaker_position",
     label: "Tabla de oradores",
-    hint: "Un orador, en qué puesto del top 3 termina",
+    hint: "Un orador, en qué puesto del top 10 termina",
     icon: Mic2,
   },
   {

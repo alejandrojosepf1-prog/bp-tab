@@ -472,6 +472,138 @@ async def test_settle_market_top_speaker_position(db_session) -> None:
     assert predictions[bob.id].points_awarded == 0.0
 
 
+async def test_top_speaker_position_does_not_settle_until_every_preliminary_round_is_judged(
+    db_session,
+) -> None:
+    """Regression: speaker points only ever come from preliminary rounds, so the ranking is
+    only truly final once EVERY preliminary round is judged -- not as soon as any 3 speakers
+    happen to have a score, which used to let this settle as early as Round 1 and then never
+    revisit it (settlement is one-way)."""
+    tournament = await _make_tournament(db_session)
+    round_1 = Round(
+        tournament_id=tournament.id, seq=1, name="Round 1",
+        stage=RoundStage.PRELIMINARY, status=RoundStatus.COMPLETED,
+    )
+    # Round 2 EXISTS (the results nav lists every preliminary round from the start, played or
+    # not -- see ScrapedRoundRef) but hasn't been judged yet.
+    round_2 = Round(
+        tournament_id=tournament.id, seq=2, name="Round 2",
+        stage=RoundStage.PRELIMINARY, status=RoundStatus.RELEASED,
+    )
+    db_session.add_all([round_1, round_2])
+    await db_session.flush()
+    team = Team(tournament_id=tournament.id, external_id=1, name="Team A")
+    db_session.add(team)
+    await db_session.flush()
+    debate = Debate(tournament_id=tournament.id, round_id=round_1.id, external_id=1)
+    db_session.add(debate)
+    await db_session.flush()
+    debate_team = DebateTeam(
+        debate_id=debate.id, team_id=team.id,
+        position=BPPosition.OPENING_GOVERNMENT, rank_in_debate=1,
+    )
+    db_session.add(debate_team)
+    await db_session.flush()
+    speakers = [
+        Speaker(tournament_id=tournament.id, team_id=team.id, name=f"Speaker {i}")
+        for i in range(1, 4)
+    ]
+    db_session.add_all(speakers)
+    await db_session.flush()
+    for speaker, role, score in [
+        (speakers[0], SpeakerRole.PM, 90.0),
+        (speakers[1], SpeakerRole.DPM, 80.0),
+        (speakers[2], SpeakerRole.LO, 70.0),
+    ]:
+        db_session.add(
+            SpeakerScore(
+                debate_team_id=debate_team.id, speaker_id=speaker.id, role=role, score=score
+            )
+        )
+    await db_session.commit()
+
+    market = await _make_market(db_session, tournament, BetType.TOP_SPEAKER_POSITION)
+    await db_session.commit()
+
+    settled = await settle_market(db_session, market)
+    await db_session.commit()
+
+    assert settled is False
+    await db_session.refresh(market)
+    assert market.status != BetMarketStatus.SETTLED
+
+
+async def test_top_speaker_position_settles_positions_past_3_once_ranking_is_final(
+    db_session,
+) -> None:
+    """The 'Tabla de oradores' market now goes to 10 slots, not 3 -- confirm a position-5 pick
+    settles correctly once every preliminary round is judged."""
+    tournament = await _make_tournament(db_session)
+    round_1 = Round(
+        tournament_id=tournament.id, seq=1, name="Round 1",
+        stage=RoundStage.PRELIMINARY, status=RoundStatus.COMPLETED,
+    )
+    db_session.add(round_1)
+    await db_session.flush()
+    team = Team(tournament_id=tournament.id, external_id=1, name="Team A")
+    db_session.add(team)
+    await db_session.flush()
+    debate = Debate(tournament_id=tournament.id, round_id=round_1.id, external_id=1)
+    db_session.add(debate)
+    await db_session.flush()
+    debate_team = DebateTeam(
+        debate_id=debate.id, team_id=team.id,
+        position=BPPosition.OPENING_GOVERNMENT, rank_in_debate=1,
+    )
+    db_session.add(debate_team)
+    await db_session.flush()
+    # 6 speakers, strictly descending scores -- speakers[4] (score 50) is exactly 5th.
+    speakers = [
+        Speaker(tournament_id=tournament.id, team_id=team.id, name=f"Speaker {i}")
+        for i in range(1, 7)
+    ]
+    db_session.add_all(speakers)
+    await db_session.flush()
+    roles = [
+        SpeakerRole.PM, SpeakerRole.DPM, SpeakerRole.LO,
+        SpeakerRole.DLO, SpeakerRole.MG, SpeakerRole.GW,
+    ]
+    for speaker, role, score in zip(speakers, roles, [90.0, 80.0, 70.0, 60.0, 50.0, 40.0], strict=True):
+        db_session.add(
+            SpeakerScore(
+                debate_team_id=debate_team.id, speaker_id=speaker.id, role=role, score=score
+            )
+        )
+    await db_session.commit()
+
+    market = await _make_market(db_session, tournament, BetType.TOP_SPEAKER_POSITION)
+    alice = await _make_user(db_session, "alice-deep@example.com")
+    bob = await _make_user(db_session, "bob-deep@example.com")
+    db_session.add(
+        _prediction(
+            BetType.TOP_SPEAKER_POSITION, market_id=market.id, user_id=alice.id,
+            payload={"speaker_id": speakers[4].id, "position": 5}, odds=8.0,
+        )
+    )
+    db_session.add(
+        _prediction(
+            BetType.TOP_SPEAKER_POSITION, market_id=market.id, user_id=bob.id,
+            payload={"speaker_id": speakers[5].id, "position": 5}, odds=8.0,
+        )
+    )
+    await db_session.commit()
+
+    settled = await settle_market(db_session, market)
+    await db_session.commit()
+
+    assert settled is True
+    predictions = {
+        p.user_id: p for p in (await db_session.execute(select(Prediction))).scalars().all()
+    }
+    assert predictions[alice.id].points_awarded == 80.0  # 10.0 stake_amount default * 8.0 odds
+    assert predictions[bob.id].points_awarded == 0.0
+
+
 async def test_settle_market_team_break_is_membership_not_exact_order(db_session) -> None:
     tournament = await _make_tournament(db_session)
     category = BreakCategory(tournament_id=tournament.id, name="Open", slug="open", break_size=2)

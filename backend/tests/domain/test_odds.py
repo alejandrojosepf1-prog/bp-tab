@@ -15,6 +15,7 @@ from app.domain.odds import (
     pari_mutuel_probability,
     positional_probabilities,
     sequence_probability,
+    simulate_positional_probabilities,
     single_candidate_odds,
     pair_top_two_probability,
     softmax_probabilities,
@@ -245,6 +246,63 @@ def test_positional_probabilities_rejects_unsupported_position() -> None:
 def test_positional_probabilities_empty_input() -> None:
     assert positional_probabilities({}, 1) == {}
     assert positional_probabilities({}, 3) == {}
+
+
+# --- simulate_positional_probabilities: Monte Carlo extension past position 3 ------------
+
+
+def test_simulate_positional_probabilities_converges_to_the_exact_formula() -> None:
+    """For positions 1-3, both the exact recursive formula and the simulation answer the same
+    question -- the simulation must agree with it to within Monte Carlo sampling error."""
+    power = {"a": 10.0, "b": 6.0, "c": 3.0, "d": 1.0, "e": 0.5}
+    temp = adaptive_temperature(power.values())
+    simulated = simulate_positional_probabilities(
+        power, 3, temperature=temp, num_simulations=20_000
+    )
+    for position in (1, 2, 3):
+        exact = positional_probabilities(power, position, temperature=temp)
+        for candidate, exact_prob in exact.items():
+            assert simulated[position][candidate] == pytest.approx(exact_prob, abs=0.02)
+
+
+def test_simulate_positional_probabilities_sums_to_one_at_every_position() -> None:
+    power = {"a": 10.0, "b": 6.0, "c": 3.0, "d": 1.0, "e": 0.5, "f": 0.2, "g": 0.1}
+    result = simulate_positional_probabilities(power, 6, num_simulations=5000)
+    for position in range(1, 7):
+        assert sum(result[position].values()) == pytest.approx(1.0, abs=1e-9)
+
+
+def test_simulate_positional_probabilities_favorite_less_likely_to_finish_last() -> None:
+    # Same directional sanity check as the exact formula's test, extended past position 3.
+    power = {"favorite": 20.0, "mid": 8.0, "longshot": 1.0}
+    probs = simulate_positional_probabilities(power, 3, temperature=3.0, num_simulations=10_000)
+    last = probs[3]
+    assert last["longshot"] > last["mid"] > last["favorite"]
+
+
+def test_simulate_positional_probabilities_is_deterministic_for_the_same_seed() -> None:
+    power = {"a": 10.0, "b": 6.0, "c": 3.0, "d": 1.0}
+    first = simulate_positional_probabilities(power, 4, num_simulations=500, seed="x")
+    second = simulate_positional_probabilities(power, 4, num_simulations=500, seed="x")
+    assert first == second
+
+
+def test_simulate_positional_probabilities_handles_field_smaller_than_max_position() -> None:
+    # Only 2 candidates but asked for position 5 -- there's no meaningful data past position 2,
+    # so those slots should come back empty rather than raising.
+    power = {"a": 5.0, "b": 3.0}
+    result = simulate_positional_probabilities(power, 5, num_simulations=200)
+    assert set(result[1].keys()) == {"a", "b"}
+    assert result[5] == {}
+
+
+def test_simulate_positional_probabilities_rejects_invalid_max_position() -> None:
+    with pytest.raises(ValueError):
+        simulate_positional_probabilities({"a": 1.0}, 0)
+
+
+def test_simulate_positional_probabilities_empty_input() -> None:
+    assert simulate_positional_probabilities({}, 5) == {}
 
 
 def test_exact_rank_gap_probability_uniform_field_matches_hand_count() -> None:
