@@ -181,6 +181,32 @@ async def test_raffle_free_entry_when_no_ticket_cost(db_session) -> None:
     assert alice.balance == 10.0  # untouched
 
 
+async def test_raffle_entry_rejects_over_the_max_tickets_per_user_cap(db_session) -> None:
+    """A free raffle with no cap lets anyone buy unlimited tickets, dominating the weighted
+    draw -- max_tickets_per_user lets an admin close that off, for free or paid raffles alike."""
+    tournament = await _make_tournament(db_session)
+    event = await _make_event(
+        db_session, tournament, PrizeEventType.RAFFLE,
+        config={"num_winners": 1, "prize_per_winner": 50.0, "max_tickets_per_user": 3},
+    )
+    alice = await _make_user(db_session, "alice@example.com")
+    await db_session.commit()
+    with pytest.raises(PrizeEventError):
+        await enter_raffle(db_session, event, alice, 4)
+
+
+async def test_raffle_entry_allows_up_to_the_max_tickets_per_user_cap(db_session) -> None:
+    tournament = await _make_tournament(db_session)
+    event = await _make_event(
+        db_session, tournament, PrizeEventType.RAFFLE,
+        config={"num_winners": 1, "prize_per_winner": 50.0, "max_tickets_per_user": 3},
+    )
+    alice = await _make_user(db_session, "alice@example.com")
+    await db_session.commit()
+    entry = await enter_raffle(db_session, event, alice, 3)
+    assert entry.tickets == 3
+
+
 async def test_raffle_resolve_picks_exactly_num_winners_and_pays_them(db_session) -> None:
     tournament = await _make_tournament(db_session)
     event = await _make_event(

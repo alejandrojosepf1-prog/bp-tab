@@ -54,6 +54,7 @@ function CreateEventForm({ tournamentId }: { tournamentId: string }) {
   const [numWinners, setNumWinners] = useState("1");
   const [prizePerWinner, setPrizePerWinner] = useState("");
   const [ticketCost, setTicketCost] = useState("");
+  const [maxTicketsPerUser, setMaxTicketsPerUser] = useState("");
   const [bonusAmount, setBonusAmount] = useState("");
 
   const mutation = useMutation({
@@ -63,6 +64,7 @@ function CreateEventForm({ tournamentId }: { tournamentId: string }) {
         config.num_winners = Number(numWinners) || 1;
         config.prize_per_winner = Number(prizePerWinner) || 0;
         if (ticketCost) config.ticket_cost = Number(ticketCost);
+        if (maxTicketsPerUser) config.max_tickets_per_user = Number(maxTicketsPerUser);
       } else if (type === "activity_bonus") {
         config.bonus_amount = Number(bonusAmount) || 0;
       }
@@ -82,6 +84,7 @@ function CreateEventForm({ tournamentId }: { tournamentId: string }) {
       setNumWinners("1");
       setPrizePerWinner("");
       setTicketCost("");
+      setMaxTicketsPerUser("");
       setBonusAmount("");
       queryClient.invalidateQueries({ queryKey: queryKeys.prizeEvents(tournamentId) });
     },
@@ -162,6 +165,16 @@ function CreateEventForm({ tournamentId }: { tournamentId: string }) {
               value={ticketCost}
               onChange={(e) => setTicketCost(e.target.value)}
               placeholder="gratis si se deja vacío"
+            />
+          </Field>
+          <Field label="Límite de tickets por persona (opcional)">
+            <Input
+              type="number"
+              min="1"
+              step="1"
+              value={maxTicketsPerUser}
+              onChange={(e) => setMaxTicketsPerUser(e.target.value)}
+              placeholder="sin límite si se deja vacío"
             />
           </Field>
         </div>
@@ -290,11 +303,13 @@ function ManualAwardQueueForm({ eventId }: { eventId: number }) {
 function ConfigSummary({ event }: { event: PrizeEvent }) {
   if (event.type === "raffle") {
     const cost = event.config.ticket_cost;
+    const maxTickets = event.config.max_tickets_per_user;
     return (
       <p className="text-xs text-muted-foreground">
         {event.config.num_winners ?? 1} ganador(es) ·{" "}
         {formatTokens(event.config.prize_per_winner ?? 0)} c/u ·{" "}
         {cost ? `ticket ${formatTokens(cost)}` : "entrada gratis"}
+        {maxTickets ? ` · máx. ${maxTickets} ticket(s)/persona` : ""}
       </p>
     );
   }

@@ -87,6 +87,10 @@ async def enter_raffle(
     if tickets <= 0:
         raise PrizeEventError("tickets must be positive")
 
+    max_tickets = event.config.get("max_tickets_per_user")
+    if max_tickets is not None and tickets > max_tickets:
+        raise PrizeEventError(f"max {int(max_tickets)} tickets per person for this raffle")
+
     ticket_cost = float(event.config.get("ticket_cost") or 0)
     existing = await _existing_entry(session, event.id, user.id)
     already_owned = existing.tickets if existing else 0

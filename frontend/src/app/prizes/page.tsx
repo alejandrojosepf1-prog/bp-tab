@@ -34,8 +34,10 @@ function RaffleEntryForm({ event }: { event: PrizeEvent }) {
   const { user } = useAuth();
   const [tickets, setTickets] = useState("1");
   const ticketCost = event.config.ticket_cost ?? 0;
+  const maxTickets = event.config.max_tickets_per_user;
   const totalCost = (Number(tickets) || 0) * ticketCost;
   const overBalance = user != null && totalCost > user.balance;
+  const overCap = maxTickets != null && Number(tickets) > maxTickets;
 
   const mutation = useMutation({
     mutationFn: () => api.prizeEvents.enter(event.id, Number(tickets)),
@@ -57,19 +59,21 @@ function RaffleEntryForm({ event }: { event: PrizeEvent }) {
         <Input
           type="number"
           min="1"
+          max={maxTickets}
           step="1"
-          className={cn("w-24", overBalance && "border-destructive")}
+          className={cn("w-24", (overBalance || overCap) && "border-destructive")}
           value={tickets}
           onChange={(e) => setTickets(e.target.value)}
         />
       </div>
       <p className="text-xs text-muted-foreground">
         {ticketCost > 0 ? `Costo total: ${formatTokens(totalCost)}` : "Entrada gratis"}
+        {maxTickets != null ? ` · máx. ${maxTickets} por persona` : ""}
       </p>
       <Button
         size="sm"
         className="ml-auto"
-        disabled={!tickets || Number(tickets) < 1 || overBalance || mutation.isPending}
+        disabled={!tickets || Number(tickets) < 1 || overBalance || overCap || mutation.isPending}
         onClick={() => mutation.mutate()}
       >
         {mutation.isPending && <Loader2 className="size-3.5 animate-spin" />}
@@ -78,6 +82,11 @@ function RaffleEntryForm({ event }: { event: PrizeEvent }) {
       {overBalance && (
         <p className="w-full text-xs text-destructive">
           No te alcanzan los tokens ({formatTokens(user?.balance ?? 0)}).
+        </p>
+      )}
+      {overCap && !overBalance && (
+        <p className="w-full text-xs text-destructive">
+          Máximo {maxTickets} ticket(s) por persona en este sorteo.
         </p>
       )}
     </div>

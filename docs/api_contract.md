@@ -227,9 +227,13 @@ for the mechanics behind each `type`. Lifecycle is one-way: `open` -> `resolved`
 - `GET /tournaments/{id}/prize-events` -> `PrizeEvent[]` (public)
 - `POST /tournaments/{id}/prize-events` **(admin)**
   `{type: manual_award|raffle|activity_bonus, title, description?, config?, closes_at?}` ->
-  `PrizeEvent`. `config` shape by type: `raffle` `{num_winners, prize_per_winner, ticket_cost?}`
-  (`ticket_cost` omitted/0 = free entry); `activity_bonus` `{bonus_amount}`; `manual_award` `{}`
-  (each entry carries its own amount instead of a shared config).
+  `PrizeEvent`. `config` shape by type: `raffle`
+  `{num_winners, prize_per_winner, ticket_cost?, max_tickets_per_user?}` (`ticket_cost`
+  omitted/0 = free entry; `max_tickets_per_user` omitted = no cap -- exists mainly for free
+  raffles, where nothing else stops one user from buying unlimited tickets and dominating the
+  weighted draw, but applies to paid raffles too if the admin sets it); `activity_bonus`
+  `{bonus_amount}`; `manual_award` `{}` (each entry carries its own amount instead of a shared
+  config).
 - `GET /prize-events/{id}` -> `PrizeEvent & {entries: PrizeEntry[]}` (public)
 - `POST /prize-events/{id}/manual-awards` **(admin)** `{user_id, amount}` -> `PrizeEntry`.
   `manual_award` events only (400 otherwise). Queues an award without crediting anything yet --
@@ -238,7 +242,8 @@ for the mechanics behind each `type`. Lifecycle is one-way: `open` -> `resolved`
 - `POST /prize-events/{id}/enter` `{tickets}` -> `PrizeEntry`. `raffle` events only (400
   otherwise), requires auth. Re-entering tops up to the new ticket total and only charges the
   DIFFERENCE against balance (400 `InsufficientBalanceError` if it can't cover that). Free if
-  the event's `ticket_cost` is unset.
+  the event's `ticket_cost` is unset. 400 (`PrizeEventError`) if `tickets` exceeds the event's
+  `max_tickets_per_user`, when set.
 - `POST /prize-events/{id}/resolve` **(admin)** -> `PrizeEvent & {entries: PrizeEntry[]}`. 400 if
   already resolved. Per type:
   - `manual_award`: credits every queued entry's amount.
