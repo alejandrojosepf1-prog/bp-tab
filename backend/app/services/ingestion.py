@@ -632,12 +632,20 @@ class IngestionService:
         team_id_by_ext: dict[int, int],
         adjudicator_id_by_ext: dict[int, int],
     ) -> None:
+        # snapshot.team_breaks is keyed by the tab's own slug, which loses the display name --
+        # needed here because `name` is NOT NULL and a category whose slug wasn't already seen
+        # (e.g. via an explicit team tag in _ingest_teams) has no other row to inherit it from.
+        # Without this, upsert_by_natural_key's create path passed no `name` at all and blew up
+        # with a NOT NULL violation the first time a tournament's real break got scraped --
+        # taking the whole scrape cycle down with it (see scrape_tasks.scrape_tournament_async,
+        # which rolls back everything ingested that cycle on any exception).
+        name_by_slug = {c.slug: c.name for c in snapshot.break_categories}
         for slug, entries in snapshot.team_breaks.items():
             category = await upsert_by_natural_key(
                 self.session,
                 BreakCategory,
                 lookup={"tournament_id": tournament.id, "slug": slug},
-                values={},
+                values={"name": name_by_slug.get(slug, slug)},
             )
             for entry in entries:
                 team_id = (

@@ -231,6 +231,40 @@ async def test_ingest_creates_general_open_break_category_when_none_scraped(db_s
     assert len(links) == 2  # both teams linked to the general category
 
 
+async def test_ingest_team_break_for_a_never_before_seen_category_does_not_crash(
+    db_session,
+) -> None:
+    """Regression test: the first scrape after a tournament's real break is published sees a
+    break-category slug that was never seen via an explicit team tag or the general-category
+    backfill (see IngestionService._ingest_breaks docstring) -- e.g. an ESL break, which is
+    genuinely new to the DB. This used to write no `name` at all on the freshly-created
+    BreakCategory row, tripping the NOT NULL constraint and rolling back the whole scrape cycle."""
+    from app.models import Break, BreakCategory
+    from app.scraper.dtos import ScrapedBreakCategoryRef, ScrapedTeam, ScrapedTeamBreakEntry
+
+    tournament = await _make_tournament(db_session)
+    snapshot = TournamentSnapshot(
+        teams=(ScrapedTeam(external_id=1, name="Team A", emoji=None),),
+        break_categories=(
+            ScrapedBreakCategoryRef(slug="esl", name="ESL", is_adjudicator_break=False),
+        ),
+        team_breaks={"esl": (ScrapedTeamBreakEntry(team_external_id=1, team_name="Team A", rank=1),)},
+    )
+
+    service = IngestionService(db_session)
+    await service.ingest(tournament, snapshot)
+    await db_session.commit()
+
+    category = (
+        await db_session.execute(select(BreakCategory).filter_by(tournament_id=tournament.id, slug="esl"))
+    ).scalar_one()
+    assert category.name == "ESL"
+
+    break_row = (await db_session.execute(select(Break).filter_by(tournament_id=tournament.id))).scalar_one()
+    assert break_row.break_category_id == category.id
+    assert break_row.rank == 1
+
+
 async def test_ingest_reingest_of_general_break_category_is_still_a_no_op(db_session) -> None:
     """The general-category backfill must not break idempotency: re-ingesting an unchanged
     snapshot a second time must not produce new ChangeEvent rows or duplicate links."""

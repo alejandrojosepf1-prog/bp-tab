@@ -42,6 +42,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     enabled: !!getToken(),
     retry: false,
     staleTime: 10_000,
+    // Balance also moves from actions this tab didn't trigger -- another market getting
+    // liquidated, a prize/raffle payout -- so invalidating `me` only after the user's OWN
+    // mutations (bet placed, etc.) isn't enough; without this the sidebar balance was stuck
+    // until the user happened to refocus the window or navigate. Same interval market-card's
+    // own polling queries already use.
+    refetchInterval: 30_000,
   });
 
   const login = useCallback(
