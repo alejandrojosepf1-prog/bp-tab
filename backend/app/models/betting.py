@@ -149,6 +149,27 @@ class Prediction(Base, TimestampMixin):
     user = relationship("User")
 
 
+class OddsSnapshot(Base):
+    """One captured odds reading for one option of one BetMarket, written on a fixed cadence by
+    `app.services.odds_service.capture_odds_snapshot` (called once per autoscrape cycle -- see
+    `app.tasks.autoscrape` -- NOT on every board/quote request, which would snapshot on every
+    page load instead of on a steady clock). Pure history for the "evolución de cuotas" chart;
+    never read by pricing or settlement, so it's safe to prune/ignore without affecting the app.
+    `option_key` matches `MarketBoardOption.key` from `odds_service.market_board`."""
+
+    __tablename__ = "odds_snapshots"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    bet_market_id: Mapped[int] = mapped_column(
+        ForeignKey("bet_markets.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    option_key: Mapped[str] = mapped_column(String(120), nullable=False)
+    odds: Mapped[float] = mapped_column(Float, nullable=False)
+    captured_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
+
+
 class LeaderboardEntry(Base, TimestampMixin):
     """Read-optimized aggregate, rewritten wholesale by the settlement service after every
     scoring run. Never hand-edited — this is a materialized view of Prediction.points_awarded,

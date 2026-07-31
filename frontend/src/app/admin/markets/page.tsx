@@ -12,6 +12,7 @@ import {
   Coins,
   Crosshair,
   Eye,
+  Gavel,
   Loader2,
   Mic2,
   PlusCircle,
@@ -36,10 +37,11 @@ import {
 } from "@/components/ui/dialog";
 import { TournamentChips } from "@/components/admin/tournament-chips";
 import { LoadingState, EmptyState } from "@/components/query-state";
-import { BET_TYPE_LABELS } from "@/components/betting/market-card";
+import { BET_TYPE_LABELS, MOTION_CATEGORY_OPTIONS } from "@/components/betting/market-card";
+import { OptionPicker } from "@/components/ui/option-picker";
 import { cn } from "@/lib/utils";
 import { formatTokens } from "@/lib/format";
-import type { BetMarket, BetType, BreakCategory } from "@/lib/api/types";
+import type { BetMarket, BetType, BreakCategory, MotionCategory } from "@/lib/api/types";
 
 interface BetTypeOption {
   value: BetType;
@@ -94,6 +96,13 @@ const BET_TYPES: BetTypeOption[] = [
     label: "Enfrentamiento directo en sala",
     hint: "Qué equipo queda arriba del otro en la misma sala — con apuesta específica opcional al puesto exacto",
     icon: Crosshair,
+    needsRound: true,
+  },
+  {
+    value: "motion_type",
+    label: "Tipo de moción",
+    hint: "Categoría de la moción (manual CMUDE §2.7) — pago fijo 5x, apuesta mínima 20 tokens. Cargá la categoría real en la ronda ANTES de que salga la moción en el draw.",
+    icon: Gavel,
     needsRound: true,
   },
 ];
@@ -436,6 +445,47 @@ function ManageMarkets({ tournamentId }: { tournamentId: string }) {
   );
 }
 
+/** Loads the round's motion-category GROUND TRUTH for the motion_type market -- separate from
+ * creating the market itself, and separate from the public round data (never shown here or
+ * anywhere else: see backend RoundMotionCategoryOut's docstring for why). Must be set BEFORE
+ * the motion is revealed in the draw; there's no read-back beyond this session's own toast
+ * confirmation by design -- this is a write done fresh right before each round's reveal, not a
+ * value that needs recalling later. */
+function MotionCategoryLoader({
+  roundId,
+  roundName,
+}: {
+  roundId: string;
+  roundName: string | undefined;
+}) {
+  const [category, setCategory] = useState<string | null>(null);
+  const mutation = useMutation({
+    mutationFn: (value: MotionCategory) => api.admin.setRoundMotionCategory(roundId, value),
+    onSuccess: () => toast.success(`Categoría real cargada para ${roundName ?? "la ronda"}`),
+    onError: (err) =>
+      toast.error(err instanceof ApiError ? err.detail : "Error al cargar la categoría"),
+  });
+
+  return (
+    <Field label="Categoría real de la moción (antes del draw)">
+      <p className="text-xs text-muted-foreground">
+        Solo vos ves esto -- nunca se expone en la API pública. Cargala apenas la sepa el Equipo
+        de Adjudicación, siempre antes de que la moción salga en el draw.
+      </p>
+      <OptionPicker
+        options={MOTION_CATEGORY_OPTIONS}
+        value={category}
+        onChange={(v) => {
+          setCategory(v);
+          if (v) mutation.mutate(v as MotionCategory);
+        }}
+        placeholder="Buscar categoría…"
+      />
+      {mutation.isPending && <p className="text-xs text-muted-foreground">Guardando…</p>}
+    </Field>
+  );
+}
+
 export default function AdminMarketsPage() {
   const queryClient = useQueryClient();
   const [tournamentId, setTournamentId] = useState<string | null>(null);
@@ -596,6 +646,10 @@ export default function AdminMarketsPage() {
                   )}
                 </div>
               </Field>
+            )}
+
+            {form.bet_type === "motion_type" && form.target_round_id && (
+              <MotionCategoryLoader roundId={form.target_round_id} roundName={roundName} />
             )}
 
             {selectedType?.needsBreakCategory && (

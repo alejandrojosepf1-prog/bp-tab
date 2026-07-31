@@ -120,6 +120,11 @@ def _round_head_to_head(payload: dict, outcome: dict) -> bool:
     )
 
 
+def _motion_type(payload: dict, outcome: dict) -> bool:
+    predicted = payload.get("category")
+    return predicted is not None and predicted == outcome.get("motion_category")
+
+
 _STRATEGIES: dict[BetType, Callable[[dict, dict], bool]] = {
     BetType.CHAMPION: _champion,
     BetType.TOP_N_BREAK: _top_n_break,
@@ -132,6 +137,7 @@ _STRATEGIES: dict[BetType, Callable[[dict, dict], bool]] = {
     BetType.TOP_SPEAKER_POSITION: _top_speaker_position,
     BetType.TEAM_BREAK: _team_break,
     BetType.ROUND_HEAD_TO_HEAD: _round_head_to_head,
+    BetType.MOTION_TYPE: _motion_type,
 }
 
 
@@ -171,6 +177,17 @@ def did_sub_bet_win(bet_type: BetType, payload: dict, outcome: dict) -> bool:
             "exact_points"
         ] == points_by_team.get(team_id)
         return rank_ok and points_ok
+
+    if bet_type == BetType.ROUND_WINNER:
+        # Only speaker_order settles here -- ROUND_WINNER's other modifier, speaker_scores,
+        # is the deferred family and is never routed through this function (see
+        # betting_service._SAME_TIMING_SUB_BET_KEYS_BY_TYPE).
+        order = sub_bet.get("speaker_order")
+        if not order or order.get("speaker_id") is None:
+            return False
+        return outcome.get("speaker_positions", {}).get(order["speaker_id"]) == order.get(
+            "position"
+        )
 
     return False
 

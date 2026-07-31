@@ -115,3 +115,13 @@ class OddsQuoteOut(BaseModel):
     # Priced only when payload has a "sub_bet" key and this bet_type supports one -- see
     # app.services.odds_service.quote_sub_bet_odds. None otherwise.
     sub_bet_odds: float | None = None
+
+
+class OddsHistoryPointOut(BaseModel):
+    option_key: str
+    odds: float
+    captured_at: datetime.datetime
+
+
+class OddsHistoryOut(BaseModel):
+    points: list[OddsHistoryPointOut]

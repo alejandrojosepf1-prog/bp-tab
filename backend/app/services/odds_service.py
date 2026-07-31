@@ -13,6 +13,7 @@ tracks -- nothing here invents a new stat:
 """
 
 import asyncio
+import datetime
 from collections import defaultdict
 from dataclasses import dataclass
 
@@ -38,6 +39,7 @@ from app.models import (
     Debate,
     DebateTeam,
     Institution,
+    OddsSnapshot,
     Prediction,
     Round,
     Speaker,
@@ -45,7 +47,7 @@ from app.models import (
     Team,
     TeamBreakCategory,
 )
-from app.models.enums import BetType, PredictionStatus, RoundStage
+from app.models.enums import BetMarketStatus, BetType, MotionCategory, PredictionStatus, RoundStage
 from app.services.break_service import team_break_exact_rank_probability, team_break_probability
 from app.services.ranking_service import get_standings
 
@@ -74,6 +76,26 @@ DEFAULT_EXACT_POINTS_SUB_BET_ODDS = 8.0
 # admin-tunable pattern (no historical distribution of speaker scores to build a real
 # probability from either).
 DEFAULT_SPEAKER_POINTS_SUB_BET_ODDS = 15.0
+
+# round_winner's OTHER optional modifier: which of the team's two speakers opens the bench (see
+# betting_service._settle_prediction_payout -- unlike speaker_scores above, this one settles in
+# the SAME instant as the base pick, since SpeakerRole is known the moment the round is judged,
+# never withheld like exact point totals). A binary pick with no tracked signal on which speaker
+# a team sends first, so -- same flat-admin-tunable pattern as every other sub-bet here -- it
+# prices at the fair no-vig coin-flip, matching how this book prices every other zero-information
+# 50/50 (see test_odds_move_with_the_pool_as_stakes_come_in: an unbacked 2-way pick is exactly
+# 2.0, not shaved).
+DEFAULT_SPEAKER_ORDER_SUB_BET_ODDS = 2.0
+
+
+# MOTION_TYPE is the one bet type in this whole book priced OUTSIDE the pari-mutuel-with-seed
+# model (see module docstring) -- a flat, fixed payout, deliberately NOT blended against the
+# pool. Anti-exploit: 9 MotionCategory options and a payout below 9x means covering every
+# option is mathematically a guaranteed loss no matter how stakes are split across them (total
+# cost >= 9 * min stake, best-case single payout = 5 * that same stake) -- see
+# app.services.betting_service.MOTION_TYPE_MIN_STAKE for the second half of that guard (keeps
+# the market meaningful and gives headroom if this multiplier ever needs to move).
+MOTION_TYPE_FIXED_ODDS = 5.0
 
 
 class UnpriceableMarketError(Exception):
@@ -811,6 +833,14 @@ async def quote_odds(
         )
         return pari_mutuel_odds(candidate_stake, market_stake, prior)
 
+    if bet_type == BetType.MOTION_TYPE:
+        # No pool blending at all (see MOTION_TYPE_FIXED_ODDS) -- every category always prices
+        # at the same flat multiplier, staked or not.
+        category = payload.get("category")
+        if category not in {c.value for c in MotionCategory}:
+            raise ValueError(f"unknown motion category {category!r}")
+        return MOTION_TYPE_FIXED_ODDS
+
     raise ValueError(f"no odds pricing implemented for bet type {bet_type!r}")
 
 
@@ -886,17 +916,35 @@ async def quote_sub_bet_odds(
         return rank_odds
 
     if bet_type == BetType.ROUND_WINNER:
-        # CalicoTab/Tabbycat never publishes per-speaker scores for an elimination out-round
-        # (only advanced/not-advanced) -- so a speaker-points sub-bet placed there could never
-        # resolve. `_advancing_count` already answers "is this debate's round elimination?"
-        # (None for preliminary, a number for elimination) for the base pick's own pricing, so
-        # reuse it here instead of a second round-stage lookup.
+        # CalicoTab/Tabbycat never publishes per-speaker data for an elimination out-round (only
+        # advanced/not-advanced) -- so NEITHER speaker modifier placed there could ever resolve.
+        # `_advancing_count` already answers "is this debate's round elimination?" (None for
+        # preliminary, a number for elimination) for the base pick's own pricing, so reuse it
+        # here instead of a second round-stage lookup.
         debate_id = payload.get("debate_id")
         if debate_id is not None and (await _advancing_count(session, debate_id)) is not None:
             raise ValueError(
-                "no se apuesta a puntos de oradores en rondas eliminatorias -- el tab no "
-                "puntúa oradores ahí"
+                "no se apuesta a datos de oradores en rondas eliminatorias -- el tab no "
+                "publica esa información ahí"
             )
+
+        # Two independent modifier kinds share this one bet_type's sub_bet slot -- speaker_order
+        # (same-timing, see DEFAULT_SPEAKER_ORDER_SUB_BET_ODDS) and speaker_scores (deferred, see
+        # DEFAULT_SPEAKER_POINTS_SUB_BET_ODDS below) -- never both at once on the same prediction.
+        speaker_order = sub_bet.get("speaker_order")
+        if speaker_order is not None:
+            if "team_ids" in payload:
+                raise ValueError(
+                    "sub_bet.speaker_order solo aplica a una apuesta por un equipo, no a la "
+                    "pareja que avanza"
+                )
+            if speaker_order.get("speaker_id") is None or speaker_order.get("position") not in (
+                1,
+                2,
+            ):
+                raise ValueError("sub_bet.speaker_order necesita speaker_id y position (1 o 2)")
+            return DEFAULT_SPEAKER_ORDER_SUB_BET_ODDS
+
         # Deferred family (see betting_service.settle_pending_sub_bets) -- no pool blending and
         # no per-payload probability model at all, just like DEFAULT_EXACT_POINTS_SUB_BET_ODDS
         # above; the shape is still validated here so a malformed sub_bet fails fast at quote
@@ -945,6 +993,18 @@ _BOARD_MAX_UNSTAKED_OPTIONS = 12
 MAX_SPEAKER_POSITION = 10
 
 _POSITION_LABELS = {i: f"{i}º" for i in range(1, MAX_SPEAKER_POSITION + 1)}
+
+_MOTION_CATEGORY_LABELS = {
+    MotionCategory.POLICY: "Política (“Esta Casa haría...”)",
+    MotionCategory.POLICY_SHOULD: "Política-debería (“ECCQ...debería”)",
+    MotionCategory.VALUE_JUDGMENT: "Análisis (“Esta Casa considera que...”)",
+    MotionCategory.SUPPORT_OPPOSE: "Apoya / se opone",
+    MotionCategory.REGRET: "Lamenta",
+    MotionCategory.PREFERENCE: "Prefiere",
+    MotionCategory.PREDICTION: "Predice",
+    MotionCategory.HOPE: "Espera",
+    MotionCategory.ACTOR: "Actor (“Esta Casa, siendo...”)",
+}
 
 
 async def _speaker_position_probabilities(
@@ -995,6 +1055,12 @@ def format_payload_label(
         return f"{name} rompe", emoji
     if bet_type == BetType.BEST_INSTITUTION:
         return payload.get("institution_code") or "—", None
+    if bet_type == BetType.MOTION_TYPE:
+        category = payload.get("category")
+        try:
+            return _MOTION_CATEGORY_LABELS[MotionCategory(category)], None
+        except ValueError:
+            return category or "—", None
     if bet_type == BetType.HEAD_TO_HEAD:
         winner, emoji = team(payload.get("predicted_winner_id"))
         a, _ = team(payload.get("team_a_id"))
@@ -1015,6 +1081,13 @@ def format_payload_label(
                 if e.get("points") is not None
             )
             return f"{name} gana su debate + oradores hacen {points} pts", emoji
+        order = sub_bet.get("speaker_order")
+        if order and order.get("speaker_id") is not None:
+            speaker_name = speaker_names.get(
+                order["speaker_id"], f"Speaker {order['speaker_id']}"
+            )
+            position_label = "1º" if order.get("position") == 1 else "2º"
+            return f"{name} gana su debate + {speaker_name} es {position_label} orador", emoji
         return f"{name} gana su debate", emoji
     if bet_type in (BetType.TOP_N_BREAK, BetType.ROUND_FULL_CALL):
         names = " → ".join(team(tid)[0] for tid in payload.get("team_ids", []))
@@ -1432,6 +1505,23 @@ async def market_board(session: AsyncSession, bet_market: BetMarket) -> MarketBo
             )
         return MarketBoard(pool_total=pool_total, bettors=bettors, options=options)
 
+    if bet_type == BetType.MOTION_TYPE:
+        # Always all 9 categories, staked or not -- unlike every pari-mutuel board above, there's
+        # no "unstaked options are noise" case to trim (MOTION_TYPE_FIXED_ODDS never moves).
+        stake_by, backers_by = _stakes_by(lambda p: p.get("category"))
+        for category in MotionCategory:
+            options.append(
+                MarketBoardOption(
+                    key=f"category:{category.value}",
+                    label=_MOTION_CATEGORY_LABELS.get(category, category.value),
+                    emoji=None,
+                    stake=round(stake_by.get(category.value, 0.0), 2),
+                    backers=backers_by.get(category.value, 0),
+                    odds=MOTION_TYPE_FIXED_ODDS,
+                )
+            )
+        return MarketBoard(pool_total=pool_total, bettors=bettors, options=options)
+
     # Remaining bet types have no enumerable candidate field (their options are whatever
     # payload combinations people actually staked), so the board lists the staked picks and
     # prices each one -- see `_generic_fallback_options` for how this avoids re-fetching power
@@ -1482,3 +1572,38 @@ async def market_board(session: AsyncSession, bet_market: BetMarket) -> MarketBo
         )
     options.sort(key=lambda o: -o.stake)
     return MarketBoard(pool_total=pool_total, bettors=bettors, options=options)
+
+
+async def capture_odds_snapshot(session: AsyncSession, tournament_id: int) -> int:
+    """Writes one OddsSnapshot row per option of every currently-OPEN bet market in this
+    tournament, timestamped now. Called once per autoscrape cycle (see `app.tasks.autoscrape`),
+    NOT from the board/quote endpoints themselves -- those run on every page view/keystroke and
+    would flood the table instead of sampling on a steady ~3min clock. Returns rows written, for
+    the caller's log line. Caller commits."""
+    captured_at = datetime.datetime.now(datetime.timezone.utc)
+    markets = (
+        (
+            await session.execute(
+                select(BetMarket).where(
+                    BetMarket.tournament_id == tournament_id,
+                    BetMarket.status == BetMarketStatus.OPEN,
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    count = 0
+    for market in markets:
+        board = await market_board(session, market)
+        for option in board.options:
+            session.add(
+                OddsSnapshot(
+                    bet_market_id=market.id,
+                    option_key=option.key,
+                    odds=option.odds,
+                    captured_at=captured_at,
+                )
+            )
+            count += 1
+    return count

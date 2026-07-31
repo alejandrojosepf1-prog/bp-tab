@@ -5,7 +5,7 @@ Alembic autogenerate / ``create_all`` and (b) callers can simply do ``from app i
 """
 
 from app.db.base import Base
-from app.models.betting import BetMarket, LeaderboardEntry, Prediction, User
+from app.models.betting import BetMarket, LeaderboardEntry, OddsSnapshot, Prediction, User
 from app.models.breaks import AdjudicatorBreak, Break, BreakPrediction
 from app.models.participants import (
     Adjudicator,
@@ -29,6 +29,7 @@ from app.models.rounds import (
 )
 from app.models.scraping import ChangeEvent, ScrapeLog
 from app.models.tournament import Tournament
+from app.models.transactions import Transaction
 
 __all__ = [
     "Base",
@@ -55,8 +56,10 @@ __all__ = [
     "BetMarket",
     "Prediction",
     "LeaderboardEntry",
+    "OddsSnapshot",
     "PrizeEvent",
     "PrizeEntry",
     "ScrapeLog",
     "ChangeEvent",
+    "Transaction",
 ]

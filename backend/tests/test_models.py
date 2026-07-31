@@ -31,6 +31,8 @@ def test_all_domain_tables_are_registered() -> None:
         "change_events",
         "prize_events",
         "prize_entries",
+        "odds_snapshots",
+        "transactions",
     }
     assert expected == set(Base.metadata.tables.keys())
 

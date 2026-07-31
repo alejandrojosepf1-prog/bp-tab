@@ -20,6 +20,7 @@ from app.api.routers import (
     rounds,
     standings,
     tournaments,
+    transfers,
 )
 from app.core.config import get_settings
 from app.tasks.autoscrape import autoscrape_loop
@@ -90,6 +91,7 @@ app.include_router(leaderboard.router, prefix=API_PREFIX)
 app.include_router(dashboard.router, prefix=API_PREFIX)
 app.include_router(prizes.router, prefix=API_PREFIX)
 app.include_router(admin.router, prefix=API_PREFIX)
+app.include_router(transfers.router, prefix=API_PREFIX)
 
 
 @app.get("/health", tags=["health"])

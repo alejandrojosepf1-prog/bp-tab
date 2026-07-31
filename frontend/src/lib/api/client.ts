@@ -14,6 +14,11 @@ import type {
   LeaderboardEntry,
   LoginResponse,
   MarketBoard,
+  MotionCategory,
+  OddsHistory,
+  RoundMotionCategory,
+  Transaction,
+  UserSummary,
   MyPrediction,
   OddsQuote,
   PendingEliminationDebate,
@@ -122,6 +127,13 @@ export const api = {
       post<LoginResponse>("/auth/login", data),
     me: () => get<User>("/auth/me"),
     myPredictions: () => get<MyPrediction[]>("/auth/me/predictions"),
+    users: () => get<UserSummary[]>("/auth/users"),
+  },
+
+  transfers: {
+    create: (data: { recipient_id: number; amount: number; note?: string }) =>
+      post<{ sent: Transaction }>("/transfers", data),
+    myTransfers: () => get<Transaction[]>("/transfers/me"),
   },
 
   tournaments: {
@@ -230,6 +242,8 @@ export const api = {
       post<{ settled: boolean }>(`/bet-markets/${marketId}/settle`, data ?? {}),
     board: (marketId: number | string) =>
       get<MarketBoard>(`/bet-markets/${marketId}/board`),
+    oddsHistory: (marketId: number | string) =>
+      get<OddsHistory>(`/bet-markets/${marketId}/odds-history`),
     // A user can hold one OPEN prediction PER entity within a market (one per debate/slot/team),
     // not one per market -- see backend app.services.betting_service._entity_key.
     myPredictions: (marketId: number | string) =>
@@ -294,6 +308,12 @@ export const api = {
     ) => post<{ status: string }>(`/admin/debates/${debateId}/manual-result`, data),
     gameEconomy: (tournamentId?: number | string) =>
       get<GameEconomy>(`/admin/game-economy${qs({ tournament_id: tournamentId })}`),
+    // Ground truth for the motion_type market -- deliberately admin-only, never on the public
+    // round schema (it would leak the answer before the motion is revealed).
+    setRoundMotionCategory: (roundId: number | string, motionCategory: MotionCategory | null) =>
+      patch<RoundMotionCategory>(`/admin/rounds/${roundId}/motion-category`, {
+        motion_category: motionCategory,
+      }),
   },
 };
 

@@ -9,6 +9,7 @@ from app.api.schemas.auth import (
     RegisterRequest,
     TokenResponse,
     UserOut,
+    UserSummaryOut,
 )
 from app.core.security import create_access_token, hash_password, verify_password
 from app.db.session import get_db
@@ -63,6 +64,21 @@ async def login(payload: LoginRequest, session: AsyncSession = Depends(get_db)) 
 @router.get("/me", response_model=UserOut)
 async def me(current_user: User = Depends(get_current_user)) -> User:
     return current_user
+
+
+@router.get("/users", response_model=list[UserSummaryOut])
+async def list_users(
+    session: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> list[User]:
+    """Every other active user, id + display name only -- backs the P2P transfer recipient
+    picker (see UserSummaryOut's docstring). Any authenticated user, not just admins."""
+    stmt = (
+        select(User)
+        .where(User.is_active.is_(True), User.id != current_user.id)
+        .order_by(User.display_name)
+    )
+    return list((await session.execute(stmt)).scalars().all())
 
 
 @router.get("/me/predictions", response_model=list[MyPredictionOut])

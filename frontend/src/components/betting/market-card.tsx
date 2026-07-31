@@ -14,12 +14,14 @@ import { OptionPicker } from "@/components/ui/option-picker";
 import { CountdownBadge } from "@/components/ui/countdown-badge";
 import { LoadingState } from "@/components/query-state";
 import { MotionPanel } from "@/components/tournament/motion-panel";
+import { OddsSparkline } from "@/components/betting/odds-sparkline";
 import { cn } from "@/lib/utils";
 import { formatTokens } from "@/lib/format";
 import type {
   BetMarket,
   BetType,
   Institution,
+  OddsHistoryPoint,
   Prediction,
   Round,
   Speaker,
@@ -42,7 +44,23 @@ export const BET_TYPE_LABELS: Record<string, string> = {
   best_institution: "Mejor institución",
   // "Par exacto que avanza" ahora es una modalidad DENTRO de round_winner, no un bet_type propio.
   round_advancing_pair: "Par exacto que avanza (eliminatorias)",
+  motion_type: "Tipo de moción",
 };
+
+/** CMUDE 2026 manual §2.7 -- mirrors backend app.models.enums.MotionCategory / odds_service's
+ * _MOTION_CATEGORY_LABELS. Static and fixed (unlike every other picker's options, these never
+ * come from the API): there are always exactly these 9, known before any tournament exists. */
+export const MOTION_CATEGORY_OPTIONS: { value: string; label: string; hint: string }[] = [
+  { value: "policy", label: "Política", hint: "“Esta Casa [haría X]”" },
+  { value: "policy_should", label: "Política-debería", hint: "“ECCQ [X] debería...”" },
+  { value: "value_judgment", label: "Análisis", hint: "“Esta Casa considera que [X]”" },
+  { value: "support_oppose", label: "Apoya / se opone", hint: "“EC apoya / se opone a [X]”" },
+  { value: "regret", label: "Lamenta", hint: "“Esta Casa lamenta [X]”" },
+  { value: "preference", label: "Prefiere", hint: "“Esta Casa prefiere [X]”" },
+  { value: "prediction", label: "Predice", hint: "“Esta Casa predice [X]”" },
+  { value: "hope", label: "Espera", hint: "“Esta Casa Espera [X]”" },
+  { value: "actor", label: "Actor", hint: "“Esta Casa, siendo [A], haría [X]”" },
+];
 
 const MARKET_STATUS_LABEL: Record<string, string> = {
   open: "Abierto",
@@ -110,6 +128,24 @@ function MarketBoardTable({ marketId }: { marketId: number }) {
     staleTime: 10_000,
     refetchInterval: 30_000,
   });
+  // Historia persistida (ver backend app.services.odds_service.capture_odds_snapshot), distinta
+  // del board de arriba: se refresca más lento porque una nueva muestra solo aparece cada ciclo
+  // de autoscrape (~3min), no tiene sentido pedirla cada 30s como el board en vivo.
+  const { data: history } = useQuery({
+    queryKey: queryKeys.oddsHistory(marketId),
+    queryFn: () => api.betMarkets.oddsHistory(marketId),
+    staleTime: 60_000,
+    refetchInterval: 120_000,
+  });
+  const historyByOption = useMemo(() => {
+    const grouped = new Map<string, OddsHistoryPoint[]>();
+    for (const point of history?.points ?? []) {
+      const existing = grouped.get(point.option_key);
+      if (existing) existing.push(point);
+      else grouped.set(point.option_key, [point]);
+    }
+    return grouped;
+  }, [history]);
 
   if (isLoading) return <LoadingState label="Cargando mercado…" />;
   if (!board) return null;
@@ -136,6 +172,9 @@ function MarketBoardTable({ marketId }: { marketId: number }) {
                 </th>
                 <th className="px-2.5 py-1.5 text-right font-medium">Apostado</th>
                 <th className="px-2.5 py-1.5 text-right font-medium">Cuota</th>
+                <th className="hidden px-2.5 py-1.5 text-right font-medium md:table-cell">
+                  Tendencia
+                </th>
                 <th className="hidden px-2.5 py-1.5 text-right font-medium sm:table-cell">
                   100 tokens pagan
                 </th>
@@ -167,6 +206,9 @@ function MarketBoardTable({ marketId }: { marketId: number }) {
                   </td>
                   <td className="px-2.5 py-1.5 text-right font-mono font-semibold text-primary">
                     {option.odds.toFixed(2)}x
+                  </td>
+                  <td className="hidden px-2.5 py-1.5 text-right md:table-cell">
+                    <OddsSparkline points={historyByOption.get(option.key) ?? []} />
                   </td>
                   <td className="hidden px-2.5 py-1.5 text-right font-mono text-xs text-muted-foreground sm:table-cell">
                     {formatTokens(option.odds * 100)}
@@ -280,6 +322,26 @@ function InstitutionPick({ institutions, existingPayload, onPayloadChange }: Pic
         onPayloadChange({ institution_code: v });
       }}
       placeholder="Buscar institución…"
+    />
+  );
+}
+
+/** Pago fijo (ver backend odds_service.MOTION_TYPE_FIXED_ODDS), apuesta mínima aplicada en el
+ * backend (place_prediction) -- acá solo se elige la categoría, un pick por mercado como
+ * cualquier otro mercado de elección única (champion, best_institution, ...). */
+function MotionTypePick({ existingPayload, onPayloadChange }: PickerProps) {
+  const [category, setCategory] = useState<string | null>(
+    typeof existingPayload?.category === "string" ? existingPayload.category : null
+  );
+  return (
+    <OptionPicker
+      options={MOTION_CATEGORY_OPTIONS}
+      value={category}
+      onChange={(v) => {
+        setCategory(v);
+        onPayloadChange({ category: v });
+      }}
+      placeholder="Buscar tipo de moción…"
     />
   );
 }
@@ -523,6 +585,10 @@ function RoundWinnerPick({
   const [pairTeamIds, setPairTeamIds] = useState<number[]>([]);
   const [subBetOpen, setSubBetOpen] = useState(false);
   const [speakerPoints, setSpeakerPoints] = useState<Record<number, string>>({});
+  // Alternativa al sub-bet de puntos exactos -- mismo slot único de sub_bet en el payload (ver
+  // Prediction.sub_bet_* en el backend), así que es uno u otro, nunca los dos a la vez.
+  const [subBetMode, setSubBetMode] = useState<"points" | "order">("points");
+  const [orderSpeakerId, setOrderSpeakerId] = useState<number | null>(null);
   const { round, debates, isElimination } = useRoundDebates(tournamentId, market);
   const selectedDebate = debates.find((d) => String(d.id) === debateId);
   const selectedTeam = selectedDebate?.teams.find((dt) => dt.team.id === teamId)?.team;
@@ -560,7 +626,9 @@ function RoundWinnerPick({
     debate: string | null,
     team: number | null,
     open: boolean,
-    points: Record<number, string>
+    points: Record<number, string>,
+    mode: "points" | "order" = subBetMode,
+    orderSpeaker: number | null = orderSpeakerId
   ) {
     if (!debate || !team) {
       onPayloadChange(null);
@@ -568,13 +636,25 @@ function RoundWinnerPick({
     }
     const payload: Record<string, unknown> = { debate_id: Number(debate), team_id: team };
     if (open && selectedTeam) {
-      const entries = selectedTeam.speakers.map((s) => {
-        const raw = points[s.id];
-        const value = raw !== undefined && raw !== "" ? Number(raw) : null;
-        return { speaker_id: s.id, points: value };
-      });
-      if (entries.length === 2 && entries.every((e) => e.points !== null && Number.isFinite(e.points))) {
-        payload.sub_bet = { speaker_scores: entries };
+      if (mode === "order") {
+        // Predicción binaria: qué orador de la bancada habla 1º -- el otro es 2º por descarte,
+        // así que basta con un speaker_id + position (siempre 1 acá, ver backend
+        // odds_service.quote_sub_bet_odds para el shape completo).
+        if (orderSpeaker != null) {
+          payload.sub_bet = { speaker_order: { speaker_id: orderSpeaker, position: 1 } };
+        }
+      } else {
+        const entries = selectedTeam.speakers.map((s) => {
+          const raw = points[s.id];
+          const value = raw !== undefined && raw !== "" ? Number(raw) : null;
+          return { speaker_id: s.id, points: value };
+        });
+        if (
+          entries.length === 2 &&
+          entries.every((e) => e.points !== null && Number.isFinite(e.points))
+        ) {
+          payload.sub_bet = { speaker_scores: entries };
+        }
       }
     }
     onPayloadChange(payload);
@@ -641,6 +721,8 @@ function RoundWinnerPick({
           setPairTeamIds([]);
           setSubBetOpen(false);
           setSpeakerPoints({});
+          setSubBetMode("points");
+          setOrderSpeakerId(null);
           onPayloadChange(null);
         }}
         placeholder="Buscar sala o equipo…"
@@ -670,6 +752,8 @@ function RoundWinnerPick({
               setTeamId(null);
               setSubBetOpen(false);
               setSpeakerPoints({});
+              setSubBetMode("points");
+              setOrderSpeakerId(null);
               onPayloadChange(null);
             }}
           >
@@ -751,6 +835,8 @@ function RoundWinnerPick({
                   setTeamId(dt.team.id);
                   setSubBetOpen(false);
                   setSpeakerPoints({});
+                  setSubBetMode("points");
+                  setOrderSpeakerId(null);
                   onPayloadChange({ debate_id: Number(debateId), team_id: dt.team.id });
                 }}
                 className={cn(
@@ -784,7 +870,7 @@ function RoundWinnerPick({
             onClick={() => {
               const next = !subBetOpen;
               setSubBetOpen(next);
-              emit(debateId, teamId, next, speakerPoints);
+              emit(debateId, teamId, next, speakerPoints, subBetMode, orderSpeakerId);
             }}
             className="w-fit text-xs font-medium text-primary hover:underline"
           >
@@ -792,34 +878,91 @@ function RoundWinnerPick({
           </button>
           {subBetOpen && (
             <>
-              <p className="text-xs text-muted-foreground">
-                Bono si además acertás los puntos EXACTOS de los dos oradores de{" "}
-                {selectedTeam.name} en este debate. La apuesta base se cobra apenas se sabe quién
-                ganó la ronda, sin esperar esto — el bono se liquida aparte, más adelante (a
-                veces recién al final del torneo, cuando el tab libera los puntajes), y solo
-                SUMA: nunca te quita lo que ya cobraste.
-              </p>
-              <div className="flex flex-wrap items-end gap-3">
-                {selectedTeam.speakers.map((speaker) => (
-                  <div key={speaker.id} className="flex flex-col gap-1">
-                    <span className="text-[0.7rem] uppercase tracking-wider text-muted-foreground">
-                      {speaker.name}
-                    </span>
-                    <Input
-                      type="number"
-                      step="0.1"
-                      placeholder="76.5"
-                      className="h-8 w-24 font-mono"
-                      value={speakerPoints[speaker.id] ?? ""}
-                      onChange={(e) => {
-                        const next = { ...speakerPoints, [speaker.id]: e.target.value };
-                        setSpeakerPoints(next);
-                        emit(debateId, teamId, subBetOpen, next);
-                      }}
-                    />
-                  </div>
-                ))}
+              <div className="flex gap-1.5">
+                <Button
+                  type="button"
+                  size="sm"
+                  variant={subBetMode === "points" ? "default" : "outline"}
+                  onClick={() => {
+                    setSubBetMode("points");
+                    emit(debateId, teamId, subBetOpen, speakerPoints, "points", orderSpeakerId);
+                  }}
+                >
+                  Puntos exactos
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant={subBetMode === "order" ? "default" : "outline"}
+                  onClick={() => {
+                    setSubBetMode("order");
+                    emit(debateId, teamId, subBetOpen, speakerPoints, "order", orderSpeakerId);
+                  }}
+                >
+                  Orden de oradores
+                </Button>
               </div>
+              {subBetMode === "order" ? (
+                <>
+                  <p className="text-xs text-muted-foreground">
+                    Bono si además acertás quién habla 1º en la bancada de {selectedTeam.name} en
+                    este debate (el otro orador cierra 2º). Misma liquidación que arriba: la
+                    apuesta base se cobra apenas se sabe quién ganó la ronda, este bono se liquida
+                    en el mismo momento y solo SUMA.
+                  </p>
+                  <div className="flex flex-wrap gap-2">
+                    {selectedTeam.speakers.map((speaker) => (
+                      <button
+                        key={speaker.id}
+                        type="button"
+                        onClick={() => {
+                          setOrderSpeakerId(speaker.id);
+                          emit(debateId, teamId, subBetOpen, speakerPoints, "order", speaker.id);
+                        }}
+                        className={cn(
+                          "rounded-lg border px-3 py-1.5 text-sm transition-colors",
+                          orderSpeakerId === speaker.id
+                            ? "border-primary/50 bg-primary/10 text-primary"
+                            : "border-border bg-card hover:border-primary/50 hover:bg-primary/10"
+                        )}
+                      >
+                        {speaker.name} es 1º orador
+                      </button>
+                    ))}
+                  </div>
+                </>
+              ) : (
+                <>
+                  <p className="text-xs text-muted-foreground">
+                    Bono si además acertás los puntos EXACTOS de los dos oradores de{" "}
+                    {selectedTeam.name} en este debate. La apuesta base se cobra apenas se sabe quién
+                    ganó la ronda, sin esperar esto — el bono se liquida aparte, más adelante (a
+                    veces recién al final del torneo, cuando el tab libera los puntajes), y solo
+                    SUMA: nunca te quita lo que ya cobraste.
+                  </p>
+                  <div className="flex flex-wrap items-end gap-3">
+                    {selectedTeam.speakers.map((speaker) => (
+                      <div key={speaker.id} className="flex flex-col gap-1">
+                        <span className="text-[0.7rem] uppercase tracking-wider text-muted-foreground">
+                          {speaker.name}
+                        </span>
+                        <Input
+                          type="number"
+                          step="0.1"
+                          placeholder="76.5"
+                          className="h-8 w-24 font-mono"
+                          value={speakerPoints[speaker.id] ?? ""}
+                          onChange={(e) => {
+                            const next = { ...speakerPoints, [speaker.id]: e.target.value };
+                            setSpeakerPoints(next);
+                            emit(debateId, teamId, subBetOpen, next, "points", orderSpeakerId);
+                          }}
+                        />
+                      </div>
+                    ))}
+                  </div>
+                </>
+              )}
             </>
           )}
         </div>
@@ -1566,6 +1709,9 @@ export function MarketCard({
       break;
     case "round_head_to_head":
       picker = <HeadToHeadRoomPick {...pickerProps} />;
+      break;
+    case "motion_type":
+      picker = <MotionTypePick {...pickerProps} />;
       break;
     case "round_advancing_pair":
       // Folded into round_winner's own "team_ids" pair-mode payload -- never routed here for

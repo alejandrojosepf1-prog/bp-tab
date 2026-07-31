@@ -20,9 +20,26 @@ import asyncio
 import logging
 
 from app.core.config import get_settings
+from app.db.session import AsyncSessionLocal
+from app.services.odds_service import capture_odds_snapshot
 from app.tasks.scrape_tasks import scrape_all_active_tournaments_async, scrape_tournament_async
 
 logger = logging.getLogger(__name__)
+
+
+async def _snapshot_odds(tournament_id: int) -> None:
+    """Odds-history sampling piggybacks on the same cycle as the scrape (see module docstring
+    for why this loop, not Celery beat, is what actually runs in production) -- one snapshot per
+    tournament per ~scrape_interval_seconds, same cadence the board/chart data itself refreshes
+    at. A failure here must not affect scraping, which already happened by the time this runs."""
+    async with AsyncSessionLocal() as session:
+        try:
+            count = await capture_odds_snapshot(session, tournament_id)
+            await session.commit()
+            logger.debug("autoscrape: captured %d odds snapshot rows for tournament %s", count, tournament_id)
+        except Exception:
+            await session.rollback()
+            logger.exception("autoscrape: odds snapshot failed for tournament %s", tournament_id)
 
 
 async def _run_one_cycle() -> None:
@@ -38,6 +55,7 @@ async def _run_one_cycle() -> None:
             # One tournament failing (upstream 500, tab taken offline, schema change...) must
             # never stop the others, nor kill the loop -- the next cycle simply retries.
             logger.exception("autoscrape: tournament %s failed", tournament_id)
+        await _snapshot_odds(tournament_id)
 
 
 async def autoscrape_loop() -> None:

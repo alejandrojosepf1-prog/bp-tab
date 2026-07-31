@@ -2,7 +2,7 @@ import datetime
 
 from pydantic import BaseModel, ConfigDict, model_validator
 
-from app.models.enums import ScrapeStatus, ScrapeStrategy, UserRole
+from app.models.enums import MotionCategory, ScrapeStatus, ScrapeStrategy, UserRole
 
 
 class ScrapeLogOut(BaseModel):
@@ -55,6 +55,19 @@ class ManualEliminationResultIn(BaseModel):
                 "provide exactly one of champion_team_id or advancing_team_ids"
             )
         return self
+
+
+class RoundMotionCategoryPatch(BaseModel):
+    motion_category: MotionCategory | None = None
+
+
+class RoundMotionCategoryOut(BaseModel):
+    """Admin-only view of a round's motion-category ground truth -- deliberately separate from
+    the public RoundOut schema, which never exposes this field (it would leak the answer to the
+    MOTION_TYPE market before the motion is revealed)."""
+
+    round_id: int
+    motion_category: MotionCategory | None
 
 
 class MarketPayoutSpreadOut(BaseModel):

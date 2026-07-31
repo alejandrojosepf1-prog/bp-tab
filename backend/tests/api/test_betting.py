@@ -18,6 +18,7 @@ from app.models import (
 )
 from app.models.enums import (
     BPPosition,
+    MotionCategory,
     RoundStage,
     RoundStatus,
     SpeakerRole,
@@ -377,6 +378,50 @@ async def test_odds_move_with_the_pool_as_stakes_come_in(
     # ...and lengthen `other_team`'s price (all the real money is against it now).
     assert team_quote.json()["odds"] < 2.0
     assert other_team_quote.json()["odds"] > 2.0
+
+
+async def test_odds_history_captures_and_serves_snapshots(
+    client: AsyncClient, db_session: AsyncSession
+) -> None:
+    """capture_odds_snapshot (called once per autoscrape cycle in production, see
+    app.tasks.autoscrape) writes one row per option; the history endpoint serves them back
+    scoped to this market and ordered by time. A market with no captures yet returns an empty
+    list rather than erroring."""
+    tournament, team, _other_team = await _make_tournament_with_team(db_session)
+    admin = await make_user(db_session, email="admin-history@example.com", role=UserRole.ADMIN)
+    alice = await make_user(db_session, email="alice-history@example.com")
+
+    create_response = await client.post(
+        f"/api/v1/tournaments/{tournament.id}/bet-markets",
+        json={
+            "bet_type": "champion",
+            "label": "Who wins it all?",
+            "opens_at": PAST.isoformat(),
+            "closes_at": FUTURE.isoformat(),
+        },
+        headers=auth_headers(admin),
+    )
+    market_id = create_response.json()["id"]
+
+    empty_history = await client.get(f"/api/v1/bet-markets/{market_id}/odds-history")
+    assert empty_history.json()["points"] == []
+
+    await client.post(
+        f"/api/v1/bet-markets/{market_id}/predictions",
+        json={"payload": {"team_id": team.id}, "stake_amount": 10.0},
+        headers=auth_headers(alice),
+    )
+
+    from app.services.odds_service import capture_odds_snapshot
+
+    written = await capture_odds_snapshot(db_session, tournament.id)
+    await db_session.commit()
+    assert written > 0
+
+    history = await client.get(f"/api/v1/bet-markets/{market_id}/odds-history")
+    points = history.json()["points"]
+    assert points
+    assert any(p["option_key"] == f"team:{team.id}" for p in points)
 
 
 async def test_champion_market_creation_rejected_once_tournament_has_started(
@@ -1025,3 +1070,267 @@ async def test_round_winner_speaker_points_sub_bet_pays_base_immediately_and_sta
     # The base pick already paid in full -- the sub-bet is still awaiting real speaker points.
     assert settled_prediction["sub_bet_status"] == "open"
     assert settled_prediction["sub_bet_points_awarded"] is None
+
+
+async def test_round_winner_speaker_order_sub_bet_settles_same_time_as_base(
+    client: AsyncClient, db_session: AsyncSession
+) -> None:
+    """Unlike speaker_scores above, round_winner's OTHER modifier -- speaker_order, "who opens
+    this team's bench" -- is known the instant the round is judged (SpeakerRole, unlike a raw
+    score, is never withheld), so it settles in the SAME /settle call as the base pick, not
+    later via settle_pending_sub_bets."""
+    tournament, round_1, debate, teams = await _make_full_call_debate(db_session)
+    winning_team = teams[0]
+    winning_debate_team = (
+        await db_session.execute(
+            select(DebateTeam).where(
+                DebateTeam.debate_id == debate.id, DebateTeam.team_id == winning_team.id
+            )
+        )
+    ).scalar_one()
+    speakers = [
+        Speaker(tournament_id=tournament.id, team_id=winning_team.id, name=f"Speaker {i}")
+        for i in (1, 2)
+    ]
+    db_session.add_all(speakers)
+    await db_session.flush()
+    db_session.add_all(
+        [
+            SpeakerScore(
+                debate_team_id=winning_debate_team.id,
+                speaker_id=speakers[0].id,
+                role=SpeakerRole.PM,
+                score=76.0,
+            ),
+            SpeakerScore(
+                debate_team_id=winning_debate_team.id,
+                speaker_id=speakers[1].id,
+                role=SpeakerRole.DPM,
+                score=75.0,
+            ),
+        ]
+    )
+    await db_session.commit()
+
+    admin = await make_user(db_session, email="admin-rwo@example.com", role=UserRole.ADMIN)
+    user = await make_user(db_session, email="user-rwo@example.com")
+
+    create_response = await client.post(
+        f"/api/v1/tournaments/{tournament.id}/bet-markets",
+        json={
+            "bet_type": "round_winner",
+            "label": "Round 1 winners",
+            "opens_at": PAST.isoformat(),
+            "closes_at": FUTURE.isoformat(),
+            "target_round_id": round_1.id,
+        },
+        headers=auth_headers(admin),
+    )
+    market_id = create_response.json()["id"]
+
+    payload = {
+        "debate_id": debate.id,
+        "team_id": winning_team.id,
+        "sub_bet": {"speaker_order": {"speaker_id": speakers[0].id, "position": 1}},
+    }
+    quote = await client.post(
+        f"/api/v1/bet-markets/{market_id}/quote",
+        json={"payload": payload},
+        headers=auth_headers(user),
+    )
+    assert quote.status_code == 200
+    assert quote.json()["sub_bet_odds"] == 2.0
+
+    prediction_response = await client.post(
+        f"/api/v1/bet-markets/{market_id}/predictions",
+        json={"payload": payload, "stake_amount": 10.0},
+        headers=auth_headers(user),
+    )
+    assert prediction_response.status_code == 201
+
+    for team, rank in zip(teams, [1, 2, 3, 4], strict=True):
+        row = (
+            await db_session.execute(
+                select(DebateTeam).where(
+                    DebateTeam.debate_id == debate.id, DebateTeam.team_id == team.id
+                )
+            )
+        ).scalar_one()
+        row.rank_in_debate = rank
+    await db_session.commit()
+
+    settle_response = await client.post(
+        f"/api/v1/bet-markets/{market_id}/settle", json={}, headers=auth_headers(admin)
+    )
+    assert settle_response.status_code == 200
+    assert settle_response.json() == {"settled": True}
+
+    after = await client.get(
+        f"/api/v1/bet-markets/{market_id}/predictions/me", headers=auth_headers(user)
+    )
+    settled_prediction = after.json()[0]
+    # Both the base pick (team won) and the sub-bet (speakers[0] really was PM, position 1)
+    # are correct -- and, unlike the deferred speaker_scores test above, this resolves in the
+    # SAME settle call: sub_bet_status is already "settled", not left "open".
+    assert settled_prediction["status"] == "settled"
+    assert settled_prediction["sub_bet_status"] == "settled"
+    expected_payout = 10.0 * settled_prediction["odds"] * settled_prediction["sub_bet_odds"]
+    assert settled_prediction["points_awarded"] == pytest.approx(expected_payout)
+    assert settled_prediction["sub_bet_points_awarded"] == pytest.approx(expected_payout)
+
+
+async def test_motion_type_fixed_odds_min_stake_and_premature_settlement_guard(
+    client: AsyncClient, db_session: AsyncSession
+) -> None:
+    """MOTION_TYPE is the one bet type priced outside pari-mutuel: fixed 5x regardless of stake,
+    a minimum stake per pick, and settlement gated on BOTH the admin-loaded ground truth AND the
+    motion actually being revealed (motion_text) -- loading the category alone must never let
+    the very next settle call pay out before debaters even see the motion."""
+    tournament, _team, _other_team = await _make_tournament_with_team(db_session)
+    round_1 = Round(
+        tournament_id=tournament.id,
+        seq=1,
+        name="Round 1",
+        stage=RoundStage.PRELIMINARY,
+        status=RoundStatus.RELEASED,
+    )
+    db_session.add(round_1)
+    await db_session.commit()
+    await db_session.refresh(round_1)
+
+    admin = await make_user(db_session, email="admin-motion@example.com", role=UserRole.ADMIN)
+    user = await make_user(db_session, email="user-motion@example.com")
+    # Captured once: a 422 response rolls back the app's own session, which expires these ORM
+    # objects -- re-touching `user.id`/`admin.id` afterward (as auth_headers does) then fails
+    # with MissingGreenlet outside the request's own async context. Reusing the same headers
+    # dicts sidesteps that entirely.
+    admin_headers = auth_headers(admin)
+    user_headers = auth_headers(user)
+
+    create_response = await client.post(
+        f"/api/v1/tournaments/{tournament.id}/bet-markets",
+        json={
+            "bet_type": "motion_type",
+            "label": "Tipo de moción Ronda 1",
+            "opens_at": PAST.isoformat(),
+            "closes_at": FUTURE.isoformat(),
+            "target_round_id": round_1.id,
+        },
+        headers=admin_headers,
+    )
+    assert create_response.status_code == 201
+    market_id = create_response.json()["id"]
+
+    # Fixed odds: always 5.0x, no pool blending, before or after other stakes exist.
+    quote = await client.post(
+        f"/api/v1/bet-markets/{market_id}/quote",
+        json={"payload": {"category": "policy"}},
+        headers=user_headers,
+    )
+    assert quote.status_code == 200
+    assert quote.json()["odds"] == 5.0
+
+    # Anti-exploit: a stake under the minimum is rejected outright.
+    too_small = await client.post(
+        f"/api/v1/bet-markets/{market_id}/predictions",
+        json={"payload": {"category": "policy"}, "stake_amount": 5.0},
+        headers=user_headers,
+    )
+    assert too_small.status_code == 422
+
+    prediction_response = await client.post(
+        f"/api/v1/bet-markets/{market_id}/predictions",
+        json={"payload": {"category": "policy"}, "stake_amount": 20.0},
+        headers=user_headers,
+    )
+    assert prediction_response.status_code == 201
+    assert prediction_response.json()["odds"] == 5.0
+
+    # Neither settling with no ground truth loaded, nor with it loaded but the motion still
+    # unrevealed (motion_text still null), is allowed to pay out.
+    settle_before = await client.post(
+        f"/api/v1/bet-markets/{market_id}/settle", json={}, headers=admin_headers
+    )
+    assert settle_before.json() == {"settled": False}
+
+    load_answer = await client.patch(
+        f"/api/v1/admin/rounds/{round_1.id}/motion-category",
+        json={"motion_category": "policy"},
+        headers=admin_headers,
+    )
+    assert load_answer.status_code == 200
+    assert load_answer.json()["motion_category"] == "policy"
+
+    settle_before_reveal = await client.post(
+        f"/api/v1/bet-markets/{market_id}/settle", json={}, headers=admin_headers
+    )
+    assert settle_before_reveal.json() == {
+        "settled": False
+    }  # ground truth loaded, but motion not yet revealed
+
+    round_1.motion_text = "Esta Casa prohibiría la publicidad dirigida a menores de edad"
+    await db_session.commit()
+
+    settle_after_reveal = await client.post(
+        f"/api/v1/bet-markets/{market_id}/settle", json={}, headers=admin_headers
+    )
+    assert settle_after_reveal.json() == {"settled": True}
+
+    after = await client.get(
+        f"/api/v1/bet-markets/{market_id}/predictions/me", headers=user_headers
+    )
+    settled_prediction = after.json()[0]
+    assert settled_prediction["status"] == "settled"
+    assert settled_prediction["points_awarded"] == pytest.approx(20.0 * 5.0)
+
+
+async def test_motion_type_wrong_category_loses(
+    client: AsyncClient, db_session: AsyncSession
+) -> None:
+    tournament, _team, _other_team = await _make_tournament_with_team(db_session)
+    round_1 = Round(
+        tournament_id=tournament.id,
+        seq=1,
+        name="Round 1",
+        stage=RoundStage.PRELIMINARY,
+        status=RoundStatus.RELEASED,
+        motion_category=MotionCategory.REGRET,
+        motion_text="Esta Casa lamenta el auge de la cultura del sexo casual",
+    )
+    db_session.add(round_1)
+    await db_session.commit()
+    await db_session.refresh(round_1)
+
+    admin = await make_user(db_session, email="admin-motion2@example.com", role=UserRole.ADMIN)
+    user = await make_user(db_session, email="user-motion2@example.com")
+
+    create_response = await client.post(
+        f"/api/v1/tournaments/{tournament.id}/bet-markets",
+        json={
+            "bet_type": "motion_type",
+            "label": "Tipo de moción Ronda 1",
+            "opens_at": PAST.isoformat(),
+            "closes_at": FUTURE.isoformat(),
+            "target_round_id": round_1.id,
+        },
+        headers=auth_headers(admin),
+    )
+    market_id = create_response.json()["id"]
+
+    await client.post(
+        f"/api/v1/bet-markets/{market_id}/predictions",
+        json={"payload": {"category": "policy"}, "stake_amount": 20.0},
+        headers=auth_headers(user),
+    )
+
+    settle_response = await client.post(
+        f"/api/v1/bet-markets/{market_id}/settle", json={}, headers=auth_headers(admin)
+    )
+    assert settle_response.json() == {"settled": True}
+
+    after = await client.get(
+        f"/api/v1/bet-markets/{market_id}/predictions/me", headers=auth_headers(user)
+    )
+    settled_prediction = after.json()[0]
+    assert settled_prediction["status"] == "settled"
+    assert settled_prediction["points_awarded"] == 0.0

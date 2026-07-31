@@ -11,6 +11,8 @@ from app.api.schemas.betting import (
     BetMarketPatch,
     MarketBoardOptionOut,
     MarketBoardOut,
+    OddsHistoryOut,
+    OddsHistoryPointOut,
     OddsQuoteOut,
     OddsQuoteRequest,
     PredictionCreate,
@@ -19,7 +21,7 @@ from app.api.schemas.betting import (
     SettleResponse,
 )
 from app.db.session import get_db
-from app.models import BetMarket, Prediction, Round, Tournament, User
+from app.models import BetMarket, OddsSnapshot, Prediction, Round, Tournament, User
 from app.models.enums import BetMarketStatus
 from app.services.betting_service import (
     InsufficientBalanceError,
@@ -36,6 +38,10 @@ from app.services.odds_service import (
     quote_odds,
     quote_sub_bet_odds,
 )
+
+# How far back the "evolución de cuotas" chart looks -- long enough to cover a tournament phase
+# (a full day of prelims) without the payload growing unbounded on a market left open for weeks.
+ODDS_HISTORY_WINDOW_HOURS = 24
 
 router = APIRouter(tags=["betting"])
 
@@ -222,6 +228,34 @@ async def get_bet_market_board(
             )
             for o in board.options
         ],
+    )
+
+
+@router.get("/bet-markets/{market_id}/odds-history", response_model=OddsHistoryOut)
+async def get_bet_market_odds_history(
+    market_id: int, session: AsyncSession = Depends(get_db)
+) -> OddsHistoryOut:
+    """Persisted odds-over-time for this market's chart -- distinct from `/board`'s live number,
+    this is the sampled history written every autoscrape cycle by
+    `app.services.odds_service.capture_odds_snapshot`. Public, same as `/board`. Points come back
+    unsorted-by-option (mixed option_keys in one list, ordered by time) -- the frontend groups by
+    `option_key` to draw one line per option."""
+    await _get_market_or_404(session, market_id)
+    since = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(
+        hours=ODDS_HISTORY_WINDOW_HOURS
+    )
+    rows = (
+        await session.execute(
+            select(OddsSnapshot)
+            .where(OddsSnapshot.bet_market_id == market_id, OddsSnapshot.captured_at >= since)
+            .order_by(OddsSnapshot.captured_at)
+        )
+    ).scalars().all()
+    return OddsHistoryOut(
+        points=[
+            OddsHistoryPointOut(option_key=r.option_key, odds=r.odds, captured_at=r.captured_at)
+            for r in rows
+        ]
     )
 
 

@@ -18,6 +18,18 @@ class UserOut(BaseModel):
     created_at: datetime.datetime
 
 
+class UserSummaryOut(BaseModel):
+    """Minimal, low-privacy-risk view of another user -- id + display name only, no email/role/
+    balance. Backs the P2P transfer recipient picker (GET /auth/users): every authenticated user
+    can see who else is on this private, friends-only platform, but not their wallet or account
+    details (that's UserOut, admin-only via GET /admin/users)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    display_name: str
+
+
 class MyPredictionOut(BaseModel):
     """A user's prediction joined with enough market/tournament context to render a bet
     history without extra round-trips."""

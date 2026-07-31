@@ -34,6 +34,7 @@ from app.models import (
     Institution,
     LeaderboardEntry,
     Prediction,
+    Round,
     SpeakerScore,
     Team,
     Tournament,
@@ -43,10 +44,17 @@ from app.models.betting import BetMarket
 from app.models.enums import (
     BetMarketStatus,
     BetType,
+    MotionCategory,
     PredictionStatus,
     RoundStage,
+    SpeakerRole,
     TournamentStatus,
 )
+
+# Standard BP roles for the FIRST speaker of a bench (PM/LO/MG/MO); the other role in each pair
+# (DPM/DLO/GW/OW) is the second. Used to answer round_winner's speaker_order sub-bet -- "who
+# opens the bench" -- straight from data already recorded for every judged debate, no new column.
+_FIRST_SPEAKER_ROLES = {SpeakerRole.PM, SpeakerRole.LO, SpeakerRole.MG, SpeakerRole.MO}
 from app.repositories.upsert import upsert_by_natural_key
 from app.services.odds_service import MAX_SPEAKER_POSITION, quote_odds, quote_sub_bet_odds
 from app.services.ranking_service import (
@@ -74,12 +82,20 @@ CREATABLE_BET_TYPES = (
     BetType.TOP_SPEAKER_POSITION,
     BetType.TEAM_BREAK,
     BetType.ROUND_HEAD_TO_HEAD,
+    BetType.MOTION_TYPE,
 )
+
+# Minimum stake on a single MOTION_TYPE pick -- second half of the anti-exploit guard alongside
+# odds_service.MOTION_TYPE_FIXED_ODDS (5x on 9 categories already makes covering all of them a
+# guaranteed loss on its own; this keeps the market meaningful against microbet spam and gives
+# headroom if the multiplier ever needs to move without silently reopening that arbitrage).
+MOTION_TYPE_MIN_STAKE = 20.0
 
 _ROUND_SCOPED_BET_TYPES = {
     BetType.ROUND_WINNER,
     BetType.ROUND_FULL_CALL,
     BetType.ROUND_HEAD_TO_HEAD,
+    BetType.MOTION_TYPE,
 }
 
 # Round-scoped types that can NEVER resolve against an elimination round. Tabbycat only records
@@ -104,6 +120,13 @@ _SAME_TIMING_SUB_BET_TYPES = {BetType.ROUND_HEAD_TO_HEAD, BetType.TEAM_BREAK}
 # placement time -- see place_prediction) and resolves separately via `settle_pending_sub_bets`,
 # crediting an ADDITIONAL bonus on top of the base payout that already happened.
 _DEFERRED_SUB_BET_TYPES = {BetType.ROUND_WINNER}
+
+# ROUND_WINNER hosts TWO independent modifier kinds sharing one sub_bet slot (see
+# odds_service.quote_sub_bet_odds's ROUND_WINNER branch): speaker_scores is the deferred one
+# above, but speaker_order is known the instant this round is judged -- same moment as the base
+# pick -- so it settles same-timing like _SAME_TIMING_SUB_BET_TYPES. bet_type alone can't tell
+# the two apart; this is checked by which key is actually present in the sub_bet payload.
+_SAME_TIMING_SUB_BET_KEYS_BY_TYPE = {BetType.ROUND_WINNER: "speaker_order"}
 
 
 class InsufficientBalanceError(Exception):
@@ -236,6 +259,10 @@ async def place_prediction(
     """
     if stake_amount <= 0:
         raise ValueError("stake_amount must be positive")
+    if bet_market.bet_type == BetType.MOTION_TYPE and stake_amount < MOTION_TYPE_MIN_STAKE:
+        raise ValueError(
+            f"la apuesta mínima para tipo de moción es {MOTION_TYPE_MIN_STAKE:.0f} tokens"
+        )
 
     odds = await quote_odds(session, bet_market, payload, exclude_user_id=user.id)
     # None whenever payload has no "sub_bet" key or this bet_type has no modifier support --
@@ -406,6 +433,19 @@ async def build_market_outcome(session: AsyncSession, bet_market: BetMarket) -> 
             "break_points_by_team": points_by_team,
         }
 
+    if bet_market.bet_type == BetType.MOTION_TYPE:
+        if bet_market.target_round_id is None:
+            return None
+        round_ = await session.get(Round, bet_market.target_round_id)
+        # Gated on BOTH the admin-loaded ground truth AND the motion actually being revealed
+        # (motion_text only gets set by the scraper once the tab publishes it) -- settling as
+        # soon as an admin loads motion_category, before the reveal, would auto-pay this market
+        # on the very next scrape cycle while it's still open for new bets. Same "never infer
+        # 'final' from partial/early data" lesson as TOP_SPEAKER_POSITION's gate above.
+        if round_ is None or round_.motion_category is None or round_.motion_text is None:
+            return None
+        return {"motion_category": round_.motion_category.value}
+
     return (
         None  # BREAKOUT_TEAM needs a manual outcome; HEAD_TO_HEAD/ROUND_WINNER/ROUND_FULL_CALL
         # are per-prediction (see build_prediction_specific_outcome)
@@ -432,6 +472,24 @@ async def _advancing_outcome(session: AsyncSession, debate_id: int) -> dict | No
     if not advancing_team_ids:
         return None
     return {"debate_id": debate_id, "advancing_team_ids": advancing_team_ids}
+
+
+async def _speaker_positions_for_team(
+    session: AsyncSession, debate_id: int, team_id: int
+) -> dict[int, int]:
+    """{speaker_id: 1 or 2} for this team's bench in this debate, straight from the SpeakerRole
+    already recorded on each SpeakerScore -- answers round_winner's speaker_order sub-bet
+    (see domain.bet_outcomes.did_sub_bet_win) without a new column. Empty if the debate hasn't
+    been judged yet; eliminations never reach here with a real sub-bet to check regardless,
+    since quote_sub_bet_odds already refuses to price one there."""
+    rows = (
+        await session.execute(
+            select(SpeakerScore.speaker_id, SpeakerScore.role)
+            .join(DebateTeam, SpeakerScore.debate_team_id == DebateTeam.id)
+            .where(DebateTeam.debate_id == debate_id, DebateTeam.team_id == team_id)
+        )
+    ).all()
+    return {speaker_id: (1 if role in _FIRST_SPEAKER_ROLES else 2) for speaker_id, role in rows}
 
 
 async def build_prediction_specific_outcome(
@@ -463,7 +521,13 @@ async def build_prediction_specific_outcome(
             return None
         ranked_winner = next((team_id for rank, _advanced, team_id in rows if rank == 1), None)
         if ranked_winner is not None:
-            return {"debate_id": debate_id, "winning_team_id": ranked_winner}
+            outcome: dict = {"debate_id": debate_id, "winning_team_id": ranked_winner}
+            picked_team_id = payload.get("team_id")
+            if picked_team_id is not None:
+                outcome["speaker_positions"] = await _speaker_positions_for_team(
+                    session, debate_id, picked_team_id
+                )
+            return outcome
         # Elimination fallback: no preliminary-style 1st-4th ranking exists for this debate --
         # see manual_results_service.apply_manual_advancing_teams, which records ONLY
         # advanced/not-advanced for a non-final out-round (BP eliminations advance 2 of 4
@@ -551,7 +615,12 @@ def _settle_prediction_payout(bet_type: BetType, prediction: Prediction, outcome
     sub_bet_payload = prediction.payload.get("sub_bet")
     has_sub_bet = bool(sub_bet_payload) and prediction.sub_bet_odds is not None
 
-    if has_sub_bet and bet_type in _DEFERRED_SUB_BET_TYPES:
+    same_timing_key = _SAME_TIMING_SUB_BET_KEYS_BY_TYPE.get(bet_type)
+    is_same_timing_override = (
+        has_sub_bet and same_timing_key is not None and same_timing_key in sub_bet_payload
+    )
+
+    if has_sub_bet and bet_type in _DEFERRED_SUB_BET_TYPES and not is_same_timing_override:
         # The base pays on its own right now, independent of the sub-bet -- see
         # settle_pending_sub_bets for how the modifier resolves later. A losing base pick makes
         # the modifier moot forever (there's no "this team's speakers scored X" to check if this
@@ -564,7 +633,9 @@ def _settle_prediction_payout(bet_type: BetType, prediction: Prediction, outcome
             prediction.sub_bet_points_awarded = 0.0
         return prediction.stake_amount * prediction.odds if won else 0.0
 
-    if not has_sub_bet or bet_type not in _SAME_TIMING_SUB_BET_TYPES:
+    if not has_sub_bet or not (
+        bet_type in _SAME_TIMING_SUB_BET_TYPES or is_same_timing_override
+    ):
         return prediction.stake_amount * prediction.odds if won else 0.0
 
     if not won:

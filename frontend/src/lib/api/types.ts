@@ -232,6 +232,7 @@ export type BetType =
   | "top_speaker_position"
   | "team_break"
   | "round_head_to_head"
+  | "motion_type"
   // Retired from the admin "create market" UI (see backend app.models.enums.BetType) but kept
   // here since a market created before the redesign could still be open/settled.
   | "top_n_break"
@@ -283,6 +284,50 @@ export interface OddsQuote {
   // Priced only when the quoted payload has a "sub_bet" key and the bet_type supports one --
   // see backend app.services.odds_service.quote_sub_bet_odds. null otherwise.
   sub_bet_odds: number | null;
+}
+
+export interface UserSummary {
+  id: number;
+  display_name: string;
+}
+
+export type TransactionType = "transfer_out" | "transfer_in";
+
+export interface Transaction {
+  id: number;
+  type: TransactionType;
+  amount: number;
+  balance_after: number;
+  note: string | null;
+  counterparty_user_id: number | null;
+  counterparty_display_name: string | null;
+  created_at: string;
+}
+
+export type MotionCategory =
+  | "policy"
+  | "policy_should"
+  | "value_judgment"
+  | "support_oppose"
+  | "regret"
+  | "preference"
+  | "prediction"
+  | "hope"
+  | "actor";
+
+export interface RoundMotionCategory {
+  round_id: number;
+  motion_category: MotionCategory | null;
+}
+
+export interface OddsHistoryPoint {
+  option_key: string;
+  odds: number;
+  captured_at: string;
+}
+
+export interface OddsHistory {
+  points: OddsHistoryPoint[];
 }
 
 export type PredictionStatus = "open" | "locked" | "settled";

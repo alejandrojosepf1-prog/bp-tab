@@ -63,6 +63,23 @@ class UserRole(str, enum.Enum):
     USER = "user"
 
 
+class MotionCategory(str, enum.Enum):
+    """CMUDE 2026 manual §2.7 taxonomy for what KIND of motion a round's is, independent of the
+    motion's actual text/topic. Ground truth is loaded onto `Round.motion_category` by an admin
+    BEFORE the motion is revealed (the committee already knows it); `MOTION_TYPE` bets guess
+    which of these 9 it'll turn out to be."""
+
+    POLICY = "policy"  # "Esta Casa [haría X]"
+    POLICY_SHOULD = "policy_should"  # "Esta Casa considera que [X] debería..."
+    VALUE_JUDGMENT = "value_judgment"  # "Esta Casa considera que [X]" (análisis)
+    SUPPORT_OPPOSE = "support_oppose"  # "Esta Casa apoya / se opone a [X]"
+    REGRET = "regret"  # "Esta Casa lamenta [X]"
+    PREFERENCE = "preference"  # "Esta Casa prefiere [X]"
+    PREDICTION = "prediction"  # "Esta Casa predice [X]"
+    HOPE = "hope"  # "Esta Casa Espera [X]"
+    ACTOR = "actor"  # "Esta Casa, siendo [A], haría [X]"
+
+
 class BetType(str, enum.Enum):
     CHAMPION = "champion"
     ROUND_WINNER = "round_winner"
@@ -73,6 +90,9 @@ class BetType(str, enum.Enum):
     # retired global HEAD_TO_HEAD below (which compared final tournament standings, not a
     # specific drawn room). Round-scoped like ROUND_WINNER/ROUND_FULL_CALL.
     ROUND_HEAD_TO_HEAD = "round_head_to_head"
+    # Guess the round's MotionCategory before the motion is revealed -- fixed-odds (not
+    # pari-mutuel, see odds_service.MOTION_TYPE_FIXED_ODDS), unlike every bet type above.
+    MOTION_TYPE = "motion_type"
 
     # Retired from the admin "create market" UI in favor of the five types above, but kept as
     # valid enum members -- and their pricing/settlement code kept working -- so any market of
@@ -134,3 +154,13 @@ class PrizeEventType(str, enum.Enum):
 class PrizeEventStatus(str, enum.Enum):
     OPEN = "open"
     RESOLVED = "resolved"
+
+
+class TransactionType(str, enum.Enum):
+    """Ledger entry kind for app.models.transactions.Transaction. A P2P transfer always writes
+    TWO rows (one per side) so `SELECT ... WHERE user_id = X` alone reconstructs that user's full
+    history -- no join needed to see "who sent me what." Deliberately scoped to transfers only
+    for now (see Transaction's docstring): stake/payout/prize movements don't write here yet."""
+
+    TRANSFER_OUT = "transfer_out"
+    TRANSFER_IN = "transfer_in"

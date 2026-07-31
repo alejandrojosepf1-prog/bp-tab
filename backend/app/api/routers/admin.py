@@ -10,11 +10,13 @@ from app.api.schemas.admin import (
     MarketPayoutSpreadOut,
     PendingEliminationDebateOut,
     PendingEliminationTeamOut,
+    RoundMotionCategoryOut,
+    RoundMotionCategoryPatch,
     ScrapeLogOut,
 )
 from app.api.schemas.auth import UserOut
 from app.db.session import get_db
-from app.models import BetMarket, ScrapeLog, User
+from app.models import BetMarket, Round, ScrapeLog, User
 from app.models.enums import BetMarketStatus
 from app.services.game_economy_service import compute_game_economy, compute_market_payout_spread
 from app.services.manual_results_service import (
@@ -126,6 +128,22 @@ async def get_game_economy(
         payout_spread_worst_case_total=sum(s.worst_case for s in spreads),
         payout_spread_best_case_total=sum(s.best_case for s in spreads),
     )
+
+
+@router.patch("/rounds/{round_id}/motion-category", response_model=RoundMotionCategoryOut)
+async def set_round_motion_category(
+    round_id: int, payload: RoundMotionCategoryPatch, session: AsyncSession = Depends(get_db)
+) -> RoundMotionCategoryOut:
+    """Loads (or clears) the round's motion-category ground truth for the MOTION_TYPE market --
+    meant to be filled in BEFORE the motion is revealed to debaters, from the same info the
+    Equipo de Adjudicación already has. Never returned by any public endpoint; see
+    RoundMotionCategoryOut's docstring."""
+    round_ = await session.get(Round, round_id)
+    if round_ is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Round not found")
+    round_.motion_category = payload.motion_category
+    await session.commit()
+    return RoundMotionCategoryOut(round_id=round_.id, motion_category=round_.motion_category)
 
 
 @router.post("/debates/{debate_id}/manual-result")

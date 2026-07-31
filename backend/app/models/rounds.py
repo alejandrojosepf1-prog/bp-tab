@@ -6,6 +6,7 @@ from app.models.enums import (
     BPPosition,
     DebateStatus,
     JudgeRole,
+    MotionCategory,
     RoundStage,
     RoundStatus,
     SpeakerRole,
@@ -33,6 +34,12 @@ class Round(Base, TournamentScopedMixin, TimestampMixin):
     # after the debate is over -- useless for anyone deciding a bet).
     motion_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     info_slide: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Ground truth for the MOTION_TYPE bet market, loaded by an admin BEFORE the motion is
+    # revealed (see app.api.routers.admin's motion-category endpoint) -- deliberately NEVER
+    # exposed on the public RoundOut schema, or the market would just be reading the answer off
+    # the API. build_market_outcome additionally gates settlement on motion_text being non-null
+    # too, so the market can never auto-settle before the motion is actually announced.
+    motion_category: Mapped[MotionCategory | None] = mapped_column(nullable=True)
 
     debates = relationship("Debate", back_populates="round", order_by="Debate.external_id")
 
