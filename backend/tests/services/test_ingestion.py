@@ -303,3 +303,66 @@ async def test_ingest_reingest_of_general_break_category_is_still_a_no_op(db_ses
         )
     ).scalar_one()
     assert events_after == events_before  # the backfill produced no spurious changes
+
+
+async def test_ingest_draw_attaches_the_round_motion_when_one_is_already_published(
+    db_session,
+) -> None:
+    """Regression: an out-round in progress is created via the draw page (_ingest_draw), NOT
+    _ingest_rounds -- it isn't in the results nav yet, which is the whole reason _ingest_draw
+    exists. CalicoTab publishes a round's motion on /motions/ before its results page appears
+    (that's the point of an elimination round's motion being visible to bettors before the
+    debate), but _ingest_draw's upsert never looked at snapshot.motions at all, so a live
+    out-round's motion stayed null in the DB even though the tab already had it -- confirmed
+    against the real CMUDE 2026 tab, where Octavos de Final's motion was live but our API kept
+    returning motion_text: null for that round."""
+    from app.models import Round
+    from app.scraper.dtos import (
+        ScrapedDraw,
+        ScrapedDrawDebate,
+        ScrapedDrawTeamEntry,
+        ScrapedMotion,
+        ScrapedTeam,
+    )
+
+    tournament = await _make_tournament(db_session)
+    snapshot = TournamentSnapshot(
+        teams=(
+            ScrapedTeam(external_id=1, name="Team A", emoji=None),
+            ScrapedTeam(external_id=2, name="Team B", emoji=None),
+            ScrapedTeam(external_id=3, name="Team C", emoji=None),
+            ScrapedTeam(external_id=4, name="Team D", emoji=None),
+        ),
+        draw=ScrapedDraw(
+            round_name="Octavos de Final",
+            debates=(
+                ScrapedDrawDebate(
+                    room_name="S-1",
+                    teams=(
+                        ScrapedDrawTeamEntry(1, "Team A", BPPosition.OPENING_GOVERNMENT),
+                        ScrapedDrawTeamEntry(2, "Team B", BPPosition.OPENING_OPPOSITION),
+                        ScrapedDrawTeamEntry(3, "Team C", BPPosition.CLOSING_GOVERNMENT),
+                        ScrapedDrawTeamEntry(4, "Team D", BPPosition.CLOSING_OPPOSITION),
+                    ),
+                ),
+            ),
+        ),
+        motions=(
+            ScrapedMotion(
+                round_name="Octavos de Final",
+                motion_text="EC prioritizes X over Y",
+                info_slide=None,
+            ),
+        ),
+    )
+
+    service = IngestionService(db_session)
+    await service.ingest(tournament, snapshot)
+    await db_session.commit()
+
+    round_row = (
+        await db_session.execute(
+            select(Round).filter_by(tournament_id=tournament.id, name="Octavos de Final")
+        )
+    ).scalar_one()
+    assert round_row.motion_text == "EC prioritizes X over Y"

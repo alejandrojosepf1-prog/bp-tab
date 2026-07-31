@@ -404,15 +404,33 @@ class IngestionService:
                 seq = existing_by_name
 
         is_elimination = any(kw in draw.round_name.lower() for kw in _ELIMINATION_KEYWORDS)
+        values = {
+            "name": draw.round_name,
+            "stage": RoundStage.ELIMINATION if is_elimination else RoundStage.PRELIMINARY,
+            "status": RoundStatus.RELEASED,
+        }
+        # An out-round in progress is exactly the case _ingest_rounds never sees: it's not in
+        # the results nav yet (that's why this method exists at all), but CalicoTab publishes
+        # its motion on /motions/ before results appear -- see ScrapedMotion's docstring. Without
+        # this, a round created here only ever picked up its motion later, once results existed
+        # and _ingest_rounds ran for it -- i.e. after the debate that motion was FOR was over.
+        motion = next(
+            (
+                m
+                for m in snapshot.motions
+                if " ".join(m.round_name.split()).casefold()
+                == " ".join(draw.round_name.split()).casefold()
+            ),
+            None,
+        )
+        if motion is not None:
+            values["motion_text"] = motion.motion_text
+            values["info_slide"] = motion.info_slide
         round_result = await upsert_by_natural_key(
             self.session,
             Round,
             lookup={"tournament_id": tournament.id, "seq": seq},
-            values={
-                "name": draw.round_name,
-                "stage": RoundStage.ELIMINATION if is_elimination else RoundStage.PRELIMINARY,
-                "status": RoundStatus.RELEASED,
-            },
+            values=values,
         )
         await self._track(tournament.id, "Round", round_result)
         round_id = round_result.instance.id
