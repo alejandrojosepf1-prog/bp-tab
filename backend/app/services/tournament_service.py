@@ -136,20 +136,29 @@ async def _has_any_judged_result(
 async def _final_round_champion(session: AsyncSession, final_round: Round) -> int | None:
     """The Grand Final is a single debate; its winner is the champion, once judged.
 
+    `final_round` here just means "the highest-seq ELIMINATION round ingested so far" -- until
+    the real Grand Final has actually been drawn, that's an earlier out-round instead (octos,
+    quarters, semis), which has MULTIPLE debates with 2-of-4 teams `advanced == True` per room.
+    Querying those the single-champion way below would find 2+ matching rows and blow up
+    `scalar_one_or_none()`, so this only proceeds once the round has settled down to exactly the
+    Grand Final's one debate.
+
     Finals published with public ballots rank the winner `rank_in_debate == 1`; the more common
     case (elimination rounds don't get public ballots -- see parsers.py) instead marks the winner
     via `advanced == True` ("Advancing" vs. "Eliminated"). Exactly one of the two signals is
     populated per debate, never both, so combining them with `or_` is unambiguous.
     """
-    debate = (
-        await session.execute(select(Debate).where(Debate.round_id == final_round.id).limit(1))
-    ).scalar_one_or_none()
-    if debate is None:
+    debate_ids = (
+        (await session.execute(select(Debate.id).where(Debate.round_id == final_round.id)))
+        .scalars()
+        .all()
+    )
+    if len(debate_ids) != 1:
         return None
     return (
         await session.execute(
             select(DebateTeam.team_id).where(
-                DebateTeam.debate_id == debate.id,
+                DebateTeam.debate_id == debate_ids[0],
                 or_(DebateTeam.rank_in_debate == 1, DebateTeam.advanced.is_(True)),
             )
         )
