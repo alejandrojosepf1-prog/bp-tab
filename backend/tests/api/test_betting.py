@@ -685,6 +685,99 @@ async def test_top_speaker_position_quote_and_place_via_api(
     assert invalid_position.status_code == 422
 
 
+async def test_top_speaker_position_prices_from_team_points_when_scores_are_withheld(
+    client: AsyncClient, db_session: AsyncSession
+) -> None:
+    """Regression for the live pricing bug: CMUDE (like most tabs) withholds EVERY speaker score
+    until the tournament ends, so the old SpeakerScore-only power rating left every speaker at
+    0.0, softmax returned a flat 1/N over the field, and every single quote clamped to MAX_ODDS
+    -- the whole market paid a uniform 50x on every speaker at every position. Verified against
+    production: 107 teams, all reporting total_speaker_points 0.0 after nine judged rounds.
+
+    With zero speaker scores present, team_points must still separate a strong team's speaker
+    from a weak team's, and no quote may sit at MAX_ODDS.
+    """
+    tournament, _team, _other = await _make_tournament_with_team(db_session)
+    round_1 = Round(
+        tournament_id=tournament.id,
+        seq=1,
+        name="Round 1",
+        stage=RoundStage.PRELIMINARY,
+        status=RoundStatus.COMPLETED,
+    )
+    db_session.add(round_1)
+    await db_session.flush()
+    debate = Debate(tournament_id=tournament.id, round_id=round_1.id, external_id=910)
+    db_session.add(debate)
+    await db_session.flush()
+
+    # Four teams ranked 1st-4th in one judged debate -> team_points 3/2/1/0, and deliberately NOT
+    # a single SpeakerScore row anywhere: exactly the production shape.
+    speakers = []
+    for i, position in enumerate(
+        [
+            BPPosition.OPENING_GOVERNMENT,
+            BPPosition.OPENING_OPPOSITION,
+            BPPosition.CLOSING_GOVERNMENT,
+            BPPosition.CLOSING_OPPOSITION,
+        ]
+    ):
+        team = Team(tournament_id=tournament.id, external_id=900 + i, name=f"Tab Team {i}")
+        db_session.add(team)
+        await db_session.flush()
+        db_session.add(
+            DebateTeam(
+                debate_id=debate.id,
+                team_id=team.id,
+                position=position,
+                rank_in_debate=i + 1,
+            )
+        )
+        speaker = Speaker(tournament_id=tournament.id, team_id=team.id, name=f"Tab Speaker {i}")
+        db_session.add(speaker)
+        speakers.append(speaker)
+    await db_session.commit()
+    for speaker in speakers:
+        await db_session.refresh(speaker)
+
+    admin = await make_user(db_session, email="admin-tab@example.com", role=UserRole.ADMIN)
+    user = await make_user(db_session, email="user-tab@example.com")
+    user_headers = auth_headers(user)
+
+    create_response = await client.post(
+        f"/api/v1/tournaments/{tournament.id}/bet-markets",
+        json={
+            "bet_type": "top_speaker_position",
+            "label": "Tabla de oradores",
+            "opens_at": PAST.isoformat(),
+            "closes_at": FUTURE.isoformat(),
+        },
+        headers=auth_headers(admin),
+    )
+    market_id = create_response.json()["id"]
+
+    async def quote(speaker_id: int, position: int) -> float:
+        response = await client.post(
+            f"/api/v1/bet-markets/{market_id}/quote",
+            json={"payload": {"speaker_id": speaker_id, "position": position}},
+            headers=user_headers,
+        )
+        assert response.status_code == 200
+        return response.json()["odds"]
+
+    winner_first = await quote(speakers[0].id, 1)
+    loser_first = await quote(speakers[3].id, 1)
+
+    # The bug in one assertion: these used to be identical, and identically MAX_ODDS.
+    assert winner_first < loser_first
+    assert winner_first < 50.0
+    assert loser_first < 50.0
+
+    # Deeper slots pay more than shallow ones for the SAME speaker (more plausible occupants the
+    # further down the tab you go) -- the fixed base-per-position component.
+    assert await quote(speakers[0].id, 10) > await quote(speakers[0].id, 1)
+
+
 async def test_team_break_quote_prices_independently_per_team(
     client: AsyncClient, db_session: AsyncSession
 ) -> None:

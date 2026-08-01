@@ -12,7 +12,6 @@ tracks -- nothing here invents a new stat:
     team_points can't distinguish on its own. This is the "contra quién se han enfrentado" part.
 """
 
-import asyncio
 import datetime
 from collections import defaultdict
 from dataclasses import dataclass
@@ -28,9 +27,7 @@ from app.domain.odds import (
     pair_top_two_probability,
     pari_mutuel_odds,
     pari_mutuel_probability,
-    positional_probabilities,
     sequence_probability,
-    simulate_positional_probabilities,
     softmax_probabilities,
     top_n_probabilities,
 )
@@ -76,6 +73,69 @@ DEFAULT_EXACT_POINTS_SUB_BET_ODDS = 8.0
 # admin-tunable pattern (no historical distribution of speaker scores to build a real
 # probability from either).
 DEFAULT_SPEAKER_POINTS_SUB_BET_ODDS = 15.0
+
+# --- top_speaker_position pricing ------------------------------------------------------------
+#
+# This market cannot be priced the way every other market in this module is, and trying to was a
+# live pricing bug: `compute_speaker_power_ratings` reads SpeakerScore, but CMUDE -- like most
+# tournaments, see SpeakerScore.score's "many tournaments withhold speaker points until the
+# tournament ends" note -- publishes NONE of them until the tab closes. Verified against
+# production: all 107 teams reported total_speaker_points 0.0 through nine judged preliminary
+# rounds. Every speaker therefore rated exactly 0.0, softmax over a ~200-speaker field returned a
+# flat 1/200, and decimal_odds_from_probability clamped EVERY quote to MAX_ODDS -- the whole
+# market offered a uniform 50x on every speaker at every position. Unbettable as a market, and
+# catastrophically overpaid for anyone who happened to win one.
+#
+# The replacement prices from three explicit parts, in the order a bettor actually reasons about
+# them (and each one is separately visible in the quote breakdown the API returns):
+#   1. A fixed base per position -- what an AVERAGE-strength speaker pays for that exact slot.
+#      Deeper slots pay more: the further down the tab you go, the more speakers are plausible
+#      occupants of that one slot, so naming it exactly is harder.
+#   2. A strength multiplier built from data that EXISTS while speaker points are withheld -- the
+#      speaker's team_points. A speaker on a 25-point team is far likelier to top the speaker tab
+#      than one on a 6-point team, even with zero published speaker scores. Real SpeakerScore data
+#      takes over automatically once the tab publishes it (see SPEAKER_OWN_POINTS_WEIGHT).
+#   3. The crowd's money, via the same seeded pari-mutuel blend every other market already uses.
+POSITION_BASE_ODDS_INTERCEPT = 2.5
+POSITION_BASE_ODDS_SLOPE = 0.5
+
+# Speaker points, once published, are a DIRECT measure of the thing this market is about, while
+# team_points are only a proxy for it -- so a speaker's own total outweighs their team's standing
+# as soon as any real score exists. Weighted down to team_points' 0-25 scale (speaker totals run
+# into the hundreds) rather than dominating it outright, so a strong team still counts for
+# something. While points are withheld this term is uniformly 0 and team_points carry the price.
+SPEAKER_OWN_POINTS_WEIGHT = 0.08
+
+# Added to both sides of the strength ratio so a team on 0 team_points prices as a longshot
+# rather than a mathematical impossibility (a 0-point team's speakers can still make the tab).
+STRENGTH_SMOOTHING = 6.0
+
+# The strength multiplier is clamped so neither end of the field can run away with the price: the
+# tournament favorite still can't price shorter than ~1.4x on a shallow slot, and nobody prices
+# past MAX_ODDS purely for being on a weak team. Tuned so the realistic spread across CMUDE's
+# actual field (team_points 0-25, mean ~13) lands roughly 3x-11x on a mid slot.
+MIN_STRENGTH_MULTIPLIER = 0.35
+MAX_STRENGTH_MULTIPLIER = 2.5
+
+
+def position_base_odds(position: int) -> float:
+    """Fixed base price for finishing EXACTLY at `position` -- what an average-strength speaker
+    pays before their team's standing and the pool move it. Linear in depth (2.5 + 0.5 * pos), so
+    1st is 3.0x, 5th is exactly 5.0x, 10th is 7.5x."""
+    return POSITION_BASE_ODDS_INTERCEPT + POSITION_BASE_ODDS_SLOPE * position
+
+
+def speaker_position_prior(
+    strength: float, mean_strength: float, position: int
+) -> tuple[float, float]:
+    """`(prior_probability, strength_multiplier)` for one speaker at one exact position -- parts
+    1 and 2 of the model described above, before the pool blend. The multiplier is returned
+    alongside so the API can show the bettor WHY their price differs from the base."""
+    multiplier = (strength + STRENGTH_SMOOTHING) / (mean_strength + STRENGTH_SMOOTHING)
+    multiplier = min(max(multiplier, MIN_STRENGTH_MULTIPLIER), MAX_STRENGTH_MULTIPLIER)
+    prior = min(1.0, multiplier / position_base_odds(position))
+    return prior, multiplier
+
 
 # round_winner's OTHER optional modifier: which of the team's two speakers opens the bench (see
 # betting_service._settle_prediction_payout -- unlike speaker_scores above, this one settles in
@@ -532,6 +592,48 @@ async def compute_speaker_power_ratings(
     return {speaker_id: totals.get(speaker_id, 0.0) for speaker_id in all_speaker_ids}
 
 
+async def compute_speaker_strength_ratings(
+    session: AsyncSession, tournament_id: int
+) -> dict[int, float]:
+    """{speaker_id: strength} for `top_speaker_position` pricing -- unlike
+    `compute_speaker_power_ratings` above, this stays meaningful while the tab withholds every
+    speaker score (the normal case for most of a tournament; see the POSITION_BASE_ODDS block).
+
+    Strength = the speaker's own published points (0 while withheld) weighted onto their team's
+    team_points scale, PLUS those team_points. So with points withheld the ranking is purely "how
+    strong is this speaker's team", and once real scores appear they dominate the ordering.
+    """
+    speaker_rows = (
+        await session.execute(
+            select(Speaker.id, Speaker.team_id).where(Speaker.tournament_id == tournament_id)
+        )
+    ).all()
+    if not speaker_rows:
+        return {}
+
+    standings = await get_standings(session, tournament_id)
+    team_points = {s.team_id: float(s.team_points) for s in standings}
+
+    own_points: dict[int, float] = defaultdict(float)
+    score_rows = (
+        await session.execute(
+            select(SpeakerScore.speaker_id, SpeakerScore.score)
+            .join(DebateTeam, SpeakerScore.debate_team_id == DebateTeam.id)
+            .join(Debate, DebateTeam.debate_id == Debate.id)
+            .join(Round, Debate.round_id == Round.id)
+            .where(Round.tournament_id == tournament_id, SpeakerScore.score.is_not(None))
+        )
+    ).all()
+    for speaker_id, score in score_rows:
+        own_points[speaker_id] += float(score)
+
+    return {
+        speaker_id: own_points.get(speaker_id, 0.0) * SPEAKER_OWN_POINTS_WEIGHT
+        + team_points.get(team_id, 0.0)
+        for speaker_id, team_id in speaker_rows
+    }
+
+
 async def compute_institution_power_ratings(
     session: AsyncSession, tournament_id: int
 ) -> dict[str, float]:
@@ -743,20 +845,22 @@ async def quote_odds(
         return pari_mutuel_odds(candidate_stake, pair_stake, prior)
 
     if bet_type == BetType.TOP_SPEAKER_POSITION:
-        power = await compute_speaker_power_ratings(session, bet_market.tournament_id)
-        if not power:
-            raise UnpriceableMarketError("no speaker scores yet to price this market from")
+        # Base-per-position x team-strength multiplier x pool -- NOT the Plackett-Luce prior every
+        # other market uses. See the POSITION_BASE_ODDS block for why that model collapsed every
+        # quote in this market to a flat MAX_ODDS in production.
+        strength = await compute_speaker_strength_ratings(session, bet_market.tournament_id)
+        if not strength:
+            raise UnpriceableMarketError("no speakers registered to price this market from")
         speaker_id = payload["speaker_id"]
         position = payload["position"]
         if not (1 <= position <= MAX_SPEAKER_POSITION):
             raise ValueError(f"position must be between 1 and {MAX_SPEAKER_POSITION}")
-        if speaker_id not in power:
+        if speaker_id not in strength:
             raise KeyError(speaker_id)
-        temperature = adaptive_temperature(power.values())
-        probabilities = await _speaker_position_probabilities(
-            power, position, temperature=temperature
+        mean_strength = sum(strength.values()) / len(strength)
+        prior, _multiplier = speaker_position_prior(
+            strength[speaker_id], mean_strength, position
         )
-        prior = probabilities.get(speaker_id, 0.0)
         candidate_stake, compartment_stake = await _speaker_position_pool(
             session, bet_market.id, position, speaker_id, exclude_user_id=exclude_user_id
         )
@@ -987,9 +1091,8 @@ class MarketBoard:
 
 _BOARD_MAX_UNSTAKED_OPTIONS = 12
 
-# How deep the "Tabla de oradores" market's exact-slot betting goes. Positions 1-3 price via
-# `positional_probabilities`'s exact recursive formula; 4-10 via
-# `simulate_positional_probabilities` (Monte Carlo) -- see `_speaker_position_probabilities`.
+# How deep the "Tabla de oradores" market's exact-slot betting goes. Every slot 1-10 prices the
+# same way -- base-per-position x team-strength x pool, see the POSITION_BASE_ODDS block.
 MAX_SPEAKER_POSITION = 10
 
 _POSITION_LABELS = {i: f"{i}º" for i in range(1, MAX_SPEAKER_POSITION + 1)}
@@ -1005,23 +1108,6 @@ _MOTION_CATEGORY_LABELS = {
     MotionCategory.HOPE: "Espera",
     MotionCategory.ACTOR: "Actor (“Esta Casa, siendo...”)",
 }
-
-
-async def _speaker_position_probabilities(
-    power: dict[int, float], position: int, *, temperature: float
-) -> dict[int, float]:
-    """P(each speaker finishes exactly at `position`) -- positions 1-3 exactly
-    (`positional_probabilities`), 4-`MAX_SPEAKER_POSITION` via Monte Carlo simulation (the exact
-    formula is O(N^position), intractable past 3 for a realistic speaker field). The simulation
-    is CPU-bound Python, so it runs in a worker thread (`asyncio.to_thread`) rather than blocking
-    the event loop -- same reason `break_service.recompute_break_predictions` does the same for
-    its own Monte Carlo call."""
-    if position <= 3:
-        return positional_probabilities(power, position, temperature=temperature)
-    simulated = await asyncio.to_thread(
-        simulate_positional_probabilities, power, position, temperature=temperature
-    )
-    return simulated.get(position, {})
 
 
 def format_payload_label(
@@ -1156,7 +1242,11 @@ async def _generic_fallback_options(
                 bet_market.target_break_category_id if bet_type == BetType.TOP_N_BREAK else None
             ),
         )
-    elif bet_type in (BetType.TOP_SPEAKER_POSITION, BetType.TOP_N_SPEAKERS):
+    elif bet_type == BetType.TOP_SPEAKER_POSITION:
+        # Its own strength metric, not the SpeakerScore-only power rating -- see the
+        # POSITION_BASE_ODDS block and quote_odds's matching branch.
+        power = await compute_speaker_strength_ratings(session, bet_market.tournament_id)
+    elif bet_type == BetType.TOP_N_SPEAKERS:
         power = await compute_speaker_power_ratings(session, bet_market.tournament_id)
     else:
         return {}
@@ -1221,24 +1311,12 @@ async def _generic_fallback_options(
                     else (1 if debate_count <= 1 else 2)
                 )
 
-    # One shared simulation for every position 4-10 these payloads touch, instead of one per
-    # payload -- `simulate_positional_probabilities` isn't cheap enough to redo per prediction
-    # the way the exact positions-1-3 formula below is. `positions_needing_simulation` name-drops
-    # nothing sensitive; it's just which slots (4-10) this board's payloads actually asked about.
-    simulated_positions: dict[int, dict[int, float]] = {}
-    if bet_type == BetType.TOP_SPEAKER_POSITION:
-        positions_needing_simulation = {
-            payload["position"]
-            for payload in payload_by_key.values()
-            if isinstance(payload.get("position"), int) and payload["position"] > 3
-        }
-        if positions_needing_simulation:
-            simulated_positions = await asyncio.to_thread(
-                simulate_positional_probabilities,
-                power,
-                max(positions_needing_simulation),
-                temperature=temperature,
-            )
+    # top_speaker_position prices off the field's MEAN strength (see speaker_position_prior), not
+    # off a per-position probability distribution, so there's nothing to precompute per position
+    # here -- just the one scalar, hoisted out of the per-payload loop below.
+    mean_speaker_strength = (
+        sum(power.values()) / len(power) if bet_type == BetType.TOP_SPEAKER_POSITION else 0.0
+    )
 
     odds_by_key: dict[str, float] = {}
     for key, payload in payload_by_key.items():
@@ -1356,12 +1434,9 @@ async def _generic_fallback_options(
                 position = payload["position"]
                 if not (1 <= position <= MAX_SPEAKER_POSITION) or speaker_id not in power:
                     continue
-                probabilities = (
-                    positional_probabilities(power, position, temperature=temperature)
-                    if position <= 3
-                    else simulated_positions.get(position, {})
+                prior, _multiplier = speaker_position_prior(
+                    power[speaker_id], mean_speaker_strength, position
                 )
-                prior = probabilities.get(speaker_id, 0.0)
                 candidate_stake, compartment_stake = _speaker_position_pool_from_stakes(
                     open_stakes, position, speaker_id
                 )

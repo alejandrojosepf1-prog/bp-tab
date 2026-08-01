@@ -128,6 +128,7 @@ export const api = {
     me: () => get<User>("/auth/me"),
     myPredictions: () => get<MyPrediction[]>("/auth/me/predictions"),
     users: () => get<UserSummary[]>("/auth/users"),
+    updateMe: (data: { display_name: string }) => patch<User>("/auth/me", data),
   },
 
   transfers: {

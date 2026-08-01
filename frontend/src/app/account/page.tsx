@@ -18,9 +18,11 @@ import { api, ApiError } from "@/lib/api/client";
 import { queryKeys } from "@/lib/api/query-keys";
 import { useAuth } from "@/lib/auth/auth-context";
 import { RequireAuth } from "@/components/auth/require-auth";
-import { LoadingState, EmptyState } from "@/components/query-state";
+import { EmptyState } from "@/components/query-state";
+import { AnimatedTokens } from "@/components/ui/animated-number";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Skeleton } from "@/components/ui/skeleton";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { OptionPicker } from "@/components/ui/option-picker";
@@ -221,6 +223,27 @@ function TransferRow({ tx }: { tx: Transaction }) {
   );
 }
 
+/** Agrupa el historial por torneo conservando el orden en que vino la lista (más reciente
+ * primero), y calcula el neto liquidado de cada grupo. Sólo las liquidadas cuentan para el neto:
+ * una apuesta abierta todavía no ganó ni perdió nada. */
+function groupByTournament(
+  history: MyPrediction[]
+): { tournamentName: string; predictions: MyPrediction[]; net: number }[] {
+  const groups = new Map<string, MyPrediction[]>();
+  for (const prediction of history) {
+    const existing = groups.get(prediction.tournament_name);
+    if (existing) existing.push(prediction);
+    else groups.set(prediction.tournament_name, [prediction]);
+  }
+  return [...groups.entries()].map(([tournamentName, predictions]) => ({
+    tournamentName,
+    predictions,
+    net: predictions
+      .filter((p) => p.status === "settled")
+      .reduce((acc, p) => acc + ((p.points_awarded ?? 0) - p.stake_amount), 0),
+  }));
+}
+
 function AccountContent() {
   const { user } = useAuth();
   const [sendOpen, setSendOpen] = useState(false);
@@ -246,40 +269,64 @@ function AccountContent() {
 
   return (
     <div className="flex flex-col gap-6">
-      <div className="flex flex-wrap items-center gap-4 rounded-2xl border border-border bg-card/70 p-5">
-        <span className="flex size-12 items-center justify-center rounded-xl bg-primary/15 text-primary">
-          <UserRound className="size-6" />
-        </span>
-        <div className="min-w-0 flex-1">
-          <p className="flex items-center gap-2 font-heading text-lg font-bold">
-            {user.display_name}
-            {user.role === "admin" && (
-              <Badge
-                variant="outline"
-                className="border-primary/40 bg-primary/10 text-primary"
-              >
-                <ShieldCheck className="mr-1 size-3" /> Admin
-              </Badge>
-            )}
-          </p>
-          <p className="truncate text-sm text-muted-foreground">{user.email}</p>
-        </div>
-        <div className="flex gap-3">
-          <div className="rounded-xl bg-primary/10 px-4 py-2 text-right">
-            <p className="flex items-center gap-1 text-[0.7rem] uppercase tracking-wider text-primary/80">
-              <Wallet className="size-3" /> Tokens
-            </p>
-            <p className="font-mono text-xl font-bold text-primary">
-              {formatTokens(user.balance)}
+      {/* Identidad arriba, métricas en su propia grilla abajo. Antes era UNA sola fila flex con
+          avatar + nombre + email + 2 tarjetas + botón: a menos de ~1100px el badge de Admin se
+          montaba encima de "TOKENS" y el email se cortaba en "alejand...". Separar las dos
+          responsabilidades hace que nada dependa de que sobre ancho. */}
+      <section className="rounded-2xl border border-border bg-card/70 p-4 sm:p-5">
+        <div className="flex items-start gap-3">
+          <span className="flex size-11 shrink-0 items-center justify-center rounded-xl bg-primary/15 text-primary">
+            <UserRound className="size-5" />
+          </span>
+          <div className="min-w-0 flex-1">
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+              <h2 className="min-w-0 truncate font-heading text-lg font-bold">
+                {user.display_name}
+              </h2>
+              {user.role === "admin" && (
+                <Badge
+                  variant="outline"
+                  className="shrink-0 border-primary/40 bg-primary/10 text-primary"
+                >
+                  <ShieldCheck className="mr-1 size-3" /> Admin
+                </Badge>
+              )}
+            </div>
+            {/* title= para que el email completo siga siendo recuperable al truncarse */}
+            <p className="truncate text-sm text-muted-foreground" title={user.email}>
+              {user.email}
             </p>
           </div>
-          <div className="rounded-xl bg-muted/60 px-4 py-2 text-right">
-            <p className="text-[0.7rem] uppercase tracking-wider text-muted-foreground">
+          {/* Sin label en móvil, pero 44x44 igual: por debajo de eso el objetivo táctil queda
+              fuera de guía (medido: quedaba en 38x28 con size="sm"). En sm+ recupera el texto. */}
+          <Button
+            variant="outline"
+            className="size-11 shrink-0 p-0 sm:h-9 sm:w-auto sm:px-3"
+            onClick={() => setSendOpen(true)}
+          >
+            <Send className="size-4" />
+            <span className="hidden sm:inline">Enviar tokens</span>
+            <span className="sr-only sm:hidden">Enviar tokens</span>
+          </Button>
+        </div>
+
+        <div className="mt-4 grid grid-cols-2 gap-2 sm:gap-3">
+          <div className="rounded-xl bg-primary/10 px-3 py-2 sm:px-4">
+            <p className="flex items-center gap-1 text-[0.7rem] uppercase tracking-wider text-primary/80">
+              <Wallet className="size-3 shrink-0" /> Tokens
+            </p>
+            <AnimatedTokens
+              value={user.balance}
+              className="block truncate text-xl font-bold text-primary"
+            />
+          </div>
+          <div className="rounded-xl bg-muted/60 px-3 py-2 sm:px-4">
+            <p className="truncate text-[0.7rem] uppercase tracking-wider text-muted-foreground">
               Neto liquidado
             </p>
             <p
               className={cn(
-                "font-mono text-xl font-bold",
+                "truncate font-mono text-xl font-bold tabular-nums",
                 netProfit >= 0 ? "text-primary" : "text-destructive"
               )}
             >
@@ -287,10 +334,7 @@ function AccountContent() {
             </p>
           </div>
         </div>
-        <Button variant="outline" className="shrink-0" onClick={() => setSendOpen(true)}>
-          <Send className="size-4" /> Enviar tokens
-        </Button>
-      </div>
+      </section>
 
       <SendTokensDialog open={sendOpen} onOpenChange={setSendOpen} />
 
@@ -298,7 +342,14 @@ function AccountContent() {
         <h2 className="flex items-center gap-2 font-heading text-base font-bold">
           <Send className="size-4 text-primary" /> Transferencias
         </h2>
-        {transfersLoading && <LoadingState label="Cargando transferencias…" />}
+        {/* Skeleton de la MISMA altura que una fila real, no un spinner centrado: el spinner
+            ocupaba una caja alta y al llegar los datos toda la página saltaba (layout shift). */}
+        {transfersLoading && (
+          <div className="flex flex-col gap-2">
+            <Skeleton className="h-[58px] rounded-lg" />
+            <Skeleton className="h-[58px] rounded-lg" />
+          </div>
+        )}
         {transfers && transfers.length === 0 && (
           <EmptyState
             title="Todavía no hiciste transferencias"
@@ -318,7 +369,12 @@ function AccountContent() {
         <h2 className="flex items-center gap-2 font-heading text-base font-bold">
           <History className="size-4 text-primary" /> Historial de apuestas
         </h2>
-        {isLoading && <LoadingState label="Cargando historial…" />}
+        {isLoading && (
+          <div className="flex flex-col gap-2">
+            <Skeleton className="h-[132px] rounded-xl" />
+            <Skeleton className="h-[132px] rounded-xl" />
+          </div>
+        )}
         {history && history.length === 0 && (
           <EmptyState
             title="Todavía no apostaste"
@@ -326,9 +382,32 @@ function AccountContent() {
           />
         )}
         {history && history.length > 0 && (
-          <div className="flex flex-col gap-2">
-            {history.map((p) => (
-              <HistoryRow key={p.id} prediction={p} />
+          <div className="flex flex-col gap-5">
+            {groupByTournament(history).map((group) => (
+              <div key={group.tournamentName} className="flex flex-col gap-2">
+                {/* Cabecera por torneo con su neto propio: en una lista plana de 40 apuestas
+                    across varios torneos no había forma de leer "cómo me fue en CMUDE". */}
+                <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1 border-b border-border/60 pb-1.5">
+                  <h3 className="min-w-0 truncate text-sm font-semibold">
+                    {group.tournamentName}
+                  </h3>
+                  <span className="shrink-0 text-xs text-muted-foreground">
+                    {group.predictions.length}{" "}
+                    {group.predictions.length === 1 ? "apuesta" : "apuestas"} ·{" "}
+                    <span
+                      className={cn(
+                        "font-mono font-semibold tabular-nums",
+                        group.net >= 0 ? "text-primary" : "text-destructive"
+                      )}
+                    >
+                      {formatSignedTokens(group.net)}
+                    </span>
+                  </span>
+                </div>
+                {group.predictions.map((p) => (
+                  <HistoryRow key={p.id} prediction={p} />
+                ))}
+              </div>
             ))}
           </div>
         )}

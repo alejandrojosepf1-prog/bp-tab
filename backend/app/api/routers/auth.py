@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_current_user
 from app.api.schemas.auth import (
     LoginRequest,
+    MeUpdate,
     MyPredictionOut,
     RegisterRequest,
     TokenResponse,
@@ -63,6 +64,21 @@ async def login(payload: LoginRequest, session: AsyncSession = Depends(get_db)) 
 
 @router.get("/me", response_model=UserOut)
 async def me(current_user: User = Depends(get_current_user)) -> User:
+    return current_user
+
+
+@router.patch("/me", response_model=UserOut)
+async def update_me(
+    payload: MeUpdate,
+    session: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> User:
+    """Rename yourself. Display name is what the leaderboard, the transfer picker and every
+    prize listing show, so it's the one field a user genuinely needs to own -- see MeUpdate for
+    why nothing else on the account is editable here."""
+    current_user.display_name = payload.display_name.strip()
+    await session.commit()
+    await session.refresh(current_user)
     return current_user
 
 
