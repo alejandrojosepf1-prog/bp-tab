@@ -28,7 +28,6 @@ def upgrade() -> None:
             sa.Integer(),
             sa.ForeignKey('users.id', ondelete='CASCADE'),
             nullable=False,
-            index=True,
         ),
         sa.Column(
             'counterparty_user_id',
