@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import BetMarket, Prediction, User
+from app.models import BetMarket, Prediction, TournamentBalance
 from app.models.enums import BetType, PredictionStatus
 
 
@@ -34,9 +34,10 @@ class EconomySummary:
     # implied); negative means tokens were net destroyed. Zero only by coincidence -- there is no
     # mechanism that forces this to balance, unlike a real pari-mutuel pool.
     net_token_inflation: float
-    # Sum of every User.balance -- the total token supply live in the game right now, including
-    # tokens still committed to open predictions (a user's stake is deducted from balance the
-    # moment they bet, so it's "spent" from their wallet but not yet destroyed or paid out).
+    # Sum of every TournamentBalance.balance in scope -- the total token supply live in the game
+    # right now, including tokens still committed to open predictions (a user's stake is
+    # deducted from balance the moment they bet, so it's "spent" from their wallet but not yet
+    # destroyed or paid out).
     tokens_in_circulation: float
     open_predictions_count: int
     settled_predictions_count: int
@@ -174,12 +175,13 @@ async def compute_game_economy(
     )
     active_bettors_count = len({user_id for _, _, _, user_id in rows})
 
-    # Token supply is a platform-wide concept (User.balance is one global wallet, not split per
-    # tournament -- see betting_service.recompute_leaderboard's docstring), so this figure is NOT
-    # scoped by tournament_id even when the rest of the summary is.
-    tokens_in_circulation = float(
-        (await session.execute(select(func.coalesce(func.sum(User.balance), 0.0)))).scalar_one()
-    )
+    # Token supply now IS scoped by tournament_id when given (CNADE 2026 Roadmap Pieza 3 --
+    # balance is per-tournament, see TournamentBalance), unlike before this when it was
+    # deliberately the one platform-wide figure in an otherwise tournament-scoped summary.
+    balance_stmt = select(func.coalesce(func.sum(TournamentBalance.balance), 0.0))
+    if tournament_id is not None:
+        balance_stmt = balance_stmt.where(TournamentBalance.tournament_id == tournament_id)
+    tokens_in_circulation = float((await session.execute(balance_stmt)).scalar_one())
 
     return EconomySummary(
         total_staked_open=total_staked_open,

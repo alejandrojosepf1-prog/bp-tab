@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import BetMarket, Prediction, User
+from app.models import BetMarket, Prediction, TournamentBalance, User
 from app.models.enums import PredictionStatus
 
 
@@ -33,8 +33,12 @@ class LeaderboardRow:
     total_points: float
     # Distinct tournaments this user has at least one settled prediction in, within scope.
     tournaments_played: int
-    # Current play-token wallet (User.balance) -- also reflects tokens tied up in OPEN
-    # predictions, not just settled skill, so it's shown alongside total_points, not instead of.
+    # Play-token wallet -- also reflects tokens tied up in OPEN predictions, not just settled
+    # skill, so it's shown alongside total_points, not instead of. Scoped to `tournament_id`'s
+    # own TournamentBalance when the leaderboard is per-tournament; summed across every
+    # tournament this user has a balance in for the platform-wide "Ranking" tab
+    # (`tournament_id=None`), since there's no single global wallet anymore (CNADE 2026 Roadmap
+    # Pieza 3).
     balance: float
 
 
@@ -50,7 +54,6 @@ async def compute_leaderboard(
         select(
             User.id,
             User.display_name,
-            User.balance,
             net_profit,
             func.count(func.distinct(BetMarket.tournament_id)),
         )
@@ -60,18 +63,23 @@ async def compute_leaderboard(
     )
     if tournament_id is not None:
         stmt = stmt.where(BetMarket.tournament_id == tournament_id)
-    stmt = stmt.group_by(User.id, User.display_name, User.balance).order_by(
-        net_profit.desc(), User.display_name
-    )
+    stmt = stmt.group_by(User.id, User.display_name).order_by(net_profit.desc(), User.display_name)
 
     rows = (await session.execute(stmt)).all()
+
+    balance_stmt = select(TournamentBalance.user_id, func.sum(TournamentBalance.balance))
+    if tournament_id is not None:
+        balance_stmt = balance_stmt.where(TournamentBalance.tournament_id == tournament_id)
+    balance_stmt = balance_stmt.group_by(TournamentBalance.user_id)
+    balance_by_user = dict((await session.execute(balance_stmt)).all())
+
     return [
         LeaderboardRow(
             user_id=user_id,
             display_name=display_name,
             total_points=float(total_points or 0.0),
             tournaments_played=int(tournaments_played),
-            balance=float(balance),
+            balance=float(balance_by_user.get(user_id, 0.0)),
         )
-        for user_id, display_name, balance, total_points, tournaments_played in rows
+        for user_id, display_name, total_points, tournaments_played in rows
     ]

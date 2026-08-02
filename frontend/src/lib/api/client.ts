@@ -35,6 +35,7 @@ import type {
   Team,
   TeamStanding,
   Tournament,
+  TournamentBalance,
   TournamentStatus,
   UnassignedTeam,
   User,
@@ -136,14 +137,20 @@ export const api = {
   },
 
   transfers: {
-    create: (data: { recipient_id: number; amount: number; note?: string }) =>
-      post<{ sent: Transaction }>("/transfers", data),
+    create: (data: {
+      recipient_id: number;
+      amount: number;
+      tournament_id: number;
+      note?: string;
+    }) => post<{ sent: Transaction }>("/transfers", data),
     myTransfers: () => get<Transaction[]>("/transfers/me"),
   },
 
   tournaments: {
     list: () => get<Tournament[]>("/tournaments"),
     get: (id: number | string) => get<Tournament>(`/tournaments/${id}`),
+    myBalance: (id: number | string) =>
+      get<TournamentBalance>(`/tournaments/${id}/me/balance`),
     create: (data: { name: string; tab_url: string; timezone: string }) =>
       post<Tournament>("/tournaments", data),
     update: (

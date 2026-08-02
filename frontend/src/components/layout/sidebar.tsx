@@ -114,8 +114,8 @@ function NavLink({
 function SidebarBody({ onNavigate }: { onNavigate?: () => void }) {
   const pathname = usePathname();
   const router = useRouter();
-  const { user, isAuthenticated, isAdmin, logout } = useAuth();
-  const balanceFlash = useBalanceFlash(user?.balance);
+  const { user, balance, isAuthenticated, isAdmin, logout } = useAuth();
+  const balanceFlash = useBalanceFlash(balance ?? undefined);
 
   const isActive = (href: string) =>
     pathname === href || pathname.startsWith(`${href}/`);
@@ -195,7 +195,7 @@ function SidebarBody({ onNavigate }: { onNavigate?: () => void }) {
                   !balanceFlash && "text-primary"
                 )}
               >
-                {formatTokens(user?.balance ?? 0)}
+                {formatTokens(balance ?? 0)}
               </span>
             </div>
           </div>

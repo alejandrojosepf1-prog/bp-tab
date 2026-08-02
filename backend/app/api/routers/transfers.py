@@ -25,7 +25,12 @@ async def create_transfer(
 ) -> TransferOut:
     try:
         sent_tx, _received_tx = await transfer_tokens(
-            session, current_user, payload.recipient_id, payload.amount, note=payload.note
+            session,
+            current_user,
+            payload.recipient_id,
+            payload.amount,
+            payload.tournament_id,
+            note=payload.note,
         )
     except TransferError as exc:
         await session.rollback()

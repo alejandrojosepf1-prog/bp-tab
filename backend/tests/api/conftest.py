@@ -6,7 +6,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from app.core.security import create_access_token, hash_password
 from app.db.session import get_db
 from app.main import app
-from app.models import Base, User
+from app.models import Base, Tournament, User
+from app.models.betting import TournamentBalance
 from app.models.enums import UserRole
 
 
@@ -53,21 +54,29 @@ async def make_user(
     display_name: str = "Test User",
     role: UserRole = UserRole.USER,
     is_active: bool = True,
+    tournament: Tournament | None = None,
     balance: float | None = None,
 ) -> User:
-    """`balance=None` uses the real STARTING_BALANCE grant a new account gets. Pass an explicit
-    value only for tests that need to stake more than that (e.g. pool-dynamics tests where the
-    point is large stakes overwhelming the seed), so the grant itself can change freely without
-    silently turning those into insufficient-balance failures."""
+    """`balance=None` leaves no TournamentBalance pre-seeded -- the user gets the real
+    STARTING_BALANCE grant the first time they touch `tournament`'s economy (CNADE 2026 Roadmap
+    Pieza 3, see bankroll_service.get_or_create_tournament_balance). Pass an explicit `balance`
+    (and the `tournament` it applies to) only for tests that need to stake more than that (e.g.
+    pool-dynamics tests where the point is large stakes overwhelming the seed), so the grant
+    itself can change freely without silently turning those into insufficient-balance failures.
+    """
     user = User(
         email=email,
         password_hash=hash_password(password),
         display_name=display_name,
         role=role,
         is_active=is_active,
-        **({} if balance is None else {"balance": balance}),
     )
     db_session.add(user)
+    await db_session.flush()
+    if tournament is not None and balance is not None:
+        db_session.add(
+            TournamentBalance(tournament_id=tournament.id, user_id=user.id, balance=balance)
+        )
     await db_session.commit()
     await db_session.refresh(user)
     return user
@@ -76,3 +85,22 @@ async def make_user(
 def auth_headers(user: User) -> dict[str, str]:
     token = create_access_token(str(user.id))
     return {"Authorization": f"Bearer {token}"}
+
+
+_tournament_seq = 0
+
+
+async def make_tournament(db_session: AsyncSession, **kwargs) -> Tournament:
+    """Unique source_base_url/source_slug per call so tests can create as many as they need
+    without colliding on the tournaments table's uniqueness constraint."""
+    global _tournament_seq
+    _tournament_seq += 1
+    kwargs.setdefault("name", f"Test Cup {_tournament_seq}")
+    kwargs.setdefault("slug", f"test-cup-{_tournament_seq}")
+    kwargs.setdefault("source_base_url", "https://example.calicotab.com")
+    kwargs.setdefault("source_slug", f"open-{_tournament_seq}")
+    tournament = Tournament(**kwargs)
+    db_session.add(tournament)
+    await db_session.commit()
+    await db_session.refresh(tournament)
+    return tournament

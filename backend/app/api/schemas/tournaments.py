@@ -46,3 +46,10 @@ class TournamentUpdate(BaseModel):
 
 class ScrapeQueuedResponse(BaseModel):
     status: str = "queued"
+
+
+class BalanceOut(BaseModel):
+    # The logged-in user's TournamentBalance for this tournament (CNADE 2026 Roadmap Pieza 3) --
+    # lazily created on first read via app.services.bankroll_service, applying the ROI carryover
+    # from their previous COMPLETED tournament if one exists.
+    balance: float

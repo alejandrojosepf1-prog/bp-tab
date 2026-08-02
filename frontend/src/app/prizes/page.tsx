@@ -31,12 +31,12 @@ const TYPE_ICONS: Record<PrizeEventType, typeof Gift> = {
  * mano por el admin, sin nada que el usuario tenga que hacer. */
 function RaffleEntryForm({ event }: { event: PrizeEvent }) {
   const queryClient = useQueryClient();
-  const { user } = useAuth();
+  const { balance } = useAuth();
   const [tickets, setTickets] = useState("1");
   const ticketCost = event.config.ticket_cost ?? 0;
   const maxTickets = event.config.max_tickets_per_user;
   const totalCost = (Number(tickets) || 0) * ticketCost;
-  const overBalance = user != null && totalCost > user.balance;
+  const overBalance = balance != null && totalCost > balance;
   const overCap = maxTickets != null && Number(tickets) > maxTickets;
 
   const mutation = useMutation({
@@ -44,7 +44,7 @@ function RaffleEntryForm({ event }: { event: PrizeEvent }) {
     onSuccess: () => {
       toast.success("Entraste al sorteo");
       queryClient.invalidateQueries({ queryKey: queryKeys.prizeEvents(String(event.tournament_id)) });
-      queryClient.invalidateQueries({ queryKey: queryKeys.me });
+      queryClient.invalidateQueries({ queryKey: queryKeys.myBalance(event.tournament_id) });
     },
     onError: (err) =>
       toast.error(err instanceof ApiError ? err.detail : "No se pudo entrar al sorteo"),
@@ -81,7 +81,7 @@ function RaffleEntryForm({ event }: { event: PrizeEvent }) {
       </Button>
       {overBalance && (
         <p className="w-full text-xs text-destructive">
-          No te alcanzan los tokens ({formatTokens(user?.balance ?? 0)}).
+          No te alcanzan los tokens ({formatTokens(balance ?? 0)}).
         </p>
       )}
       {overCap && !overBalance && (

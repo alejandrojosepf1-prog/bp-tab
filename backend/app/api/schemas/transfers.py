@@ -8,6 +8,9 @@ from app.models.enums import TransactionType
 class TransferCreate(BaseModel):
     recipient_id: int
     amount: float
+    # Which tournament's TournamentBalance to move the tokens within (CNADE 2026 Roadmap
+    # Pieza 3 -- balance is per-tournament, there's no tournament-less transfer anymore).
+    tournament_id: int
     note: str | None = None
 
 

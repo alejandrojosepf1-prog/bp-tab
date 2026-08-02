@@ -11,6 +11,11 @@ interface AuthContextValue {
   isLoading: boolean;
   isAuthenticated: boolean;
   isAdmin: boolean;
+  // The logged-in user's play-token balance for the currently active tournament (CNADE 2026
+  // Roadmap Pieza 3 -- balance is per-tournament, not a flat field on `user` anymore). `null`
+  // while loading or when there's no active tournament to have a balance in.
+  balance: number | null;
+  activeTournamentId: number | null;
   login: (email: string, password: string) => Promise<void>;
   register: (email: string, password: string, displayName: string) => Promise<void>;
   logout: () => void;
@@ -50,6 +55,30 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     refetchInterval: 30_000,
   });
 
+  // "Active tournament" = the one bettable one right now (see Tournament.is_active) -- this
+  // product only ever runs one live tournament at a time, so the balance shown app-wide (the
+  // sidebar, market cards) is that tournament's TournamentBalance, not a global figure that no
+  // longer exists.
+  const { data: tournaments = [] } = useQuery({
+    queryKey: queryKeys.tournaments,
+    queryFn: api.tournaments.list,
+    enabled: !!user,
+    staleTime: 30_000,
+  });
+  const activeTournamentId = tournaments.find((t) => t.is_active)?.id ?? null;
+
+  const { data: balanceData } = useQuery({
+    queryKey: queryKeys.myBalance(activeTournamentId ?? "none"),
+    queryFn: () => api.tournaments.myBalance(activeTournamentId!),
+    enabled: !!user && activeTournamentId !== null,
+    staleTime: 10_000,
+    // Same reasoning as the `me` query above: balance moves from actions this tab didn't
+    // trigger (a market settling, a prize payout), so polling is the only way the sidebar
+    // stays live without a manual refresh.
+    refetchInterval: 30_000,
+  });
+  const balance = balanceData?.balance ?? null;
+
   const login = useCallback(
     async (email: string, password: string) => {
       const res = await api.auth.login({ email, password });
@@ -83,12 +112,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       isLoading,
       isAuthenticated: !!user,
       isAdmin: user?.role === "admin",
+      balance,
+      activeTournamentId,
       login,
       register,
       logout,
       refreshUser,
     }),
-    [user, isLoading, login, register, logout, refreshUser]
+    [user, isLoading, balance, activeTournamentId, login, register, logout, refreshUser]
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

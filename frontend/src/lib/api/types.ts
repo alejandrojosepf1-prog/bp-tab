@@ -13,10 +13,13 @@ export interface User {
   display_name: string;
   role: Role;
   is_active: boolean;
-  // Play-token balance -- goes up and down as bets are placed/won/lost. Never real money;
-  // every account starts with a fixed grant (see backend app.models.betting.STARTING_BALANCE).
-  balance: number;
   created_at: string;
+}
+
+// Play-token balance for ONE tournament (CNADE 2026 Roadmap Pieza 3) -- there's no single
+// global balance anymore. GET /tournaments/{id}/me/balance.
+export interface TournamentBalance {
+  balance: number;
 }
 
 // ---------- Premios ----------

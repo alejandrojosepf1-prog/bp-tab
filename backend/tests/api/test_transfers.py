@@ -1,19 +1,29 @@
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from tests.api.conftest import auth_headers, make_user
+from tests.api.conftest import auth_headers, make_tournament, make_user
 
 
 async def test_transfer_moves_balance_and_writes_both_ledger_rows(
     client: AsyncClient, db_session: AsyncSession
 ) -> None:
-    alice = await make_user(db_session, email="alice-transfer@example.com", balance=100.0)
-    bob = await make_user(db_session, email="bob-transfer@example.com", balance=50.0)
+    tournament = await make_tournament(db_session)
+    alice = await make_user(
+        db_session, email="alice-transfer@example.com", tournament=tournament, balance=100.0
+    )
+    bob = await make_user(
+        db_session, email="bob-transfer@example.com", tournament=tournament, balance=50.0
+    )
     alice_headers = auth_headers(alice)
 
     response = await client.post(
         "/api/v1/transfers",
-        json={"recipient_id": bob.id, "amount": 30.0, "note": "para la ronda que viene"},
+        json={
+            "recipient_id": bob.id,
+            "amount": 30.0,
+            "tournament_id": tournament.id,
+            "note": "para la ronda que viene",
+        },
         headers=alice_headers,
     )
     assert response.status_code == 201
@@ -23,11 +33,13 @@ async def test_transfer_moves_balance_and_writes_both_ledger_rows(
     assert sent["balance_after"] == 70.0
     assert sent["counterparty_display_name"] == bob.display_name
 
-    me = await client.get("/api/v1/auth/me", headers=alice_headers)
+    me = await client.get(f"/api/v1/tournaments/{tournament.id}/me/balance", headers=alice_headers)
     assert me.json()["balance"] == 70.0
 
     bob_headers = auth_headers(bob)
-    bob_me = await client.get("/api/v1/auth/me", headers=bob_headers)
+    bob_me = await client.get(
+        f"/api/v1/tournaments/{tournament.id}/me/balance", headers=bob_headers
+    )
     assert bob_me.json()["balance"] == 80.0
 
     bob_history = await client.get("/api/v1/transfers/me", headers=bob_headers)
@@ -42,35 +54,42 @@ async def test_transfer_moves_balance_and_writes_both_ledger_rows(
 async def test_transfer_rejects_insufficient_balance_self_and_below_minimum(
     client: AsyncClient, db_session: AsyncSession
 ) -> None:
-    alice = await make_user(db_session, email="alice-transfer2@example.com", balance=10.0)
+    tournament = await make_tournament(db_session)
+    alice = await make_user(
+        db_session, email="alice-transfer2@example.com", tournament=tournament, balance=10.0
+    )
     bob = await make_user(db_session, email="bob-transfer2@example.com")
     headers = auth_headers(alice)
     # IDs captured up front: a 400 rolls back the app's own session, expiring these ORM objects
     # (see the identical fix in test_betting.py's motion_type test for the full explanation).
-    alice_id, bob_id = alice.id, bob.id
+    # tournament.id included here too -- it's re-evaluated in every request's json body below,
+    # so it's just as vulnerable to the same post-rollback MissingGreenlet as alice_id/bob_id.
+    alice_id, bob_id, tournament_id = alice.id, bob.id, tournament.id
 
     too_much = await client.post(
         "/api/v1/transfers",
-        json={"recipient_id": bob_id, "amount": 500.0},
+        json={"recipient_id": bob_id, "amount": 500.0, "tournament_id": tournament_id},
         headers=headers,
     )
     assert too_much.status_code == 400
 
     to_self = await client.post(
         "/api/v1/transfers",
-        json={"recipient_id": alice_id, "amount": 5.0},
+        json={"recipient_id": alice_id, "amount": 5.0, "tournament_id": tournament_id},
         headers=headers,
     )
     assert to_self.status_code == 400
 
     too_small = await client.post(
         "/api/v1/transfers",
-        json={"recipient_id": bob_id, "amount": 0.5},
+        json={"recipient_id": bob_id, "amount": 0.5, "tournament_id": tournament_id},
         headers=headers,
     )
     assert too_small.status_code == 400
 
-    unchanged = await client.get("/api/v1/auth/me", headers=headers)
+    unchanged = await client.get(
+        f"/api/v1/tournaments/{tournament_id}/me/balance", headers=headers
+    )
     assert unchanged.json()["balance"] == 10.0
 
 

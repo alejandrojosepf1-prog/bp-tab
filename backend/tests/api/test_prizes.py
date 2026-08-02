@@ -51,7 +51,9 @@ async def test_manual_award_full_flow_via_api(
 ) -> None:
     tournament = await _make_tournament(db_session)
     admin = await make_user(db_session, email="admin2@example.com", role=UserRole.ADMIN)
-    winner = await make_user(db_session, email="winner@example.com", balance=0.0)
+    winner = await make_user(
+        db_session, email="winner@example.com", tournament=tournament, balance=0.0
+    )
 
     create_response = await client.post(
         f"/api/v1/tournaments/{tournament.id}/prize-events",
@@ -76,7 +78,7 @@ async def test_manual_award_full_flow_via_api(
     assert body["entries"][0]["awarded_amount"] == 40.0
 
     me_response = await client.get(
-        "/api/v1/auth/me", headers=auth_headers(winner)
+        f"/api/v1/tournaments/{tournament.id}/me/balance", headers=auth_headers(winner)
     )
     assert me_response.json()["balance"] == 40.0
 
@@ -92,7 +94,9 @@ async def test_raffle_entry_requires_auth_and_respects_balance(
 ) -> None:
     tournament = await _make_tournament(db_session)
     admin = await make_user(db_session, email="admin3@example.com", role=UserRole.ADMIN)
-    entrant = await make_user(db_session, email="entrant@example.com", balance=10.0)
+    entrant = await make_user(
+        db_session, email="entrant@example.com", tournament=tournament, balance=10.0
+    )
 
     create_response = await client.post(
         f"/api/v1/tournaments/{tournament.id}/prize-events",

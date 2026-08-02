@@ -99,6 +99,7 @@ function HistoryRow({ prediction }: { prediction: MyPrediction }) {
 
 function SendTokensDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (v: boolean) => void }) {
   const queryClient = useQueryClient();
+  const { activeTournamentId } = useAuth();
   const [recipientId, setRecipientId] = useState<string | null>(null);
   const [amount, setAmount] = useState("");
   const [note, setNote] = useState("");
@@ -115,13 +116,19 @@ function SendTokensDialog({ open, onOpenChange }: { open: boolean; onOpenChange:
       api.transfers.create({
         recipient_id: Number(recipientId),
         amount: Number(amount),
+        // Non-null asserted -- the submit button below is disabled whenever there's no active
+        // tournament, so this only ever runs once one exists.
+        tournament_id: activeTournamentId!,
         note: note.trim() || undefined,
       }),
     onSuccess: (data) => {
       toast.success(`Enviaste ${formatTokens(data.sent.amount)} a ${data.sent.counterparty_display_name}`);
-      // El mismo patrón que cada acción que mueve balance en esta app: invalidar queryKeys.me
-      // para que el saldo del header/sidebar se actualice solo, sin recargar la página.
-      queryClient.invalidateQueries({ queryKey: queryKeys.me });
+      // El mismo patrón que cada acción que mueve balance en esta app: invalidar la query del
+      // balance del torneo activo para que el saldo del header/sidebar se actualice solo, sin
+      // recargar la página.
+      if (activeTournamentId !== null) {
+        queryClient.invalidateQueries({ queryKey: queryKeys.myBalance(activeTournamentId) });
+      }
       queryClient.invalidateQueries({ queryKey: queryKeys.myTransfers });
       setRecipientId(null);
       setAmount("");
@@ -178,7 +185,13 @@ function SendTokensDialog({ open, onOpenChange }: { open: boolean; onOpenChange:
             Cancelar
           </Button>
           <Button
-            disabled={!recipientId || !amount || Number(amount) <= 0 || mutation.isPending}
+            disabled={
+              !recipientId ||
+              !amount ||
+              Number(amount) <= 0 ||
+              activeTournamentId === null ||
+              mutation.isPending
+            }
             onClick={() => mutation.mutate()}
           >
             {mutation.isPending ? "Enviando…" : "Enviar"}
@@ -245,7 +258,7 @@ function groupByTournament(
 }
 
 function AccountContent() {
-  const { user } = useAuth();
+  const { user, balance } = useAuth();
   const [sendOpen, setSendOpen] = useState(false);
 
   const { data: history, isLoading } = useQuery({
@@ -316,7 +329,7 @@ function AccountContent() {
               <Wallet className="size-3 shrink-0" /> Tokens
             </p>
             <AnimatedTokens
-              value={user.balance}
+              value={balance ?? 0}
               className="block truncate text-xl font-bold text-primary"
             />
           </div>

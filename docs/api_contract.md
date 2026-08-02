@@ -17,8 +17,9 @@ This is the single source of truth both the backend (FastAPI implementation) and
 - `GET /auth/me/predictions` -> `MyPredictionOut[]` (this user's full bet history across every
   tournament, newest first)
 
-`User` shape: `{id, email, display_name, role, is_active, balance, created_at}`
-(`balance`: fictional USD wallet, global across every tournament -- see Betting section below)
+`User` shape: `{id, email, display_name, role, is_active, created_at}` -- no `balance` field
+anymore (CNADE 2026 Roadmap Pieza 3: balance is 100% per-tournament, not one wallet shared
+across every tournament). Use `GET /tournaments/{id}/me/balance` instead.
 
 `MyPredictionOut` shape: `{id, bet_market_id, market_label, bet_type, market_status,
 tournament_id, tournament_name, status, stake_amount, odds, potential_payout, points_awarded,
@@ -29,6 +30,10 @@ history list without extra round-trips.
 
 - `GET /tournaments` **(public)** -> `Tournament[]`
 - `GET /tournaments/{id}` **(public)** -> `Tournament`
+- `GET /tournaments/{id}/me/balance` -> `{balance}` -- the logged-in user's play-token balance
+  for THIS tournament (CNADE 2026 Roadmap Pieza 3), lazily created on first read with any ROI
+  carryover from their previous COMPLETED tournament applied (see `bankroll_service`). Replaces
+  the old flat `User.balance`.
 - `POST /tournaments` **(admin)** `{name, tab_url, timezone}` -> `Tournament` (`tab_url` is any link
   from the tournament's public CalicoTab tab, e.g.
   `https://cmude2025.calicotab.com/open/participants/list/` -- the backend derives
@@ -165,7 +170,7 @@ was folded into `round_winner` itself -- see below -- rather than staying a sepa
   pool blending**: pool-blending assumes competing candidates' priors sum to 1 across a shared
   compartment, which holds for "exactly one winner" markets but would be wrong here.
 
-**Unit convention:** every dollar amount below (`User.balance`, `Prediction.stake_amount`,
+**Unit convention:** every dollar amount below (`TournamentBalance.balance`, `Prediction.stake_amount`,
 `potential_payout`, `points_awarded`, `LeaderboardEntry.total_points`, `BetMarket.pool_total`)
 is denominated in **fictional USD** ("dólares apostados"), not abstract points -- there is no
 real money anywhere in this platform, but the friend group's score is expressed and displayed
@@ -204,8 +209,9 @@ stat) -- they're just not retroactive for bets already placed.
 - `GET /bet-markets/{market_id}/predictions/me` -> `Prediction | null`
 - `POST /bet-markets/{market_id}/predictions` `{payload: object, stake_amount: number}` -> `Prediction`
   (payload shape depends on bet_type -- see below. Rejected with 400 if market isn't `open`,
-  `now > closes_at`, the market can't be priced yet (no standings/scores), or the user's balance
-  can't cover `stake_amount`; 422 if the payload names a team/speaker/institution outside the
+  `now > closes_at`, the market can't be priced yet (no standings/scores), or the user's
+  TournamentBalance for this market's tournament can't cover `stake_amount`; 422 if the payload
+  names a team/speaker/institution outside the
   currently-tracked field. Re-submitting on the same market refunds the prior stake before
   charging the new one, rather than creating a second prediction.)
 

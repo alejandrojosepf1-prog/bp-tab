@@ -17,10 +17,10 @@ from app.db.base import Base
 from app.models.enums import BetMarketStatus, BetType, PredictionStatus, UserRole
 from app.models.mixins import TimestampMixin, TournamentScopedMixin
 
-# One-time grant of play tokens every new account starts with. Claim is a for-fun platform --
-# these are not dollars, are never bought or cashed out, and no real money exists anywhere in the
-# system. The constant is referenced by the register endpoint and the balance column default so
-# the two can never drift apart.
+# One-time grant of play tokens a NEW tournament balance starts with, before any ROI
+# carryover from a previous tournament is applied -- see app.services.bankroll_service. Claim is
+# a for-fun platform: these are not dollars, are never bought or cashed out, and no real money
+# exists anywhere in the system.
 STARTING_BALANCE = 100.0
 
 
@@ -33,9 +33,9 @@ class User(Base, TimestampMixin):
     display_name: Mapped[str] = mapped_column(String(100), nullable=False)
     role: Mapped[UserRole] = mapped_column(default=UserRole.USER, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
-    # Play-token balance -- goes up and down as the user places/wins/loses bets (see
-    # services/betting_service.py). Every new account is granted STARTING_BALANCE tokens.
-    balance: Mapped[float] = mapped_column(Float, default=STARTING_BALANCE, nullable=False)
+    # No balance column here anymore (CNADE 2026 Roadmap Pieza 3) -- a play-token balance is
+    # 100% per-tournament now, not one wallet shared across every tournament a friend group
+    # tracks. See TournamentBalance below and app.services.bankroll_service.
 
 
 class BetMarket(Base, TournamentScopedMixin, TimestampMixin):
@@ -105,15 +105,16 @@ class Prediction(Base, TimestampMixin):
     payload: Mapped[dict] = mapped_column(JSON, nullable=False)
     locked_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     status: Mapped[PredictionStatus] = mapped_column(default=PredictionStatus.OPEN, nullable=False)
-    # Fictional USD wagered on this specific prediction, deducted from User.balance the moment
-    # it's placed (see services/betting_service.py::place_prediction).
+    # Fictional USD wagered on this specific prediction, deducted from the user's
+    # TournamentBalance for this market's tournament the moment it's placed (see
+    # services/betting_service.py::place_prediction).
     stake_amount: Mapped[float] = mapped_column(Float, nullable=False)
     # Decimal ("pays 1.85x") odds, priced from team/speaker/institution strength by
     # app.services.odds_service at the moment this prediction was placed and frozen from then
     # on -- a later swing in the market's pool or in team strength never changes an
     # already-placed bet's payout, same as a real fixed-odds sportsbook (not pari-mutuel).
     odds: Mapped[float] = mapped_column(Float, nullable=False)
-    # The total amount ever credited back to User.balance for this prediction: stake_amount *
+    # The total amount ever credited back to the user's TournamentBalance for this prediction: stake_amount *
     # odds if it won, 0.0 if it lost, None while still OPEN. (Field predates the odds/stake
     # model -- kept under its original name since it's the same "how much did this prediction
     # pay" concept, just no longer a fixed per-bet_type point value.) For round_winner's
@@ -168,6 +169,31 @@ class OddsSnapshot(Base):
     captured_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, index=True
     )
+
+
+class TournamentBalance(Base, TournamentScopedMixin, TimestampMixin):
+    """A user's play-token wallet for ONE tournament (CNADE 2026 Roadmap Pieza 3) -- the unit
+    that `place_prediction`, `settle_market`, `transfer_service`, and `prize_service` all charge
+    and credit against, replacing the old global `User.balance`.
+
+    Never construct this directly -- always go through
+    `app.services.bankroll_service.get_or_create_tournament_balance`, which lazily creates the
+    row the first time a user touches this tournament's economy and applies the ROI-carryover
+    starting balance from their previous COMPLETED tournament (or a flat STARTING_BALANCE if
+    there isn't one)."""
+
+    __tablename__ = "tournament_balances"
+    __table_args__ = (
+        UniqueConstraint("tournament_id", "user_id", name="uq_tournament_balances_tournament_user"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    balance: Mapped[float] = mapped_column(Float, nullable=False)
+
+    user = relationship("User")
 
 
 class LeaderboardEntry(Base, TimestampMixin):

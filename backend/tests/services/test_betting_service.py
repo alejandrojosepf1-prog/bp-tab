@@ -17,7 +17,7 @@ from app.models import (
     Tournament,
     User,
 )
-from app.models.betting import BetMarket, Prediction
+from app.models.betting import STARTING_BALANCE, BetMarket, Prediction, TournamentBalance
 from app.models.enums import (
     BetMarketStatus,
     BetType,
@@ -82,6 +82,21 @@ async def _make_user(db_session, email: str) -> User:
     return user
 
 
+async def _balance(db_session, tournament_id: int, user_id: int) -> float:
+    """Reads a TournamentBalance the way any real consumer would -- STARTING_BALANCE if the row
+    hasn't been lazily created yet (see bankroll_service.get_or_create_tournament_balance),
+    since that's the value it WILL be created with."""
+    tb = (
+        await db_session.execute(
+            select(TournamentBalance).where(
+                TournamentBalance.tournament_id == tournament_id,
+                TournamentBalance.user_id == user_id,
+            )
+        )
+    ).scalar_one_or_none()
+    return tb.balance if tb is not None else STARTING_BALANCE
+
+
 async def _make_market(
     db_session, tournament: Tournament, bet_type: BetType, **kwargs
 ) -> BetMarket:
@@ -132,7 +147,7 @@ async def test_settle_market_champion_scores_and_updates_leaderboard(db_session)
         )
     )
     await db_session.commit()
-    alice_balance_before = alice.balance
+    alice_balance_before = await _balance(db_session, tournament.id, alice.id)
 
     settled = await settle_market(db_session, market)
     await db_session.commit()
@@ -155,8 +170,7 @@ async def test_settle_market_champion_scores_and_updates_leaderboard(db_session)
     # Bob lost: stake was already deducted at placement time, no further loss on settlement.
     assert by_user[bob.id].points_awarded == 0.0
 
-    await db_session.refresh(alice)
-    assert alice.balance == alice_balance_before + 117.0
+    assert await _balance(db_session, tournament.id, alice.id) == alice_balance_before + 117.0
 
     leaderboard = (await db_session.execute(select(LeaderboardEntry))).scalars().all()
     by_user_lb = {entry.user_id: entry for entry in leaderboard}
@@ -841,7 +855,7 @@ async def test_place_prediction_same_team_same_debate_replaces_not_duplicates(db
     )
     alice = await _make_user(db_session, "alice@example.com")
     await db_session.commit()
-    balance_before = alice.balance
+    balance_before = await _balance(db_session, tournament.id, alice.id)
 
     await place_prediction(
         db_session, market, alice, {"debate_id": debate_a.id, "team_id": teams[0].id}, 10.0
@@ -868,8 +882,7 @@ async def test_place_prediction_same_team_same_debate_replaces_not_duplicates(db
     assert len(predictions) == 1
     assert predictions[0].payload == {"debate_id": debate_a.id, "team_id": teams[0].id}
     assert predictions[0].stake_amount == 25.0
-    await db_session.refresh(alice)
-    assert alice.balance == balance_before - 25.0
+    assert await _balance(db_session, tournament.id, alice.id) == balance_before - 25.0
 
 
 async def test_place_prediction_speaker_positions_are_independent_slots(db_session) -> None:
@@ -972,7 +985,7 @@ async def test_settle_market_never_re_credits_an_already_settled_prediction(db_s
 
     alice = await _make_user(db_session, "alice@example.com")
     bob = await _make_user(db_session, "bob@example.com")
-    alice.balance = 0.0
+    db_session.add(TournamentBalance(tournament_id=market.tournament_id, user_id=alice.id, balance=0.0))
     db_session.add_all(
         [
             _prediction(
@@ -994,7 +1007,7 @@ async def test_settle_market_never_re_credits_an_already_settled_prediction(db_s
 
     assert await settle_market(db_session, market) is False
     await db_session.commit()
-    balance_after_first_cycle = alice.balance
+    balance_after_first_cycle = await _balance(db_session, market.tournament_id, alice.id)
     # Pieza 3: pari-mutuel payout, not stake * frozen odds -- the exact number doesn't matter
     # for what this regression actually guards (that repeated cycles never pay it AGAIN, checked
     # below), only that it's stable across cycles.
@@ -1005,7 +1018,7 @@ async def test_settle_market_never_re_credits_an_already_settled_prediction(db_s
         assert await settle_market(db_session, market) is False
         await db_session.commit()
 
-    assert alice.balance == balance_after_first_cycle
+    assert await _balance(db_session, market.tournament_id, alice.id) == balance_after_first_cycle
     assert market.status != BetMarketStatus.SETTLED
 
 
@@ -1132,7 +1145,7 @@ async def test_round_winner_settles_via_manual_advancing_teams_in_elimination(db
         ]
     )
     await db_session.commit()
-    alice_balance_before = alice.balance
+    alice_balance_before = await _balance(db_session, tournament.id, alice.id)
 
     # Not settleable yet -- advanced is still null for every team.
     assert await settle_market(db_session, market) is False
@@ -1153,8 +1166,8 @@ async def test_round_winner_settles_via_manual_advancing_teams_in_elimination(db
     assert by_user[alice.id].points_awarded == pytest.approx(25.3)
     assert by_user[bob.id].points_awarded == 0.0  # eliminated -> lost
 
-    await db_session.refresh(alice)
-    assert alice.balance == pytest.approx(alice_balance_before + 25.3)
+    balance = await _balance(db_session, tournament.id, alice.id)
+    assert balance == pytest.approx(alice_balance_before + 25.3)
 
 
 def test_entity_key_round_head_to_head_is_scoped_by_debate_and_pair() -> None:
@@ -1212,7 +1225,7 @@ async def test_round_head_to_head_settles_base_pick_correctly(db_session) -> Non
         ]
     )
     await db_session.commit()
-    alice_balance_before = alice.balance
+    alice_balance_before = await _balance(db_session, tournament.id, alice.id)
 
     assert await settle_market(db_session, market) is True
     await db_session.commit()
@@ -1225,8 +1238,8 @@ async def test_round_head_to_head_settles_base_pick_correctly(db_session) -> Non
     assert by_user[alice.id].points_awarded == pytest.approx(17.9)
     assert by_user[bob.id].points_awarded == 0.0
 
-    await db_session.refresh(alice)
-    assert alice.balance == pytest.approx(alice_balance_before + 17.9)
+    balance = await _balance(db_session, tournament.id, alice.id)
+    assert balance == pytest.approx(alice_balance_before + 17.9)
 
 
 async def test_round_head_to_head_sub_bet_is_all_or_nothing(db_session) -> None:
@@ -1426,7 +1439,7 @@ async def test_round_winner_sub_bet_pays_base_then_settles_deferred_once_scores_
         db_session, tournament, BetType.ROUND_WINNER, target_round_id=round_1.id
     )
     alice = await _make_user(db_session, "alice@example.com")
-    alice_balance_before = alice.balance
+    alice_balance_before = await _balance(db_session, tournament.id, alice.id)
     db_session.add(
         _prediction(
             BetType.ROUND_WINNER, market_id=market.id, user_id=alice.id,
@@ -1454,7 +1467,8 @@ async def test_round_winner_sub_bet_pays_base_then_settles_deferred_once_scores_
     assert prediction.points_awarded == pytest.approx(13.4)
     assert prediction.sub_bet_status == PredictionStatus.OPEN
     assert prediction.sub_bet_points_awarded is None
-    assert alice.balance == pytest.approx(alice_balance_before + 13.4)
+    balance = await _balance(db_session, tournament.id, alice.id)
+    assert balance == pytest.approx(alice_balance_before + 13.4)
     # The trap: the market is ALREADY settled here, same as every round_winner market will be
     # by the time speaker points actually show up.
     assert market.status == BetMarketStatus.SETTLED
@@ -1481,7 +1495,8 @@ async def test_round_winner_sub_bet_pays_base_then_settles_deferred_once_scores_
     assert prediction.sub_bet_status == PredictionStatus.SETTLED
     assert prediction.sub_bet_points_awarded == pytest.approx(bonus)
     assert prediction.points_awarded == pytest.approx(13.4 + bonus)  # base + bonus folded
-    assert alice.balance == pytest.approx(alice_balance_before + 13.4 + bonus)
+    balance = await _balance(db_session, tournament.id, alice.id)
+    assert balance == pytest.approx(alice_balance_before + 13.4 + bonus)
 
     leaderboard = (
         await db_session.execute(
@@ -1554,7 +1569,7 @@ async def test_round_winner_sub_bet_settles_as_a_loss_when_speaker_scores_are_wr
         db_session, tournament, BetType.ROUND_WINNER, target_round_id=round_1.id
     )
     alice = await _make_user(db_session, "alice@example.com")
-    alice_balance_before = alice.balance
+    alice_balance_before = await _balance(db_session, tournament.id, alice.id)
     db_session.add(
         _prediction(
             BetType.ROUND_WINNER, market_id=market.id, user_id=alice.id,
@@ -1592,7 +1607,8 @@ async def test_round_winner_sub_bet_settles_as_a_loss_when_speaker_scores_are_wr
     # Pieza 3: base payout stands at its pari-mutuel ratio (same fixture/stake as the sibling
     # "scores arrive correctly" test above -> same 13.4), no bonus added since the guess missed.
     assert prediction.points_awarded == pytest.approx(13.4)
-    assert alice.balance == pytest.approx(alice_balance_before + 13.4)
+    balance = await _balance(db_session, tournament.id, alice.id)
+    assert balance == pytest.approx(alice_balance_before + 13.4)
 
 
 async def test_round_winner_sub_bet_odds_rejects_malformed_speaker_scores(db_session) -> None:

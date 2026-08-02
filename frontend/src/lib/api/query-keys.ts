@@ -40,6 +40,7 @@ export const queryKeys = {
   dashboard: (tournamentId: Id) => ["tournaments", tournamentId, "dashboard"] as const,
 
   me: ["auth", "me"] as const,
+  myBalance: (tournamentId: Id) => ["tournaments", tournamentId, "me", "balance"] as const,
   users: ["auth", "users"] as const,
   myTransfers: ["transfers", "me"] as const,
   adminUsers: ["admin", "users"] as const,

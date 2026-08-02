@@ -1474,7 +1474,7 @@ function StakeSlip({
   isSaving: boolean;
   onSubmit: (stakeAmount: number) => void;
 }) {
-  const { user } = useAuth();
+  const { balance } = useAuth();
   const [stake, setStake] = useState<string>(existing ? String(existing.stake_amount) : "");
 
   const payloadKey = payload ? JSON.stringify(payload) : null;
@@ -1488,7 +1488,7 @@ function StakeSlip({
 
   const stakeNumber = Number(stake);
   const stakeValid = stake !== "" && stakeNumber > 0;
-  const overBalance = user != null && stakeValid && stakeNumber > user.balance + (existing?.status === "open" ? existing.stake_amount : 0);
+  const overBalance = balance != null && stakeValid && stakeNumber > balance + (existing?.status === "open" ? existing.stake_amount : 0);
   const odds = payload ? quote?.odds ?? null : null;
   // Present only when payload has a "sub_bet" key AND this bet_type prices one (see backend
   // odds_service.quote_sub_bet_odds) -- the combined price is all-or-nothing (see
@@ -1567,7 +1567,7 @@ function StakeSlip({
       )}
       {overBalance && (
         <p className="text-xs text-destructive">
-          No te alcanzan los tokens ({formatTokens(user?.balance ?? 0)}).
+          No te alcanzan los tokens ({formatTokens(balance ?? 0)}).
         </p>
       )}
     </div>

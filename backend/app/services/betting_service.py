@@ -56,6 +56,7 @@ from app.models.enums import (
 # opens the bench" -- straight from data already recorded for every judged debate, no new column.
 _FIRST_SPEAKER_ROLES = {SpeakerRole.PM, SpeakerRole.LO, SpeakerRole.MG, SpeakerRole.MO}
 from app.repositories.upsert import upsert_by_natural_key
+from app.services.bankroll_service import get_or_create_tournament_balance
 from app.services.odds_service import (
     MAX_SPEAKER_POSITION,
     quote_odds,
@@ -260,8 +261,11 @@ async def place_prediction(
     payload: dict,
     stake_amount: float,
 ) -> Prediction:
-    """Prices `payload` via `odds_service.quote_odds`, charges `stake_amount` against
-    `user.balance`, and upserts the Prediction row with odds locked in at this moment.
+    """Prices `payload` via `odds_service.quote_odds`, charges `stake_amount` against the
+    user's `TournamentBalance` for `bet_market.tournament_id` (CNADE 2026 Roadmap Pieza 3 --
+    lazily created via `bankroll_service.get_or_create_tournament_balance` if this is the
+    user's first touch of this tournament's economy), and upserts the Prediction row with odds
+    locked in at this moment.
 
     A user can hold one OPEN prediction per (market, entity_key) -- see `_entity_key` -- so
     betting on a different debate/slot/team within the same market creates a SEPARATE
@@ -282,6 +286,8 @@ async def place_prediction(
             f"la apuesta mínima para tipo de moción es {MOTION_TYPE_MIN_STAKE:.0f} tokens"
         )
 
+    tournament_balance = await get_or_create_tournament_balance(session, user, bet_market.tournament_id)
+
     odds = await quote_odds(session, bet_market, payload, exclude_user_id=user.id)
     # None whenever payload has no "sub_bet" key or this bet_type has no modifier support --
     # see quote_sub_bet_odds and Prediction's sub_bet_* column docstring.
@@ -298,7 +304,7 @@ async def place_prediction(
         )
     ).scalar_one_or_none()
     if existing is not None and existing.status == PredictionStatus.OPEN:
-        user.balance += existing.stake_amount
+        tournament_balance.balance += existing.stake_amount
 
     # A genuinely NEW single-team ROUND_WINNER pick (not an edit of one already held, hence
     # `existing is None`) is capped at 2 per debate -- see _entity_key: each team gets its own
@@ -326,11 +332,11 @@ async def place_prediction(
                 "equipos por separado."
             )
 
-    if user.balance < stake_amount:
+    if tournament_balance.balance < stake_amount:
         raise InsufficientBalanceError(
-            f"insufficient balance: have {user.balance:.2f}, need {stake_amount:.2f}"
+            f"insufficient balance: have {tournament_balance.balance:.2f}, need {stake_amount:.2f}"
         )
-    user.balance -= stake_amount
+    tournament_balance.balance -= stake_amount
 
     now = datetime.datetime.now(datetime.timezone.utc)
     result = await upsert_by_natural_key(
@@ -708,7 +714,7 @@ async def settle_market(
         # Never re-score an already-settled prediction. A per-prediction market stays un-SETTLED
         # (returns False below) while ANY of its debates is still unresolved, so this same market
         # is revisited on every subsequent scrape cycle -- without this guard the predictions
-        # that DID already resolve would have their payout credited to User.balance again on
+        # that DID already resolve would have their payout credited to the user's balance again on
         # every single cycle, minting balance out of nothing until the last debate resolved.
         if prediction.status == PredictionStatus.SETTLED:
             continue
@@ -730,7 +736,10 @@ async def settle_market(
         if payout > 0:
             user = await session.get(User, prediction.user_id)
             if user is not None:
-                user.balance += payout
+                tournament_balance = await get_or_create_tournament_balance(
+                    session, user, bet_market.tournament_id
+                )
+                tournament_balance.balance += payout
 
     # An OPEN market nobody has bet on yet must never be auto-settled: with no predictions the
     # `all(...)` check below is vacuously true, so a freshly-created round market would be marked
@@ -827,7 +836,10 @@ async def settle_pending_sub_bets(session: AsyncSession, tournament_id: int) -> 
             prediction.points_awarded = (prediction.points_awarded or 0.0) + bonus
             user = await session.get(User, prediction.user_id)
             if user is not None:
-                user.balance += bonus
+                tournament_balance = await get_or_create_tournament_balance(
+                    session, user, tournament_id
+                )
+                tournament_balance.balance += bonus
 
     if resolved:
         await recompute_leaderboard(session, tournament_id)
@@ -887,10 +899,10 @@ async def recompute_leaderboard(session: AsyncSession, tournament_id: int) -> No
     summarizes.
 
     `total_points` here is this tournament's NET profit/loss (payout minus stake across every
-    settled prediction on one of its markets), not the user's overall bankroll: `User.balance`
-    is a single global wallet shared across every tournament a friend group tracks, so a
-    per-tournament leaderboard has to look at that tournament's predictions specifically to say
-    anything meaningful about "who called CMUDE 2025 the best." Unlike balance this CAN go
+    settled prediction on one of its markets), not the user's `TournamentBalance` for it: a
+    balance also reflects tokens still tied up in OPEN predictions and any ROI carryover from a
+    previous tournament (see app.services.bankroll_service), so it isn't a pure measure of
+    skill on THIS tournament's markets the way this sum is. Unlike balance this CAN go
     negative -- it's a scoreboard of prediction skill, not a running cash total.
     """
     stmt = (

@@ -334,13 +334,25 @@ async def test_odds_move_with_the_pool_as_stakes_come_in(
     # original two-account 150-each setup did; the point (real money piling onto one side moves
     # the price) doesn't depend on how many accounts that money came from.
     alice = await make_user(
-        db_session, email="alice2@example.com", display_name="Alice2", balance=1000.0
+        db_session,
+        email="alice2@example.com",
+        display_name="Alice2",
+        tournament=tournament,
+        balance=1000.0,
     )
     bob = await make_user(
-        db_session, email="bob2@example.com", display_name="Bob2", balance=1000.0
+        db_session,
+        email="bob2@example.com",
+        display_name="Bob2",
+        tournament=tournament,
+        balance=1000.0,
     )
     dave = await make_user(
-        db_session, email="dave2@example.com", display_name="Dave2", balance=1000.0
+        db_session,
+        email="dave2@example.com",
+        display_name="Dave2",
+        tournament=tournament,
+        balance=1000.0,
     )
     carol = await make_user(db_session, email="carol2@example.com", display_name="Carol2")
 

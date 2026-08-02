@@ -31,6 +31,7 @@ def test_all_domain_tables_are_registered() -> None:
         "bet_markets",
         "predictions",
         "leaderboard_entries",
+        "tournament_balances",
         "scrape_logs",
         "change_events",
         "prize_events",
