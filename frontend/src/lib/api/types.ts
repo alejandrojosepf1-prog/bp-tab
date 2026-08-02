@@ -452,6 +452,36 @@ export interface GameEconomy {
   payout_spread_best_case_total: number;
 }
 
+// ---------- Admin: Identidad de circuito ----------
+// Ver backend app.services.circuit_curation_service. Dos huecos distintos que curación humana
+// cierra: instituciones con un match difuso sin confirmar, y equipos que la heurística de
+// prefijo nunca pudo vincular a ninguna institución de su propio torneo.
+
+export interface CircuitInstitution {
+  id: number;
+  name: string;
+  slug: string;
+  region: string | null;
+}
+
+export interface CircuitReviewItem {
+  institution_id: number;
+  tournament_id: number;
+  institution_name: string;
+  institution_code: string;
+  matched_circuit_institution: CircuitInstitution;
+}
+
+export interface UnassignedTeam {
+  team_id: number;
+  tournament_id: number;
+  team_name: string;
+}
+
+export type CircuitInstitutionResolvePayload =
+  | { circuit_institution_id: number }
+  | { new_institution_name: string; new_institution_region?: string };
+
 // ---------- Leaderboard ----------
 
 export interface LeaderboardEntry {

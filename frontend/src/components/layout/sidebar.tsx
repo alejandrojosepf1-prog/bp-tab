@@ -19,6 +19,7 @@ import {
   Gem,
   Landmark,
   Gift,
+  GitMerge,
 } from "lucide-react";
 import { useAuth } from "@/lib/auth/auth-context";
 import { cn } from "@/lib/utils";
@@ -41,6 +42,7 @@ const ADMIN_ITEMS = [
   { href: "/admin/users", label: "Usuarios", icon: Users },
   { href: "/admin/scraping", label: "Scraping", icon: Radar },
   { href: "/admin/finance", label: "Economía", icon: Landmark },
+  { href: "/admin/circuit", label: "Instituciones", icon: GitMerge },
 ];
 
 function Wordmark() {

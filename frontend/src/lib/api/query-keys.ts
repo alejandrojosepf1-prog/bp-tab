@@ -48,4 +48,7 @@ export const queryKeys = {
     ["admin", "pending-elimination-results", tournamentId ?? "all"] as const,
   adminGameEconomy: (tournamentId?: Id) =>
     ["admin", "game-economy", tournamentId ?? "all"] as const,
+  adminCircuitInstitutions: ["admin", "circuit", "institutions"] as const,
+  adminCircuitReviewQueue: ["admin", "circuit", "review-queue"] as const,
+  adminUnassignedTeams: ["admin", "circuit", "unassigned-teams"] as const,
 };

@@ -23,6 +23,12 @@ class Institution(Base, TournamentScopedMixin, TimestampMixin):
     # 'Chile', 'Perú', 'España', ...). Kept nullable/free-text since not every tournament fills
     # it in, and some may use it for a sub-national region instead of a country.
     region: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    # Cross-tournament identity, populated by app.services.circuit_identity_service during
+    # ingestion -- see app.models.circuit.CircuitInstitution's docstring. Nullable because it's
+    # backfilled onto existing rows and because matching can't run without that service.
+    circuit_institution_id: Mapped[int | None] = mapped_column(
+        ForeignKey("circuit_institutions.id", ondelete="SET NULL"), nullable=True, index=True
+    )
 
     teams = relationship("Team", back_populates="institution")
     adjudicators = relationship("Adjudicator", back_populates="institution")
@@ -109,6 +115,12 @@ class Speaker(Base, TournamentScopedMixin, TimestampMixin):
         ForeignKey("teams.id", ondelete="SET NULL"), nullable=True, index=True
     )
     name: Mapped[str] = mapped_column(String(200), nullable=False)
+    # Cross-tournament identity -- see Institution.circuit_institution_id's docstring for the
+    # same pattern. A speaker and an adjudicator can resolve to the same CircuitPerson (alumni
+    # who return to judge), see app.models.circuit.CircuitPerson.
+    circuit_person_id: Mapped[int | None] = mapped_column(
+        ForeignKey("circuit_people.id", ondelete="SET NULL"), nullable=True, index=True
+    )
 
     team = relationship("Team", back_populates="speakers")
     categories = relationship(
@@ -141,5 +153,9 @@ class Adjudicator(Base, TournamentScopedMixin, ExternalIdMixin, TimestampMixin):
         ForeignKey("institutions.id", ondelete="SET NULL"), nullable=True
     )
     is_independent: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    # See Speaker.circuit_person_id's docstring.
+    circuit_person_id: Mapped[int | None] = mapped_column(
+        ForeignKey("circuit_people.id", ondelete="SET NULL"), nullable=True, index=True
+    )
 
     institution = relationship("Institution", back_populates="adjudicators")

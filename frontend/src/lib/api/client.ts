@@ -5,6 +5,9 @@ import type {
   BreakAssessment,
   BreakCategory,
   BreakEntry,
+  CircuitInstitution,
+  CircuitInstitutionResolvePayload,
+  CircuitReviewItem,
   Debate,
   DebateSummary,
   DashboardData,
@@ -33,6 +36,7 @@ import type {
   TeamStanding,
   Tournament,
   TournamentStatus,
+  UnassignedTeam,
   User,
 } from "./types";
 
@@ -315,6 +319,17 @@ export const api = {
       patch<RoundMotionCategory>(`/admin/rounds/${roundId}/motion-category`, {
         motion_category: motionCategory,
       }),
+    circuitInstitutions: () => get<CircuitInstitution[]>("/admin/circuit/institutions"),
+    circuitReviewQueue: () => get<CircuitReviewItem[]>("/admin/circuit/review-queue"),
+    resolveCircuitInstitution: (
+      institutionId: number | string,
+      payload: CircuitInstitutionResolvePayload
+    ) => post<CircuitInstitution>(`/admin/circuit/institutions/${institutionId}/resolve`, payload),
+    unassignedTeams: () => get<UnassignedTeam[]>("/admin/circuit/unassigned-teams"),
+    assignTeamInstitution: (
+      teamId: number | string,
+      payload: CircuitInstitutionResolvePayload
+    ) => post<CircuitInstitution>(`/admin/circuit/teams/${teamId}/assign-institution`, payload),
   },
 };
 

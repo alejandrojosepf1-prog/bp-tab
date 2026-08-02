@@ -5,6 +5,10 @@ from app.models.enums import TournamentStatus
 def test_all_domain_tables_are_registered() -> None:
     expected = {
         "tournaments",
+        "circuit_institutions",
+        "circuit_institution_aliases",
+        "circuit_people",
+        "circuit_person_aliases",
         "break_categories",
         "speaker_categories",
         "institutions",

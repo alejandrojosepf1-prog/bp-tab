@@ -53,6 +53,7 @@ from app.models.enums import (
     ScrapeStrategy,
 )
 from app.repositories.upsert import UpsertResult, upsert_by_natural_key
+from app.services.circuit_identity_service import match_or_create_institution, match_or_create_person
 from app.scraper.dtos import TournamentSnapshot
 from app.scraper.parsers import _ELIMINATION_KEYWORDS, _synthetic_debate_id
 
@@ -159,11 +160,27 @@ class IngestionService:
     ) -> dict[str, int]:
         ids: dict[str, int] = {}
         for inst in snapshot.institutions:
+            circuit_institution, needs_review = await match_or_create_institution(
+                self.session, inst.name, inst.code, inst.region
+            )
+            if needs_review:
+                # ponytail: no admin curation queue endpoint yet (see CNADE 2026 - Roadmap
+                # 1.0, Pieza 2) -- log so a fuzzy match is at least traceable until it exists.
+                logger.warning(
+                    "fuzzy circuit_institution match: %r -> %r (id=%s)",
+                    inst.name,
+                    circuit_institution.name,
+                    circuit_institution.id,
+                )
             result = await upsert_by_natural_key(
                 self.session,
                 Institution,
                 lookup={"tournament_id": tournament.id, "code": inst.code},
-                values={"name": inst.name, "region": inst.region},
+                values={
+                    "name": inst.name,
+                    "region": inst.region,
+                    "circuit_institution_id": circuit_institution.id,
+                },
             )
             await self._track(tournament.id, "Institution", result)
             ids[inst.code] = result.instance.id
@@ -180,6 +197,7 @@ class IngestionService:
             institution_id = (
                 institution_id_by_code.get(adj.institution_code) if adj.institution_code else None
             )
+            circuit_person = await match_or_create_person(self.session, adj.name)
             result = await upsert_by_natural_key(
                 self.session,
                 Adjudicator,
@@ -188,6 +206,7 @@ class IngestionService:
                     "name": adj.name,
                     "institution_id": institution_id,
                     "is_independent": adj.is_independent,
+                    "circuit_person_id": circuit_person.id,
                 },
             )
             await self._track(tournament.id, "Adjudicator", result)
@@ -275,11 +294,12 @@ class IngestionService:
                     speaker.team_external_id,
                 )
                 continue
+            circuit_person = await match_or_create_person(self.session, speaker.name)
             result = await upsert_by_natural_key(
                 self.session,
                 Speaker,
                 lookup={"tournament_id": tournament.id, "team_id": team_id, "name": speaker.name},
-                values={},
+                values={"circuit_person_id": circuit_person.id},
             )
             await self._track(tournament.id, "Speaker", result)
             ids[(team_id, speaker.name)] = result.instance.id

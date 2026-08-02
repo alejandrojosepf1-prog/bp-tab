@@ -5,6 +5,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import require_admin
 from app.api.schemas.admin import (
     AdminUserUpdate,
+    CircuitInstitutionOut,
+    CircuitInstitutionResolveIn,
+    CircuitReviewItemOut,
     GameEconomyOut,
     ManualEliminationResultIn,
     MarketPayoutSpreadOut,
@@ -13,11 +16,19 @@ from app.api.schemas.admin import (
     RoundMotionCategoryOut,
     RoundMotionCategoryPatch,
     ScrapeLogOut,
+    UnassignedTeamOut,
 )
 from app.api.schemas.auth import UserOut
 from app.db.session import get_db
-from app.models import BetMarket, Round, ScrapeLog, User
+from app.models import BetMarket, CircuitInstitution, Round, ScrapeLog, Team, User
 from app.models.enums import BetMarketStatus
+from app.models.participants import Institution
+from app.services.circuit_curation_service import (
+    assign_team_institution,
+    list_review_queue,
+    list_unassigned_teams,
+    resolve_review_item,
+)
 from app.services.game_economy_service import compute_game_economy, compute_market_payout_spread
 from app.services.manual_results_service import (
     ManualResultError,
@@ -160,3 +171,85 @@ async def submit_manual_elimination_result(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     await session.commit()
     return {"status": "ok"}
+
+
+@router.get("/circuit/institutions", response_model=list[CircuitInstitutionOut])
+async def list_circuit_institutions(session: AsyncSession = Depends(get_db)) -> list[CircuitInstitution]:
+    """Full circuit-wide institution roster, for the admin curation picker (grouped by
+    `region` client-side) -- see app.services.circuit_curation_service."""
+    stmt = select(CircuitInstitution).order_by(CircuitInstitution.region, CircuitInstitution.name)
+    return list((await session.execute(stmt)).scalars().all())
+
+
+@router.get("/circuit/review-queue", response_model=list[CircuitReviewItemOut])
+async def get_circuit_review_queue(session: AsyncSession = Depends(get_db)) -> list[CircuitReviewItemOut]:
+    items = await list_review_queue(session)
+    return [
+        CircuitReviewItemOut(
+            institution_id=item.institution.id,
+            tournament_id=item.institution.tournament_id,
+            institution_name=item.institution.name,
+            institution_code=item.institution.code,
+            matched_circuit_institution=CircuitInstitutionOut.model_validate(
+                item.circuit_institution
+            ),
+        )
+        for item in items
+    ]
+
+
+@router.post("/circuit/institutions/{institution_id}/resolve", response_model=CircuitInstitutionOut)
+async def resolve_circuit_institution(
+    institution_id: int,
+    payload: CircuitInstitutionResolveIn,
+    session: AsyncSession = Depends(get_db),
+) -> CircuitInstitution:
+    institution = await session.get(Institution, institution_id)
+    if institution is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Institution not found")
+    try:
+        target = await resolve_review_item(
+            session,
+            institution,
+            circuit_institution_id=payload.circuit_institution_id,
+            new_institution_name=payload.new_institution_name,
+            new_institution_region=payload.new_institution_region,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    await session.commit()
+    return target
+
+
+@router.get("/circuit/unassigned-teams", response_model=list[UnassignedTeamOut])
+async def get_unassigned_teams(session: AsyncSession = Depends(get_db)) -> list[UnassignedTeamOut]:
+    teams = await list_unassigned_teams(session)
+    return [
+        UnassignedTeamOut(team_id=t.id, tournament_id=t.tournament_id, team_name=t.name)
+        for t in teams
+    ]
+
+
+@router.post("/circuit/teams/{team_id}/assign-institution", response_model=CircuitInstitutionOut)
+async def assign_team_to_institution(
+    team_id: int,
+    payload: CircuitInstitutionResolveIn,
+    session: AsyncSession = Depends(get_db),
+) -> CircuitInstitution:
+    team = await session.get(Team, team_id)
+    if team is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Team not found")
+    try:
+        institution = await assign_team_institution(
+            session,
+            team,
+            circuit_institution_id=payload.circuit_institution_id,
+            new_institution_name=payload.new_institution_name,
+            new_institution_region=payload.new_institution_region,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    await session.commit()
+    circuit_institution = await session.get(CircuitInstitution, institution.circuit_institution_id)
+    assert circuit_institution is not None
+    return circuit_institution
