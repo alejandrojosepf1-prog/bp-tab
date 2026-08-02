@@ -42,6 +42,8 @@ from collections import defaultdict
 from collections.abc import Iterable
 from typing import TypeVar
 
+from app.models.enums import BPPosition
+
 CandidateT = TypeVar("CandidateT")
 
 DEFAULT_TEMPERATURE = 1.0
@@ -497,6 +499,45 @@ def pari_mutuel_probability(
     if candidate_stake > compartment_stake:
         raise ValueError("candidate_stake cannot exceed compartment_stake")
     return (candidate_stake + seed * prior_probability) / (compartment_stake + seed)
+
+
+# Default weight of the positional-history term relative to the field's own power spread (see
+# `apply_positional_adjustment`) -- kept deliberately modest. This is a prior nudge, not a
+# replacement for the field's own results: even a position with a strongly one-sided historical
+# win rate should tilt the price, not dominate it the way a team's own accumulated points do.
+POSITIONAL_ADJUSTMENT_WEIGHT = 0.5
+
+
+def apply_positional_adjustment(
+    power_by_candidate: dict[CandidateT, float],
+    position_by_candidate: dict[CandidateT, BPPosition],
+    win_rate_by_position: dict[BPPosition, float],
+    *,
+    weight: float = POSITIONAL_ADJUSTMENT_WEIGHT,
+) -> dict[CandidateT, float]:
+    """Nudges each candidate's power score by how well its BP position (OG/OO/CG/CO) has
+    historically done in this kind of round -- see CNADE 2026 Roadmap Pieza 2b. Purely additive
+    to the SAME power dict `softmax_probabilities`/`top_n_probabilities` already consume, so it
+    composes with every existing pricing path without changing their shape.
+
+    Scaled by the field's own spread (`adaptive_temperature`) rather than a fixed constant, for
+    the same reason `adaptive_temperature` itself exists: team_points, speaker_points, and this
+    positional win rate are all on different unit scales, so "one std of the field" is the only
+    scale-free way to size the nudge consistently across tournaments and bet types.
+
+    Guaranteed a no-op with no historical data yet: `win_rate_by_position` defaults every
+    position to 0.25 when nothing has been observed (see positional_stats_service), and adding
+    the SAME constant to every candidate's score is invariant under softmax -- so this function
+    changes nothing until real backfilled position/round data exists to compute real rates from.
+    """
+    if not power_by_candidate:
+        return power_by_candidate
+    spread = adaptive_temperature(power_by_candidate.values())
+    return {
+        candidate: power
+        + weight * spread * win_rate_by_position.get(position_by_candidate[candidate], 0.25)
+        for candidate, power in power_by_candidate.items()
+    }
 
 
 def pari_mutuel_odds(
