@@ -991,6 +991,117 @@ async def test_market_board_round_winner_multi_debate_characterization(
     assert options_by_label["Board Team 2 gana su debate"]["odds"] == 1.87
 
 
+async def _seed_positional_history_favoring_og(db_session: AsyncSession) -> None:
+    """Populates PRELIMINARY-round debate history (in an unrelated tournament -- see
+    positional_stats_service, which counts across every tournament in the database) where
+    Opening Government always wins and Opening Opposition never does. Used to prove
+    round_winner pricing actually picks this up end-to-end, not just at the domain-function
+    level (see test_apply_positional_adjustment_favors_the_historically_stronger_position in
+    tests/domain/test_odds.py for that lower-level check)."""
+    tournament = Tournament(
+        name="Positional History Source",
+        slug="positional-history-source",
+        source_base_url="https://positional-history.calicotab.com",
+        source_slug="open",
+        status=TournamentStatus.COMPLETED,
+    )
+    db_session.add(tournament)
+    await db_session.flush()
+    round_ = Round(
+        tournament_id=tournament.id, seq=1, name="Round 1", stage=RoundStage.PRELIMINARY,
+        status=RoundStatus.COMPLETED,
+    )
+    db_session.add(round_)
+    await db_session.flush()
+    for i in range(5):
+        og_team = Team(tournament_id=tournament.id, external_id=1000 + i * 2, name=f"OG Winner {i}")
+        oo_team = Team(tournament_id=tournament.id, external_id=1001 + i * 2, name=f"OO Loser {i}")
+        db_session.add_all([og_team, oo_team])
+        await db_session.flush()
+        debate = Debate(tournament_id=tournament.id, round_id=round_.id, external_id=2000 + i)
+        db_session.add(debate)
+        await db_session.flush()
+        db_session.add_all(
+            [
+                DebateTeam(
+                    debate_id=debate.id,
+                    team_id=og_team.id,
+                    position=BPPosition.OPENING_GOVERNMENT,
+                    rank_in_debate=1,
+                ),
+                DebateTeam(
+                    debate_id=debate.id,
+                    team_id=oo_team.id,
+                    position=BPPosition.OPENING_OPPOSITION,
+                    rank_in_debate=4,
+                ),
+            ]
+        )
+    await db_session.commit()
+
+
+async def test_round_winner_quote_reflects_positional_history(
+    client: AsyncClient, db_session: AsyncSession
+) -> None:
+    """End-to-end proof that CNADE Roadmap Pieza 2b's positional prior actually reaches live
+    pricing: two teams with IDENTICAL power (both zero debates played) in a fresh debate should
+    price as a coin toss with no history, but once Opening Government has a real, seeded
+    historical edge over Opening Opposition, quote_odds must reflect it."""
+    await _seed_positional_history_favoring_og(db_session)
+
+    tournament, _t1, _t2 = await _make_tournament_with_team(db_session)
+    round_ = Round(
+        tournament_id=tournament.id, seq=1, name="Round 1", stage=RoundStage.PRELIMINARY,
+        status=RoundStatus.RELEASED,
+    )
+    db_session.add(round_)
+    await db_session.flush()
+    og_team = Team(tournament_id=tournament.id, external_id=500, name="Fresh OG")
+    oo_team = Team(tournament_id=tournament.id, external_id=501, name="Fresh OO")
+    db_session.add_all([og_team, oo_team])
+    await db_session.flush()
+    debate = Debate(tournament_id=tournament.id, round_id=round_.id, external_id=999)
+    db_session.add(debate)
+    await db_session.flush()
+    db_session.add_all(
+        [
+            DebateTeam(debate_id=debate.id, team_id=og_team.id, position=BPPosition.OPENING_GOVERNMENT),
+            DebateTeam(debate_id=debate.id, team_id=oo_team.id, position=BPPosition.OPENING_OPPOSITION),
+        ]
+    )
+    await db_session.commit()
+
+    admin = await make_user(db_session, email="admin-pos@example.com", role=UserRole.ADMIN)
+    create_response = await client.post(
+        f"/api/v1/tournaments/{tournament.id}/bet-markets",
+        json={
+            "bet_type": "round_winner",
+            "label": "Ganador",
+            "opens_at": PAST.isoformat(),
+            "closes_at": FUTURE.isoformat(),
+            "target_round_id": round_.id,
+        },
+        headers=auth_headers(admin),
+    )
+    market_id = create_response.json()["id"]
+
+    og_quote = await client.post(
+        f"/api/v1/bet-markets/{market_id}/quote",
+        json={"payload": {"debate_id": debate.id, "team_id": og_team.id}},
+        headers=auth_headers(admin),
+    )
+    oo_quote = await client.post(
+        f"/api/v1/bet-markets/{market_id}/quote",
+        json={"payload": {"debate_id": debate.id, "team_id": oo_team.id}},
+        headers=auth_headers(admin),
+    )
+
+    assert og_quote.status_code == 200
+    assert oo_quote.status_code == 200
+    # Lower decimal odds = higher implied probability -- OG should be the priced favorite.
+    assert og_quote.json()["odds"] < oo_quote.json()["odds"]
+
+
 async def test_round_head_to_head_quote_place_and_settle_with_sub_bet(
     client: AsyncClient, db_session: AsyncSession
 ) -> None:

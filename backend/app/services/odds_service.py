@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.domain.odds import (
     ELIMINATION_SEED,
     adaptive_temperature,
+    apply_positional_adjustment,
     decimal_odds_from_probability,
     exact_rank_gap_probability,
     pair_top_two_probability,
@@ -44,8 +45,16 @@ from app.models import (
     Team,
     TeamBreakCategory,
 )
-from app.models.enums import BetMarketStatus, BetType, MotionCategory, PredictionStatus, RoundStage
+from app.models.enums import (
+    BetMarketStatus,
+    BetType,
+    BPPosition,
+    MotionCategory,
+    PredictionStatus,
+    RoundStage,
+)
 from app.services.break_service import team_break_exact_rank_probability, team_break_probability
+from app.services.positional_stats_service import compute_positional_win_rates
 from app.services.ranking_service import get_standings
 
 SPEAKER_POINTS_WEIGHT = 0.02  # total_speaker_points are ~10-30x team_points in magnitude
@@ -330,6 +339,28 @@ async def _advancing_count(session: AsyncSession, debate_id: int) -> int | None:
         )
     ).scalar_one()
     return 1 if num_debates <= 1 else 2
+
+
+async def _apply_debate_positional_prior(
+    session: AsyncSession,
+    debate_power: dict[int, float],
+    positions_by_team: dict[int, BPPosition],
+    *,
+    advancing_count: int | None,
+) -> dict[int, float]:
+    """Nudges `debate_power` by each team's BP position's historical win rate for this kind of
+    round (preliminary vs. elimination, inferred the same way `_round_winner_odds` itself
+    branches on `advancing_count`) before it's turned into a price -- see CNADE 2026 Roadmap
+    Pieza 2b. Defensive no-op if a team's position is somehow missing (every DebateTeam row has
+    one in practice); see app.domain.odds.apply_positional_adjustment for why this is a
+    guaranteed no-op anyway with no historical data yet.
+    """
+    if not all(team_id in positions_by_team for team_id in debate_power):
+        return debate_power
+    stage = RoundStage.PRELIMINARY if advancing_count is None else RoundStage.ELIMINATION
+    win_rates = await compute_positional_win_rates(session, stage=stage)
+    position_by_candidate = {team_id: positions_by_team[team_id] for team_id in debate_power}
+    return apply_positional_adjustment(debate_power, position_by_candidate, win_rates)
 
 
 def _round_winner_odds(
@@ -738,18 +769,23 @@ async def quote_odds(
             if len(team_ids) != 2 or team_ids[0] == team_ids[1]:
                 raise ValueError("team_ids must name exactly 2 distinct teams")
             power = await compute_team_power_ratings(session, bet_market.tournament_id)
-            debate_team_ids = (
-                (
+            positions_by_team: dict[int, BPPosition] = {
+                row.team_id: row.position
+                for row in (
                     await session.execute(
-                        select(DebateTeam.team_id).where(DebateTeam.debate_id == debate_id)
+                        select(DebateTeam.team_id, DebateTeam.position).where(
+                            DebateTeam.debate_id == debate_id
+                        )
                     )
-                )
-                .scalars()
-                .all()
-            )
-            debate_power = {t: power[t] for t in debate_team_ids if t in power}
-            if len(debate_power) < len(debate_team_ids) or len(debate_power) < 2:
+                ).all()
+            }
+            pair_debate_team_ids = list(positions_by_team)
+            debate_power = {t: power[t] for t in pair_debate_team_ids if t in power}
+            if len(debate_power) < len(pair_debate_team_ids) or len(debate_power) < 2:
                 raise UnpriceableMarketError("not enough priced teams in this debate yet")
+            debate_power = await _apply_debate_positional_prior(
+                session, debate_power, positions_by_team, advancing_count=advancing_count
+            )
             a, b = team_ids
             if a not in debate_power or b not in debate_power:
                 raise KeyError((a, b))
@@ -761,16 +797,17 @@ async def quote_odds(
             return pari_mutuel_odds(candidate_stake, debate_stake, prior, seed=ELIMINATION_SEED)
 
         power = await compute_team_power_ratings(session, bet_market.tournament_id)
-        debate_team_ids = (
-            (
+        positions_by_team_single: dict[int, BPPosition] = {
+            row.team_id: row.position
+            for row in (
                 await session.execute(
-                    select(DebateTeam.team_id).where(DebateTeam.debate_id == debate_id)
+                    select(DebateTeam.team_id, DebateTeam.position).where(
+                        DebateTeam.debate_id == debate_id
+                    )
                 )
-            )
-            .scalars()
-            .all()
-        )
-        debate_power = {t: power[t] for t in debate_team_ids if t in power}
+            ).all()
+        }
+        debate_power = {t: power[t] for t in positions_by_team_single if t in power}
         if len(debate_power) < 2:
             raise UnpriceableMarketError("not enough priced teams in this debate yet")
         # Same reasoning as HEAD_TO_HEAD above: price this debate's 2-4 teams against the
@@ -780,13 +817,17 @@ async def quote_odds(
         candidate_stake, debate_stake = await _debate_pool(
             session, bet_market.id, debate_id, team_id, exclude_user_id=exclude_user_id
         )
+        advancing_count = await _advancing_count(session, debate_id)
+        debate_power = await _apply_debate_positional_prior(
+            session, debate_power, positions_by_team_single, advancing_count=advancing_count
+        )
         return _round_winner_odds(
             debate_power,
             team_id,
             temperature=temperature,
             candidate_stake=candidate_stake,
             compartment_stake=debate_stake,
-            advancing_count=await _advancing_count(session, debate_id),
+            advancing_count=advancing_count,
         )
 
     if bet_type == BetType.ROUND_FULL_CALL:
@@ -1271,6 +1312,7 @@ async def _generic_fallback_options(
         and payload.get("debate_id") is not None
     }
     teams_by_debate: dict[int, list[int]] = defaultdict(list)
+    positions_by_debate: dict[int, dict[int, BPPosition]] = defaultdict(dict)
     round_by_debate: dict[int, int | None] = {}
     # Elimination rounds price as top-N ("does this team advance") rather than one-winner -- see
     # `_round_winner_odds`. Both facts it needs (the round's stage, and how many debates the
@@ -1278,16 +1320,21 @@ async def _generic_fallback_options(
     # its "one query set for the whole market" property instead of calling `_advancing_count`
     # per debate.
     advancing_by_round: dict[int, int | None] = {}
+    # Lazily populated per stage (there are only 2), reused across every debate in the loop below
+    # instead of one compute_positional_win_rates call per payload -- same "one query set for the
+    # whole market" property as everything else in this function. See CNADE 2026 Roadmap Pieza 2b.
+    win_rates_by_stage: dict[RoundStage, dict[BPPosition, float]] = {}
     if debate_ids:
         debate_rows = (
             await session.execute(
-                select(DebateTeam.debate_id, DebateTeam.team_id).where(
+                select(DebateTeam.debate_id, DebateTeam.team_id, DebateTeam.position).where(
                     DebateTeam.debate_id.in_(debate_ids)
                 )
             )
         ).all()
-        for debate_id, team_id in debate_rows:
+        for debate_id, team_id, position in debate_rows:
             teams_by_debate[debate_id].append(team_id)
+            positions_by_debate[debate_id][team_id] = position
         round_rows = (
             await session.execute(
                 select(Debate.id, Debate.round_id).where(Debate.id.in_(debate_ids))
@@ -1318,6 +1365,11 @@ async def _generic_fallback_options(
         sum(power.values()) / len(power) if bet_type == BetType.TOP_SPEAKER_POSITION else 0.0
     )
 
+    async def _win_rates_for_stage(stage: RoundStage) -> dict[BPPosition, float]:
+        if stage not in win_rates_by_stage:
+            win_rates_by_stage[stage] = await compute_positional_win_rates(session, stage=stage)
+        return win_rates_by_stage[stage]
+
     odds_by_key: dict[str, float] = {}
     for key, payload in payload_by_key.items():
         try:
@@ -1343,6 +1395,18 @@ async def _generic_fallback_options(
                     continue
                 debate_team_ids = teams_by_debate.get(debate_id, [])
                 debate_power = {t: power[t] for t in debate_team_ids if t in power}
+                if len(debate_power) == len(debate_team_ids) and debate_power:
+                    round_advancing_count = advancing_by_round.get(round_by_debate.get(debate_id))
+                    debate_stage = (
+                        RoundStage.PRELIMINARY
+                        if round_advancing_count is None
+                        else RoundStage.ELIMINATION
+                    )
+                    debate_power = apply_positional_adjustment(
+                        debate_power,
+                        positions_by_debate.get(debate_id, {}),
+                        await _win_rates_for_stage(debate_stage),
+                    )
 
                 # Exact-pair pick -- folded in from the old ROUND_ADVANCING_PAIR bet_type, see
                 # the matching branch in quote_odds for the full explanation.
