@@ -150,19 +150,24 @@ async def test_full_champion_market_lifecycle_settles_and_updates_leaderboard(
     assert settle_response.json() == {"settled": True}
 
     # A 2-team field with no debates played yet prices both teams at a fair 50/50 prior
-    # (power=0 for both) -- see app.domain.odds's pari-mutuel-with-seed model. Alice's odds get
-    # LOCKED at her final (resubmit) call, which happens after Bob has already staked 50 on the
-    # loser: her own prior 100-stake is excluded from the pool she's priced against (see
-    # odds_service._open_stakes's exclude_user_id), so that pool is just Bob's 50 on the OTHER
-    # team, none of it on Alice's pick. pari_mutuel_probability(0, 50, 0.5, seed=200) = 100/250 =
-    # 0.4 -> decimal odds 1/0.4 = 2.5, the fair price with no margin taken. She staked 100 on the
-    # winner, so she's paid stake * odds = 250; Bob staked 50 on the loser and gets nothing back.
+    # (power=0 for both) -- see app.domain.odds's pari-mutuel-with-seed model. Alice's `odds`
+    # field is the LOCKED-IN quote from her final (resubmit) call, computed EXCLUDING her own
+    # stake (odds_service._open_stakes's exclude_user_id) -- at that moment the pool she was
+    # priced against was just Bob's 50 on the OTHER team: pari_mutuel_probability(0, 50, 0.5,
+    # seed=200) = 100/250 = 0.4 -> decimal odds 2.5.
+    #
+    # Pieza 3: that quote is now only ever a placement-time PROJECTION, never what settlement
+    # actually pays -- settlement_payout_ratio recomputes the SAME formula against the pool's
+    # TRUE final composition (everyone's stakes, hers included): candidate=100 (her own stake),
+    # pool=150 (100+50). pari_mutuel_probability(100, 150, 0.5, seed=200) = 200/350 = 0.5714... ->
+    # decimal odds 1.75. She staked 100 on the winner, so she's paid stake * 1.75 = 175; Bob
+    # staked 50 on the loser and gets nothing back.
     alice_after = await client.get(
         f"/api/v1/bet-markets/{market_id}/predictions/me", headers=auth_headers(alice)
     )
     assert alice_after.json()[0]["status"] == "settled"
-    assert alice_after.json()[0]["odds"] == 2.5
-    assert alice_after.json()[0]["points_awarded"] == 250.0
+    assert alice_after.json()[0]["odds"] == 2.5  # placement-time projection, unchanged
+    assert alice_after.json()[0]["points_awarded"] == 175.0  # actual pari-mutuel payout
 
     bob_after = await client.get(
         f"/api/v1/bet-markets/{market_id}/predictions/me", headers=auth_headers(bob)
@@ -175,7 +180,7 @@ async def test_full_champion_market_lifecycle_settles_and_updates_leaderboard(
     assert len(leaderboard) == 2
     top = leaderboard[0]
     assert top["user"]["display_name"] == "Alice"
-    assert top["total_points"] == 150.0  # net profit: 250 payout - 100 stake
+    assert top["total_points"] == 75.0  # net profit: 175 payout - 100 stake
     assert top["rank"] == 1
 
 
@@ -1183,9 +1188,11 @@ async def test_round_head_to_head_quote_place_and_settle_with_sub_bet(
     settled_prediction = after.json()[0]
     assert settled_prediction["status"] == "settled"
     assert settled_prediction["sub_bet_status"] == "settled"
-    expected_payout = 10.0 * settled_prediction["odds"] * settled_prediction["sub_bet_odds"]
-    assert settled_prediction["points_awarded"] == pytest.approx(expected_payout)
-    assert settled_prediction["sub_bet_points_awarded"] == pytest.approx(expected_payout)
+    # Pieza 3: `odds` is only the placement-time projection now, not what settlement actually
+    # pays -- `stake * odds * sub_bet_odds` no longer predicts the real payout, since the base
+    # portion is the pari-mutuel ratio computed from the pool's final composition instead.
+    assert settled_prediction["points_awarded"] == pytest.approx(37.8)
+    assert settled_prediction["sub_bet_points_awarded"] == pytest.approx(37.8)
 
 
 async def test_round_winner_speaker_points_sub_bet_pays_base_immediately_and_stays_open(
@@ -1270,7 +1277,9 @@ async def test_round_winner_speaker_points_sub_bet_pays_base_immediately_and_sta
     )
     settled_prediction = after.json()[0]
     assert settled_prediction["status"] == "settled"
-    assert settled_prediction["points_awarded"] == pytest.approx(10.0 * settled_prediction["odds"])
+    # Pieza 3: `odds` is only the placement-time projection, not what settlement pays -- the
+    # base is now the pari-mutuel ratio computed from the pool's final composition.
+    assert settled_prediction["points_awarded"] == pytest.approx(16.0)
     # The base pick already paid in full -- the sub-bet is still awaiting real speaker points.
     assert settled_prediction["sub_bet_status"] == "open"
     assert settled_prediction["sub_bet_points_awarded"] is None
@@ -1378,9 +1387,11 @@ async def test_round_winner_speaker_order_sub_bet_settles_same_time_as_base(
     # SAME settle call: sub_bet_status is already "settled", not left "open".
     assert settled_prediction["status"] == "settled"
     assert settled_prediction["sub_bet_status"] == "settled"
-    expected_payout = 10.0 * settled_prediction["odds"] * settled_prediction["sub_bet_odds"]
-    assert settled_prediction["points_awarded"] == pytest.approx(expected_payout)
-    assert settled_prediction["sub_bet_points_awarded"] == pytest.approx(expected_payout)
+    # Pieza 3: `odds` is only the placement-time projection -- `stake * odds * sub_bet_odds` no
+    # longer predicts the real payout, since the base portion is the pari-mutuel ratio computed
+    # from the pool's final composition instead.
+    assert settled_prediction["points_awarded"] == pytest.approx(32.0)
+    assert settled_prediction["sub_bet_points_awarded"] == pytest.approx(32.0)
 
 
 async def test_motion_type_fixed_odds_min_stake_and_premature_settlement_guard(

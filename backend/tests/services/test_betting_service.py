@@ -144,19 +144,24 @@ async def test_settle_market_champion_scores_and_updates_leaderboard(db_session)
         (await db_session.execute(select(Prediction).order_by(Prediction.user_id))).scalars().all()
     )
     by_user = {p.user_id: p for p in predictions}
-    # Alice won: payout = stake * odds = 100 * 2.0.
-    assert by_user[alice.id].points_awarded == 200.0
+    # Pieza 3: payout is the FINAL pari-mutuel split (settlement_payout_ratio), not the frozen
+    # `odds` locked in at bet time -- Alice's own `odds=2.0` above is now just a historical
+    # placement-time projection, never read at settlement. Only one real team exists (Bob's
+    # pick, team_id=999, isn't a registered team), so its prior is 1.0; blended against the
+    # pool (100 on the champion, 150 total) with the default seed of 200:
+    #   p = (100 + 200*1.0) / (150 + 200) = 300/350 = 0.857142... -> odds = round(1/p, 2) = 1.17
+    assert by_user[alice.id].points_awarded == 117.0
     assert by_user[alice.id].status == PredictionStatus.SETTLED
     # Bob lost: stake was already deducted at placement time, no further loss on settlement.
     assert by_user[bob.id].points_awarded == 0.0
 
     await db_session.refresh(alice)
-    assert alice.balance == alice_balance_before + 200.0
+    assert alice.balance == alice_balance_before + 117.0
 
     leaderboard = (await db_session.execute(select(LeaderboardEntry))).scalars().all()
     by_user_lb = {entry.user_id: entry for entry in leaderboard}
     # total_points is net profit (payout - stake) for THIS tournament, not the global balance.
-    assert by_user_lb[alice.id].total_points == 100.0  # 200 payout - 100 stake
+    assert by_user_lb[alice.id].total_points == 17.0  # 117 payout - 100 stake
     assert by_user_lb[alice.id].rank == 1
     assert by_user_lb[bob.id].total_points == -50.0  # 0 payout - 50 stake
     assert by_user_lb[bob.id].rank == 2
@@ -386,7 +391,12 @@ async def test_settle_market_round_full_call_exact_order_wins(db_session) -> Non
         p.user_id: p
         for p in (await db_session.execute(select(Prediction))).scalars().all()
     }
-    assert predictions[alice.id].points_awarded == 80.0
+    # Pieza 3: payout is the pari-mutuel split of the debate's final pool (Alice's exact_order
+    # vs. Bob's wrong_order, 10 staked each), priced from team power that now includes THIS
+    # debate's own just-judged result (settlement always reads current standings) -- not a hand
+    # round number like the old frozen odds=8.0. Alice's `odds` field is only the placement-time
+    # projection now; it's never read at settlement.
+    assert predictions[alice.id].points_awarded == pytest.approx(36.5)
     assert predictions[bob.id].points_awarded == 0.0
 
 
@@ -468,7 +478,10 @@ async def test_settle_market_top_speaker_position(db_session) -> None:
         p.user_id: p
         for p in (await db_session.execute(select(Prediction))).scalars().all()
     }
-    assert predictions[alice.id].points_awarded == 60.0
+    # Pieza 3: pari-mutuel payout from the position's own compartment (see
+    # settlement_payout_ratio's TOP_SPEAKER_POSITION branch / speaker_position_prior), not the
+    # frozen odds=6.0 above.
+    assert predictions[alice.id].points_awarded == pytest.approx(31.3)
     assert predictions[bob.id].points_awarded == 0.0
 
 
@@ -600,7 +613,8 @@ async def test_top_speaker_position_settles_positions_past_3_once_ranking_is_fin
     predictions = {
         p.user_id: p for p in (await db_session.execute(select(Prediction))).scalars().all()
     }
-    assert predictions[alice.id].points_awarded == 80.0  # 10.0 stake_amount default * 8.0 odds
+    # Pieza 3: pari-mutuel payout, not 10.0 stake * frozen odds=8.0.
+    assert predictions[alice.id].points_awarded == pytest.approx(47.2)
     assert predictions[bob.id].points_awarded == 0.0
 
 
@@ -981,7 +995,10 @@ async def test_settle_market_never_re_credits_an_already_settled_prediction(db_s
     assert await settle_market(db_session, market) is False
     await db_session.commit()
     balance_after_first_cycle = alice.balance
-    assert balance_after_first_cycle == 20.0  # stake 10.0 * odds 2.0
+    # Pieza 3: pari-mutuel payout, not stake * frozen odds -- the exact number doesn't matter
+    # for what this regression actually guards (that repeated cycles never pay it AGAIN, checked
+    # below), only that it's stable across cycles.
+    assert balance_after_first_cycle == pytest.approx(15.4)
 
     # Two more scrape cycles while debate B is still pending.
     for _ in range(2):
@@ -1132,11 +1149,12 @@ async def test_round_winner_settles_via_manual_advancing_teams_in_elimination(db
     )
     by_user = {p.user_id: p for p in predictions}
     assert by_user[alice.id].status == PredictionStatus.SETTLED
-    assert by_user[alice.id].points_awarded == 20.0  # advanced -> won: stake * odds
+    # Pieza 3: pari-mutuel elimination-round payout (top-N, ELIMINATION_SEED), not stake * odds.
+    assert by_user[alice.id].points_awarded == pytest.approx(25.3)
     assert by_user[bob.id].points_awarded == 0.0  # eliminated -> lost
 
     await db_session.refresh(alice)
-    assert alice.balance == alice_balance_before + 20.0
+    assert alice.balance == pytest.approx(alice_balance_before + 25.3)
 
 
 def test_entity_key_round_head_to_head_is_scoped_by_debate_and_pair() -> None:
@@ -1203,11 +1221,12 @@ async def test_round_head_to_head_settles_base_pick_correctly(db_session) -> Non
         (await db_session.execute(select(Prediction).order_by(Prediction.user_id))).scalars().all()
     )
     by_user = {p.user_id: p for p in predictions}
-    assert by_user[alice.id].points_awarded == 20.0  # correctly predicted the higher team
+    # Pieza 3: pari-mutuel payout from the pair's own pool, not stake * frozen odds.
+    assert by_user[alice.id].points_awarded == pytest.approx(17.9)
     assert by_user[bob.id].points_awarded == 0.0
 
     await db_session.refresh(alice)
-    assert alice.balance == alice_balance_before + 20.0
+    assert alice.balance == pytest.approx(alice_balance_before + 17.9)
 
 
 async def test_round_head_to_head_sub_bet_is_all_or_nothing(db_session) -> None:
@@ -1262,10 +1281,12 @@ async def test_round_head_to_head_sub_bet_is_all_or_nothing(db_session) -> None:
     )
     by_user = {p.user_id: p for p in predictions}
 
+    # Pieza 3: base is now the pari-mutuel ratio (not frozen odds=2.0), multiplied by
+    # sub_bet_odds(3) exactly as before -- sub-bets deliberately stay a fixed multiplier on top.
     correct = by_user[winner_correct_gap.id]
-    assert correct.points_awarded == 60.0  # stake(10) * odds(2) * sub_bet_odds(3)
+    assert correct.points_awarded == pytest.approx(49.5)
     assert correct.sub_bet_status == PredictionStatus.SETTLED
-    assert correct.sub_bet_points_awarded == 60.0
+    assert correct.sub_bet_points_awarded == pytest.approx(49.5)
 
     wrong = by_user[winner_wrong_gap.id]
     assert wrong.points_awarded == 0.0  # base was right but modifier missed -> ALL lost
@@ -1428,10 +1449,12 @@ async def test_round_winner_sub_bet_pays_base_then_settles_deferred_once_scores_
 
     prediction = (await db_session.execute(select(Prediction))).scalar_one()
     assert prediction.status == PredictionStatus.SETTLED
-    assert prediction.points_awarded == 20.0  # base only: stake(10) * odds(2)
+    # Pieza 3: base is the pari-mutuel ratio (13.4 = 10 stake * 1.34 ratio), not stake * frozen
+    # odds=2.0.
+    assert prediction.points_awarded == pytest.approx(13.4)
     assert prediction.sub_bet_status == PredictionStatus.OPEN
     assert prediction.sub_bet_points_awarded is None
-    assert alice.balance == alice_balance_before + 20.0
+    assert alice.balance == pytest.approx(alice_balance_before + 13.4)
     # The trap: the market is ALREADY settled here, same as every round_winner market will be
     # by the time speaker points actually show up.
     assert market.status == BetMarketStatus.SETTLED
@@ -1450,18 +1473,22 @@ async def test_round_winner_sub_bet_pays_base_then_settles_deferred_once_scores_
     assert await settle_pending_sub_bets(db_session, tournament.id) == 1
     await db_session.commit()
 
-    bonus = 10.0 * 2.0 * (15.0 - 1)  # stake * odds * (sub_bet_odds - 1)
+    # settle_pending_sub_bets derives the same effective ratio the base already paid with
+    # (points_awarded / stake_amount = 1.34) rather than the frozen odds -- see that function's
+    # comment on why, to guarantee the bonus is consistent with what the base actually paid.
+    base_ratio = 1.34
+    bonus = 10.0 * base_ratio * (15.0 - 1)  # stake * base_ratio * (sub_bet_odds - 1)
     assert prediction.sub_bet_status == PredictionStatus.SETTLED
-    assert prediction.sub_bet_points_awarded == bonus
-    assert prediction.points_awarded == 20.0 + bonus  # base + bonus folded together
-    assert alice.balance == alice_balance_before + 20.0 + bonus
+    assert prediction.sub_bet_points_awarded == pytest.approx(bonus)
+    assert prediction.points_awarded == pytest.approx(13.4 + bonus)  # base + bonus folded
+    assert alice.balance == pytest.approx(alice_balance_before + 13.4 + bonus)
 
     leaderboard = (
         await db_session.execute(
             select(LeaderboardEntry).where(LeaderboardEntry.user_id == alice.id)
         )
     ).scalar_one()
-    assert leaderboard.total_points == (20.0 + bonus) - 10.0  # net profit = payout - stake
+    assert leaderboard.total_points == pytest.approx((13.4 + bonus) - 10.0)  # net = payout-stake
 
 
 async def test_round_winner_sub_bet_settles_as_a_loss_immediately_when_base_loses(
@@ -1562,8 +1589,10 @@ async def test_round_winner_sub_bet_settles_as_a_loss_when_speaker_scores_are_wr
 
     assert prediction.sub_bet_status == PredictionStatus.SETTLED
     assert prediction.sub_bet_points_awarded == 0.0
-    assert prediction.points_awarded == 20.0  # base payout stands, no bonus added
-    assert alice.balance == alice_balance_before + 20.0
+    # Pieza 3: base payout stands at its pari-mutuel ratio (same fixture/stake as the sibling
+    # "scores arrive correctly" test above -> same 13.4), no bonus added since the guess missed.
+    assert prediction.points_awarded == pytest.approx(13.4)
+    assert alice.balance == pytest.approx(alice_balance_before + 13.4)
 
 
 async def test_round_winner_sub_bet_odds_rejects_malformed_speaker_scores(db_session) -> None:
@@ -1837,7 +1866,8 @@ async def test_round_winner_pair_pick_settles_the_exact_advancing_pair_and_only_
     await db_session.refresh(correct)
     await db_session.refresh(wrong)
     assert correct.status == PredictionStatus.SETTLED
-    assert correct.points_awarded == pytest.approx(30.0)
+    # Pieza 3: pari-mutuel exact-pair payout (ELIMINATION_SEED), not stake * frozen odds=3.0.
+    assert correct.points_awarded == pytest.approx(26.4)
     assert wrong.status == PredictionStatus.SETTLED
     assert wrong.points_awarded == 0.0
 

@@ -215,7 +215,9 @@ async def test_scrape_tournament_async_settles_a_champion_market_once_resolvable
         ).scalar_one()
         assert market.status == BetMarketStatus.SETTLED
         prediction = (await session.execute(select(Prediction))).scalar_one()
-        assert prediction.points_awarded == 100.0  # stake 10 * odds 10
+        # Pieza 3: pari-mutuel payout against the real CMUDE fixture's final standings, not
+        # stake(10) * frozen odds(10) -- `odds` is only the placement-time projection now.
+        assert prediction.points_awarded == pytest.approx(137.8)
 
 
 @pytest.mark.asyncio

@@ -56,7 +56,12 @@ from app.models.enums import (
 # opens the bench" -- straight from data already recorded for every judged debate, no new column.
 _FIRST_SPEAKER_ROLES = {SpeakerRole.PM, SpeakerRole.LO, SpeakerRole.MG, SpeakerRole.MO}
 from app.repositories.upsert import upsert_by_natural_key
-from app.services.odds_service import MAX_SPEAKER_POSITION, quote_odds, quote_sub_bet_odds
+from app.services.odds_service import (
+    MAX_SPEAKER_POSITION,
+    quote_odds,
+    quote_sub_bet_odds,
+    settlement_payout_ratio,
+)
 from app.services.ranking_service import (
     get_latest_completed_round_seq,
     get_standings,
@@ -599,7 +604,9 @@ async def _get_final_speaker_ranking(session: AsyncSession, tournament_id: int) 
     return [speaker_id for speaker_id, _total in rows]
 
 
-def _settle_prediction_payout(bet_type: BetType, prediction: Prediction, outcome: dict) -> float:
+async def _settle_prediction_payout(
+    session: AsyncSession, bet_market: BetMarket, prediction: Prediction, outcome: dict
+) -> float:
     """Base-pick payout, PLUS -- for the same-timing sub-bet types (`_SAME_TIMING_SUB_BET_TYPES`)
     -- the all-or-nothing combined payout if a modifier was attempted alongside it. Missing the
     base makes the modifier moot (no payout either way); missing the modifier after winning the
@@ -610,17 +617,29 @@ def _settle_prediction_payout(bet_type: BetType, prediction: Prediction, outcome
     ROUND_WINNER's speaker-points sub-bet is the one deferred exception (`_DEFERRED_SUB_BET_TYPES`):
     the base pick pays on its own the moment the round result is known, and the sub-bet is only
     flipped to `sub_bet_status=OPEN` here (never at placement) -- its actual resolution happens
-    much later, via `settle_pending_sub_bets`."""
-    won = did_prediction_win(bet_type, prediction.payload, outcome)
+    much later, via `settle_pending_sub_bets`.
+
+    The BASE payout ratio (CNADE 2026 Roadmap Pieza 3) is `odds_service.settlement_payout_ratio`
+    when available -- the true pari-mutuel split of the market's FINAL pool, not the frozen
+    `prediction.odds` locked in at bet time. It falls back to `prediction.odds` for MOTION_TYPE
+    and every retired bet type, which are deliberately not pari-mutuel at settlement -- see that
+    function's docstring. Sub-bets are deliberately NOT pari-mutuel themselves (kept as a fixed
+    multiplier on top of the base, per product decision -- they're low-volume enough that their
+    own pool would be mostly noise): `sub_bet_odds` stays exactly as quoted at placement time.
+    """
+    won = did_prediction_win(bet_market.bet_type, prediction.payload, outcome)
+    base_ratio = await settlement_payout_ratio(session, bet_market, prediction.payload)
+    if base_ratio is None:
+        base_ratio = prediction.odds
     sub_bet_payload = prediction.payload.get("sub_bet")
     has_sub_bet = bool(sub_bet_payload) and prediction.sub_bet_odds is not None
 
-    same_timing_key = _SAME_TIMING_SUB_BET_KEYS_BY_TYPE.get(bet_type)
+    same_timing_key = _SAME_TIMING_SUB_BET_KEYS_BY_TYPE.get(bet_market.bet_type)
     is_same_timing_override = (
         has_sub_bet and same_timing_key is not None and same_timing_key in sub_bet_payload
     )
 
-    if has_sub_bet and bet_type in _DEFERRED_SUB_BET_TYPES and not is_same_timing_override:
+    if has_sub_bet and bet_market.bet_type in _DEFERRED_SUB_BET_TYPES and not is_same_timing_override:
         # The base pays on its own right now, independent of the sub-bet -- see
         # settle_pending_sub_bets for how the modifier resolves later. A losing base pick makes
         # the modifier moot forever (there's no "this team's speakers scored X" to check if this
@@ -631,23 +650,21 @@ def _settle_prediction_payout(bet_type: BetType, prediction: Prediction, outcome
         else:
             prediction.sub_bet_status = PredictionStatus.SETTLED
             prediction.sub_bet_points_awarded = 0.0
-        return prediction.stake_amount * prediction.odds if won else 0.0
+        return prediction.stake_amount * base_ratio if won else 0.0
 
     if not has_sub_bet or not (
-        bet_type in _SAME_TIMING_SUB_BET_TYPES or is_same_timing_override
+        bet_market.bet_type in _SAME_TIMING_SUB_BET_TYPES or is_same_timing_override
     ):
-        return prediction.stake_amount * prediction.odds if won else 0.0
+        return prediction.stake_amount * base_ratio if won else 0.0
 
     if not won:
         prediction.sub_bet_status = PredictionStatus.SETTLED
         prediction.sub_bet_points_awarded = 0.0
         return 0.0
 
-    sub_bet_won = did_sub_bet_win(bet_type, prediction.payload, outcome)
+    sub_bet_won = did_sub_bet_win(bet_market.bet_type, prediction.payload, outcome)
     payout = (
-        prediction.stake_amount * prediction.odds * prediction.sub_bet_odds
-        if sub_bet_won
-        else 0.0
+        prediction.stake_amount * base_ratio * prediction.sub_bet_odds if sub_bet_won else 0.0
     )
     prediction.sub_bet_status = PredictionStatus.SETTLED
     prediction.sub_bet_points_awarded = payout
@@ -693,7 +710,7 @@ async def settle_market(
         assert (
             outcome is not None
         )  # guaranteed by the shared_outcome check above when not per_prediction
-        payout = _settle_prediction_payout(bet_market.bet_type, prediction, outcome)
+        payout = await _settle_prediction_payout(session, bet_market, prediction, outcome)
         prediction.points_awarded = payout
         prediction.status = PredictionStatus.SETTLED
         any_settled = True
@@ -776,8 +793,14 @@ async def settle_pending_sub_bets(session: AsyncSession, tournament_id: int) -> 
             continue  # still withheld -- retried on a later cycle
 
         sub_bet_won = did_speaker_points_sub_bet_win(sub_bet, score_by_speaker)
+        # The base already paid via settlement_payout_ratio's pari-mutuel split (Pieza 3), not
+        # the frozen prediction.odds -- points_awarded already holds that realized amount (see
+        # _settle_prediction_payout's deferred branch, which only reaches sub_bet_status=OPEN on
+        # a winning base), so the same effective ratio is derived from it rather than
+        # recomputed, to guarantee this bonus is consistent with what the base actually paid.
+        base_ratio = (prediction.points_awarded or 0.0) / prediction.stake_amount
         bonus = (
-            prediction.stake_amount * prediction.odds * (prediction.sub_bet_odds - 1)
+            prediction.stake_amount * base_ratio * (prediction.sub_bet_odds - 1)
             if sub_bet_won
             else 0.0
         )

@@ -989,6 +989,176 @@ async def quote_odds(
     raise ValueError(f"no odds pricing implemented for bet type {bet_type!r}")
 
 
+async def _all_stakes(session: AsyncSession, market_id: int) -> list[tuple[dict, float]]:
+    """Every prediction ever placed on this market, regardless of status -- the FINAL pool a
+    compartment settles against once betting on it has closed. Unlike `_open_stakes` (which
+    powers live pricing and deliberately excludes the quoting user's own stake so a personalized
+    preview doesn't self-reinforce), settlement needs everyone's money with nothing excluded: the
+    payout ratio for a compartment is one number that applies uniformly to every winner in it,
+    not a personalized quote for one bettor."""
+    rows = (
+        await session.execute(
+            select(Prediction.payload, Prediction.stake_amount).where(
+                Prediction.bet_market_id == market_id
+            )
+        )
+    ).all()
+    return [(payload, float(stake)) for payload, stake in rows]
+
+
+async def settlement_payout_ratio(
+    session: AsyncSession, bet_market: BetMarket, payload: dict
+) -> float | None:
+    """The FINAL pari-mutuel payout ratio for the given (winning) `payload` -- multiply by a
+    prediction's own `stake_amount` to get what it's owed. See CNADE 2026 Roadmap Pieza 3: this
+    replaces the old "pay the frozen `odds` locked in at bet time" model for every bet type
+    that's actually pari-mutuel.
+
+    Deliberately reuses the EXACT pool-grouping and prior functions `quote_odds` prices with --
+    the payout mechanism IS the pricing mechanism (`app.domain.odds.pari_mutuel_odds`), evaluated
+    once at the end against the pool's true final composition (`_all_stakes`) instead of a live,
+    personalized snapshot. This is what keeps the seed's role identical in both places: it
+    absorbs the same bounded share of the payout that it absorbed of the price, so "the seed can
+    mint at most `seed` tokens per compartment" is actually true, not just true of the quote.
+
+    Returns `None` for bet types that are NOT settled this way: `MOTION_TYPE` is deliberately
+    fixed-odds (see `MOTION_TYPE_FIXED_ODDS`), and every retired bet type's existing predictions
+    were placed under the old frozen-odds promise before this mechanism existed -- switching
+    their settlement formula after the fact would pay them out under a deal they never made.
+    Callers should fall back to `prediction.stake_amount * prediction.odds` in that case.
+    """
+    bet_type = bet_market.bet_type
+    stakes = await _all_stakes(session, bet_market.id)
+
+    if bet_type == BetType.CHAMPION:
+        power = await compute_team_power_ratings(session, bet_market.tournament_id)
+        team_id = payload["team_id"]
+        if not power or team_id not in power:
+            return None
+        prior = softmax_probabilities(power, temperature=adaptive_temperature(power.values()))[
+            team_id
+        ]
+        candidate_stake, market_stake = _field_pool_from_stakes(stakes, "team_id", team_id)
+        return pari_mutuel_odds(candidate_stake, market_stake, prior)
+
+    if bet_type == BetType.TEAM_BREAK:
+        if bet_market.target_break_category_id is None:
+            return None
+        probabilities = await team_break_probability(
+            session, bet_market.tournament_id, bet_market.target_break_category_id
+        )
+        team_id = payload["team_id"]
+        if team_id not in probabilities:
+            return None
+        candidate_stake, _total = _field_pool_from_stakes(stakes, "team_id", team_id)
+        return pari_mutuel_odds(candidate_stake, candidate_stake, probabilities[team_id])
+
+    if bet_type == BetType.TOP_SPEAKER_POSITION:
+        strength = await compute_speaker_strength_ratings(session, bet_market.tournament_id)
+        speaker_id, position = payload["speaker_id"], payload["position"]
+        if not strength or speaker_id not in strength:
+            return None
+        mean_strength = sum(strength.values()) / len(strength)
+        prior, _multiplier = speaker_position_prior(strength[speaker_id], mean_strength, position)
+        candidate_stake, compartment_stake = _speaker_position_pool_from_stakes(
+            stakes, position, speaker_id
+        )
+        return pari_mutuel_odds(candidate_stake, compartment_stake, prior)
+
+    if bet_type == BetType.ROUND_WINNER:
+        debate_id = payload["debate_id"]
+        power = await compute_team_power_ratings(session, bet_market.tournament_id)
+        position_rows = (
+            await session.execute(
+                select(DebateTeam.team_id, DebateTeam.position).where(
+                    DebateTeam.debate_id == debate_id
+                )
+            )
+        ).all()
+        positions_by_team: dict[int, BPPosition] = {row.team_id: row.position for row in position_rows}
+        debate_power = {t: power[t] for t in positions_by_team if t in power}
+        if len(debate_power) < 2:
+            return None
+        advancing_count = await _advancing_count(session, debate_id)
+        debate_power = await _apply_debate_positional_prior(
+            session, debate_power, positions_by_team, advancing_count=advancing_count
+        )
+        temperature = adaptive_temperature(power.values())
+
+        team_ids = payload.get("team_ids")
+        if team_ids is not None:
+            if advancing_count != 2:
+                return None
+            a, b = team_ids
+            if a not in debate_power or b not in debate_power:
+                return None
+            prior = pair_top_two_probability(debate_power, a, b, temperature=temperature)
+            candidate_stake, compartment_stake = _debate_pair_pool_from_stakes(
+                stakes, debate_id, (a, b)
+            )
+            return pari_mutuel_odds(candidate_stake, compartment_stake, prior, seed=ELIMINATION_SEED)
+
+        team_id = payload["team_id"]
+        if team_id not in debate_power:
+            return None
+        candidate_stake, compartment_stake = _debate_pool_from_stakes(stakes, debate_id, team_id)
+        return _round_winner_odds(
+            debate_power,
+            team_id,
+            temperature=temperature,
+            candidate_stake=candidate_stake,
+            compartment_stake=compartment_stake,
+            advancing_count=advancing_count,
+        )
+
+    if bet_type == BetType.ROUND_FULL_CALL:
+        debate_id = payload["debate_id"]
+        power = await compute_team_power_ratings(session, bet_market.tournament_id)
+        debate_team_ids = (
+            (
+                await session.execute(
+                    select(DebateTeam.team_id).where(DebateTeam.debate_id == debate_id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        debate_power = {t: power[t] for t in debate_team_ids if t in power}
+        if len(debate_power) < len(debate_team_ids) or len(debate_power) < 2:
+            return None
+        team_ids = list(payload["team_ids"])
+        if set(team_ids) != set(debate_team_ids):
+            return None
+        temperature = adaptive_temperature(power.values())
+        prior = sequence_probability(debate_power, team_ids, temperature=temperature)
+        candidate_stake, compartment_stake = _debate_sequence_pool_from_stakes(
+            stakes, debate_id, team_ids
+        )
+        return pari_mutuel_odds(candidate_stake, compartment_stake, prior)
+
+    if bet_type == BetType.ROUND_HEAD_TO_HEAD:
+        debate_id = payload["debate_id"]
+        team_a_id, team_b_id = payload["team_a_id"], payload["team_b_id"]
+        power = await compute_team_power_ratings(session, bet_market.tournament_id)
+        pair_power = {t: power[t] for t in (team_a_id, team_b_id) if t in power}
+        if len(pair_power) != 2:
+            return None
+        predicted_higher_id = payload["predicted_higher_id"]
+        temperature = adaptive_temperature(power.values())
+        prior = softmax_probabilities(pair_power, temperature=temperature)[predicted_higher_id]
+        candidate_stake, compartment_stake = _pair_pool_from_stakes(
+            stakes,
+            team_a_id,
+            team_b_id,
+            predicted_higher_id,
+            predicted_field="predicted_higher_id",
+            debate_id=debate_id,
+        )
+        return pari_mutuel_odds(candidate_stake, compartment_stake, prior)
+
+    return None  # MOTION_TYPE (fixed-odds by design) and every retired bet type
+
+
 async def quote_sub_bet_odds(
     session: AsyncSession, bet_market: BetMarket, payload: dict
 ) -> float | None:
