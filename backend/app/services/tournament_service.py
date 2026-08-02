@@ -97,6 +97,14 @@ async def refresh_tournament_status(session: AsyncSession, tournament: Tournamen
         if champion_team_id is not None:
             tournament.champion_team_id = champion_team_id
             tournament.status = TournamentStatus.COMPLETED
+            # A completed tournament has no more live data to fetch -- autoscrape would
+            # otherwise keep polling it forever (see scrape_all_active_tournaments_async's
+            # is_active filter). This is what makes adding a historical/backfill tab (paste the
+            # URL, get one full scrape, done) genuinely "fire and forget" instead of needing an
+            # admin to remember to flip it inactive by hand afterward. An admin can still
+            # reactivate manually (the existing toggle in /admin/tournaments) if a result is
+            # ever corrected after the fact.
+            tournament.is_active = False
             return
 
     any_elimination_result = await _has_any_judged_result(
