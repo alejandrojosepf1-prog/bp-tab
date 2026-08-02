@@ -63,7 +63,12 @@ MIN_TEMPERATURE = 1.0
 # The lower bound keeps a near-certainty paying at least a little more than the stake back, so a
 # "free money" pick is never literally free.
 MIN_ODDS = 1.01
-MAX_ODDS = 50.0
+# Lowered from 50.0 (CNADE 2026 Roadmap Pieza 3) -- the real production bug that paid the
+# speaker-table market a flat 50x on a wide-open field (commit 796b440) was this clamp doing
+# exactly what it was designed to do, on a field with too little real data to price sensibly.
+# 20x still rewards a genuine longshot call heavily without letting one lucky pick single-
+# handedly define a season the way 50x could.
+MAX_ODDS = 20.0
 
 # Dollars of phantom liquidity seeded into every market's pari-mutuel pool, split according to
 # the prior probability (see module docstring). Sized to roughly 10x a typical stake so a single

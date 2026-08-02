@@ -103,10 +103,11 @@ async def test_full_champion_market_lifecycle_settles_and_updates_leaderboard(
     assert market["status"] == "open"
     market_id = market["id"]
 
-    # Alice predicts correctly, Bob predicts incorrectly.
+    # Alice predicts correctly, Bob predicts incorrectly. Stakes at MAX_STAKE (50.0, Pieza 3's
+    # per-bet cap).
     alice_prediction = await client.post(
         f"/api/v1/bet-markets/{market_id}/predictions",
-        json={"payload": {"team_id": team.id}, "stake_amount": 100.0},
+        json={"payload": {"team_id": team.id}, "stake_amount": 50.0},
         headers=auth_headers(alice),
     )
     assert alice_prediction.status_code == 201
@@ -132,7 +133,7 @@ async def test_full_champion_market_lifecycle_settles_and_updates_leaderboard(
     # Re-submitting updates the same row rather than creating a second one (unique constraint).
     alice_resubmit = await client.post(
         f"/api/v1/bet-markets/{market_id}/predictions",
-        json={"payload": {"team_id": team.id}, "stake_amount": 100.0},
+        json={"payload": {"team_id": team.id}, "stake_amount": 50.0},
         headers=auth_headers(alice),
     )
     assert alice_resubmit.status_code == 201
@@ -158,16 +159,17 @@ async def test_full_champion_market_lifecycle_settles_and_updates_leaderboard(
     #
     # Pieza 3: that quote is now only ever a placement-time PROJECTION, never what settlement
     # actually pays -- settlement_payout_ratio recomputes the SAME formula against the pool's
-    # TRUE final composition (everyone's stakes, hers included): candidate=100 (her own stake),
-    # pool=150 (100+50). pari_mutuel_probability(100, 150, 0.5, seed=200) = 200/350 = 0.5714... ->
-    # decimal odds 1.75. She staked 100 on the winner, so she's paid stake * 1.75 = 175; Bob
-    # staked 50 on the loser and gets nothing back.
+    # TRUE final composition (everyone's stakes, hers included): candidate=50 (her own stake,
+    # MAX_STAKE), pool=100 (50+50). pari_mutuel_probability(50, 100, 0.5, seed=200) = 150/300 =
+    # 0.5 -> decimal odds 2.0 exactly (a perfectly symmetric pool matches the flat fair price).
+    # She staked 50 on the winner, so she's paid stake * 2.0 = 100; Bob staked 50 on the loser
+    # and gets nothing back.
     alice_after = await client.get(
         f"/api/v1/bet-markets/{market_id}/predictions/me", headers=auth_headers(alice)
     )
     assert alice_after.json()[0]["status"] == "settled"
     assert alice_after.json()[0]["odds"] == 2.5  # placement-time projection, unchanged
-    assert alice_after.json()[0]["points_awarded"] == 175.0  # actual pari-mutuel payout
+    assert alice_after.json()[0]["points_awarded"] == 100.0  # actual pari-mutuel payout
 
     bob_after = await client.get(
         f"/api/v1/bet-markets/{market_id}/predictions/me", headers=auth_headers(bob)
@@ -180,7 +182,7 @@ async def test_full_champion_market_lifecycle_settles_and_updates_leaderboard(
     assert len(leaderboard) == 2
     top = leaderboard[0]
     assert top["user"]["display_name"] == "Alice"
-    assert top["total_points"] == 75.0  # net profit: 175 payout - 100 stake
+    assert top["total_points"] == 50.0  # net profit: 100 payout - 50 stake
     assert top["rank"] == 1
 
 
@@ -327,13 +329,18 @@ async def test_odds_move_with_the_pool_as_stakes_come_in(
     (more real money already agreeing with the pick) while the other side's quote lengthens."""
     tournament, team, other_team = await _make_tournament_with_team(db_session)
     admin = await make_user(db_session, email="admin7@example.com", role=UserRole.ADMIN)
-    # Explicit balances: this test is about large stakes overwhelming the 200-token seed, so the
-    # stakes here (150 each) deliberately exceed the standard STARTING_BALANCE grant.
+    # Three separate backers at MAX_STAKE (50.0, Pieza 3's per-bet cap) rather than two heavy
+    # single stakes -- combined 150 still overwhelms the 200-token seed the same way the
+    # original two-account 150-each setup did; the point (real money piling onto one side moves
+    # the price) doesn't depend on how many accounts that money came from.
     alice = await make_user(
         db_session, email="alice2@example.com", display_name="Alice2", balance=1000.0
     )
     bob = await make_user(
         db_session, email="bob2@example.com", display_name="Bob2", balance=1000.0
+    )
+    dave = await make_user(
+        db_session, email="dave2@example.com", display_name="Dave2", balance=1000.0
     )
     carol = await make_user(db_session, email="carol2@example.com", display_name="Carol2")
 
@@ -357,18 +364,16 @@ async def test_odds_move_with_the_pool_as_stakes_come_in(
     )
     assert initial_quote.json()["odds"] == 2.0
 
-    # Alice and Bob both back `team` heavily -- their combined stake (300) starts to dominate
-    # the 200-seed, so the crowd's conviction should shorten `team`'s price below the prior...
-    await client.post(
-        f"/api/v1/bet-markets/{market_id}/predictions",
-        json={"payload": {"team_id": team.id}, "stake_amount": 150.0},
-        headers=auth_headers(alice),
-    )
-    await client.post(
-        f"/api/v1/bet-markets/{market_id}/predictions",
-        json={"payload": {"team_id": team.id}, "stake_amount": 150.0},
-        headers=auth_headers(bob),
-    )
+    # Alice, Bob, and Dave all back `team` at the max per-bet stake -- their combined stake (150)
+    # starts to dominate the 200-seed, so the crowd's conviction should shorten `team`'s price
+    # below the prior...
+    for backer in (alice, bob, dave):
+        response = await client.post(
+            f"/api/v1/bet-markets/{market_id}/predictions",
+            json={"payload": {"team_id": team.id}, "stake_amount": 50.0},
+            headers=auth_headers(backer),
+        )
+        assert response.status_code == 201
 
     team_quote = await client.post(
         f"/api/v1/bet-markets/{market_id}/quote",

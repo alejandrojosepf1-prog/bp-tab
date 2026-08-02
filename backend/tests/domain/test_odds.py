@@ -163,10 +163,11 @@ def test_pari_mutuel_probability_rejects_invalid_inputs() -> None:
 
 def test_pari_mutuel_odds_prices_a_wide_field_fairly_and_clamps_only_the_absurd() -> None:
     # With no house liability left to bound (see odds.py's "Fair book" note), a genuine longshot
-    # now pays its real price rather than being cut off early: a 40-way uniform field prices at
-    # the fair 40x, comfortably inside the band.
-    assert pari_mutuel_odds(0.0, 0.0, 1 / 40) == 40.0
-    # Only a truly absurd field (a 500-way toss-up would pay 500x) still hits the readability cap.
+    # still pays its real price as long as it's under the readability cap (MAX_ODDS=20, lowered
+    # from 50 by CNADE 2026 Roadmap Pieza 3 -- see that constant's own comment for why): a 15-way
+    # uniform field prices at the fair 15x, comfortably inside the band.
+    assert pari_mutuel_odds(0.0, 0.0, 1 / 15) == 15.0
+    # A wide-open field (a 500-way toss-up would fair-price at 500x) hits the readability cap.
     assert pari_mutuel_odds(0.0, 0.0, 1 / 500) == MAX_ODDS
 
 

@@ -40,7 +40,7 @@ from app.models import (
     Tournament,
     User,
 )
-from app.models.betting import BetMarket
+from app.models.betting import STARTING_BALANCE, BetMarket
 from app.models.enums import (
     BetMarketStatus,
     BetType,
@@ -95,6 +95,15 @@ CREATABLE_BET_TYPES = (
 # guaranteed loss on its own; this keeps the market meaningful against microbet spam and gives
 # headroom if the multiplier ever needs to move without silently reopening that arbitrage).
 MOTION_TYPE_MIN_STAKE = 20.0
+
+# General stake guards (CNADE 2026 Roadmap Pieza 3) -- MOTION_TYPE keeps its own higher,
+# type-specific floor above. MIN_STAKE keeps a bet meaningful against microbet/dust spam;
+# MAX_STAKE is fixed to STARTING_BALANCE rather than a fraction of the bettor's CURRENT balance,
+# so it stays a stable, predictable ceiling all season instead of drifting with whoever happens
+# to be ahead -- "one all-in pick shouldn't single-handedly define the season" only holds if the
+# cap doesn't grow right along with the balance it's meant to protect.
+MIN_STAKE = 1.0
+MAX_STAKE = STARTING_BALANCE / 2
 
 _ROUND_SCOPED_BET_TYPES = {
     BetType.ROUND_WINNER,
@@ -264,6 +273,10 @@ async def place_prediction(
     """
     if stake_amount <= 0:
         raise ValueError("stake_amount must be positive")
+    if stake_amount < MIN_STAKE:
+        raise ValueError(f"la apuesta mínima es {MIN_STAKE:.0f} tokens")
+    if stake_amount > MAX_STAKE:
+        raise ValueError(f"la apuesta máxima es {MAX_STAKE:.0f} tokens")
     if bet_market.bet_type == BetType.MOTION_TYPE and stake_amount < MOTION_TYPE_MIN_STAKE:
         raise ValueError(
             f"la apuesta mínima para tipo de moción es {MOTION_TYPE_MIN_STAKE:.0f} tokens"
