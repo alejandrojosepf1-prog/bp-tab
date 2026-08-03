@@ -230,7 +230,10 @@ export function Sidebar() {
         <SidebarBody />
       </aside>
 
-      {/* Móvil: barra superior + panel deslizable */}
+      {/* Móvil: barra superior + panel deslizable. Desde la Fase 3 del rediseño broadcast,
+       * la navegación PRIMARIA en móvil es <BottomNav/> (5 destinos, siempre visible) --
+       * esto queda como acceso secundario a lo que no entra en esos 5: admin, configuración,
+       * cerrar sesión, detalle de cuenta. */}
       <div className="fixed inset-x-0 top-0 z-40 flex items-center justify-between border-b border-sidebar-border bg-sidebar/95 px-4 py-2.5 backdrop-blur lg:hidden">
         <Wordmark />
         <button

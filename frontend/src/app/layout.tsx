@@ -4,6 +4,7 @@ import "./globals.css";
 import { Providers } from "@/components/providers";
 import { Sidebar } from "@/components/layout/sidebar";
 import { MainShell } from "@/components/layout/main-shell";
+import { BottomNav } from "@/components/layout/bottom-nav";
 
 /* Pairing "Sports/Fitness" del rediseño broadcast (ver Rediseno UIX 2026 en el vault).
  * Barlow trae numerales tabulares, que es lo que evita que una cuota "baile" de ancho
@@ -46,6 +47,7 @@ export default function RootLayout({
           <div className="flex min-h-screen">
             <Sidebar />
             <MainShell>{children}</MainShell>
+            <BottomNav />
           </div>
         </Providers>
       </body>
