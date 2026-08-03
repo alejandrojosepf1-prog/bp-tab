@@ -4,14 +4,16 @@ import { useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useQuery } from "@tanstack/react-query";
-import { ArrowRight, ChevronDown, Swords, Ticket, Trophy, Users } from "lucide-react";
+import { ArrowRight, ChevronDown } from "lucide-react";
 import { api } from "@/lib/api/client";
 import { queryKeys } from "@/lib/api/query-keys";
 import { ErrorState, EmptyState } from "@/components/query-state";
-import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { RoundsPanel, RoundStatusBadge } from "@/components/tournament/rounds-panel";
 import { TeamsPanel } from "@/components/tournament/teams-panel";
+import { StatNumber, StatLabel } from "@/components/broadcast/stat";
+import { LiveIndicator } from "@/components/broadcast/live-indicator";
+import { SectionRule } from "@/components/broadcast/section";
 import { cn } from "@/lib/utils";
 import type { Tournament } from "@/lib/api/types";
 
@@ -25,39 +27,21 @@ const TOURNAMENT_STATUS_LABEL: Record<string, string> = {
 
 const LIVE_STATUSES = new Set(["in_progress", "break_pending", "eliminations"]);
 
-/** Misma forma que TournamentCard (borde redondeado, cabecera + fila de chips + tab bar) para
- * que no haya salto de layout cuando cambia de esqueleto a la tarjeta real. */
 function TournamentCardSkeleton() {
   return (
-    <div className="flex flex-col overflow-hidden rounded-2xl border border-border bg-card/80">
-      <div className="flex flex-col gap-3 p-5">
-        <div className="flex items-start justify-between gap-3">
-          <div className="flex min-w-0 flex-1 flex-col gap-2">
-            <Skeleton className="h-5 w-48" />
-            <Skeleton className="h-3 w-32" />
-          </div>
-          <Skeleton className="h-5 w-20 shrink-0 rounded-full" />
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <Skeleton className="h-7 w-28 rounded-lg" />
-          <Skeleton className="h-7 w-24 rounded-lg" />
-          <Skeleton className="h-7 w-32 rounded-lg" />
+    <div className="overflow-hidden rounded-xl border border-border bg-card">
+      <div className="flex flex-col gap-4 p-4">
+        <Skeleton className="h-3 w-20" />
+        <Skeleton className="h-8 w-56" />
+        <div className="flex gap-6">
+          <Skeleton className="h-12 w-20" />
+          <Skeleton className="h-12 w-20" />
         </div>
       </div>
-      <div className="flex border-t border-border/60">
-        <Skeleton className="m-2 h-7 flex-1 rounded-md" />
-        <Skeleton className="m-2 h-7 flex-1 rounded-md" />
+      <div className="flex gap-px border-t border-border bg-border">
+        <Skeleton className="h-9 flex-1 rounded-none" />
+        <Skeleton className="h-9 flex-1 rounded-none" />
       </div>
-    </div>
-  );
-}
-
-function RoundsPanelSkeleton() {
-  return (
-    <div className="flex flex-col gap-2">
-      {[0, 1, 2].map((i) => (
-        <Skeleton key={i} className="h-12 w-full rounded-xl" />
-      ))}
     </div>
   );
 }
@@ -81,68 +65,73 @@ function TournamentCard({ tournament }: { tournament: Tournament }) {
   return (
     <div
       className={cn(
-        "flex flex-col overflow-hidden rounded-2xl border bg-card/80 transition-colors",
-        live ? "border-primary/25" : "border-border"
+        "overflow-hidden rounded-xl border bg-card transition-colors",
+        live ? "border-primary/30" : "border-border"
       )}
     >
-      {/* Cabecera clicable: navega directo a la vista del torneo */}
+      {/* Franja de estado: lo primero que se lee, como el marcador de una transmisión */}
+      <div
+        className={cn(
+          "flex items-center justify-between gap-3 border-b px-4 py-2",
+          live ? "border-primary/20 bg-primary/5" : "border-border bg-surface-sunken"
+        )}
+      >
+        {live ? (
+          <LiveIndicator />
+        ) : (
+          <span className="label-broadcast">
+            {TOURNAMENT_STATUS_LABEL[tournament.status] ?? tournament.status}
+          </span>
+        )}
+        {tournament.current_round && (
+          <span className="flex items-center gap-2">
+            <span className="font-heading text-sm font-semibold uppercase tracking-wide">
+              {tournament.current_round.name}
+            </span>
+            <RoundStatusBadge status={tournament.current_round.status} />
+          </span>
+        )}
+      </div>
+
       <button
         type="button"
         onClick={() => router.push(`/tournaments/${tournament.id}`)}
-        className="group flex flex-col gap-3 p-5 text-left transition-colors hover:bg-accent/30"
+        className="group flex w-full flex-col gap-4 p-4 text-left transition-colors hover:bg-accent/30"
       >
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
-            <h3 className="truncate font-heading text-lg font-bold">{tournament.name}</h3>
-            <p className="text-xs text-muted-foreground">
+            <h3 className="truncate font-heading text-display-md font-bold uppercase">
+              {tournament.name}
+            </h3>
+            <p className="mt-0.5 truncate text-xs text-muted-foreground">
               {tournament.source_base_url.replace("https://", "")}
             </p>
           </div>
-          <Badge
-            variant="outline"
-            className={cn(
-              live
-                ? "border-primary/40 bg-primary/10 text-primary"
-                : "border-border bg-muted text-muted-foreground"
-            )}
-          >
-            {live && (
-              <span className="mr-1 inline-block size-1.5 animate-pulse rounded-full bg-primary" />
-            )}
-            {TOURNAMENT_STATUS_LABEL[tournament.status] ?? tournament.status}
-          </Badge>
+          <ArrowRight className="mt-1 size-4 shrink-0 text-muted-foreground transition-transform group-hover:translate-x-0.5 group-hover:text-primary" />
         </div>
 
-        <div className="flex flex-wrap items-center gap-2 text-xs">
-          <span className="flex items-center gap-1.5 rounded-lg bg-muted/60 px-2.5 py-1.5">
-            <Swords className="size-3.5 text-primary" />
-            {tournament.current_round ? (
-              <>
-                <span className="font-medium">{tournament.current_round.name}</span>
-                <RoundStatusBadge status={tournament.current_round.status} />
-              </>
-            ) : (
-              <span className="text-muted-foreground">Sin rondas aún</span>
-            )}
-          </span>
-          <span className="flex items-center gap-1.5 rounded-lg bg-muted/60 px-2.5 py-1.5 text-muted-foreground">
-            <Users className="size-3.5" /> {tournament.teams_count} equipos
-          </span>
-          <span className="flex items-center gap-1.5 rounded-lg bg-muted/60 px-2.5 py-1.5 text-muted-foreground">
-            <Ticket className="size-3.5" /> {tournament.open_markets_count}{" "}
-            {tournament.open_markets_count === 1 ? "mercado abierto" : "mercados abiertos"}
-          </span>
-          <span className="ml-auto flex items-center gap-1 font-medium text-primary opacity-0 transition-opacity group-hover:opacity-100">
-            Ver torneo <ArrowRight className="size-3.5" />
-          </span>
+        {/* Los números mandan: es una app de datos, no una lista de texto */}
+        <div className="flex items-end gap-6">
+          <StatNumber
+            value={tournament.teams_count}
+            label="Equipos"
+            size="md"
+            tone={tournament.teams_count > 0 ? "default" : "muted"}
+          />
+          <StatNumber
+            value={tournament.open_markets_count}
+            label="Mercados"
+            size="md"
+            tone={tournament.open_markets_count > 0 ? "primary" : "muted"}
+          />
         </div>
       </button>
 
-      {/* Expansores inline: rondas con resultados y equipos con integrantes, sin navegar */}
-      <div className="flex border-t border-border/60">
+      {/* Expansores: rondas y equipos sin salir de la página */}
+      <div className="flex gap-px border-t border-border bg-border">
         {(
           [
-            ["rounds", "Rondas y resultados"],
+            ["rounds", "Rondas"],
             ["teams", "Equipos"],
           ] as const
         ).map(([key, label]) => (
@@ -151,22 +140,25 @@ function TournamentCard({ tournament }: { tournament: Tournament }) {
             type="button"
             onClick={() => toggleSection(key)}
             className={cn(
-              "flex flex-1 items-center justify-center gap-1.5 px-3 py-2 text-xs font-medium transition-colors",
+              "label-broadcast flex flex-1 items-center justify-center gap-1.5 py-2.5 transition-colors",
               openSection === key
                 ? "bg-primary/10 text-primary"
-                : "text-muted-foreground hover:bg-accent/40 hover:text-foreground"
+                : "bg-card hover:bg-accent/40 hover:text-foreground"
             )}
           >
             {label}
             <ChevronDown
-              className={cn("size-3.5 transition-transform", openSection === key && "rotate-180")}
+              className={cn(
+                "size-3 transition-transform",
+                openSection === key && "rotate-180"
+              )}
             />
           </button>
         ))}
       </div>
 
       {openSection === "rounds" && (
-        <div className="border-t border-border/60 p-4">
+        <div className="border-t border-border bg-surface-sunken p-3">
           {dashboard ? (
             <RoundsPanel
               tournamentId={String(tournament.id)}
@@ -174,12 +166,16 @@ function TournamentCard({ tournament }: { tournament: Tournament }) {
               defaultOpenRoundId={dashboard.current_round?.id ?? null}
             />
           ) : (
-            <RoundsPanelSkeleton />
+            <div className="flex flex-col gap-2">
+              {[0, 1, 2].map((i) => (
+                <Skeleton key={i} className="h-11 w-full rounded-lg" />
+              ))}
+            </div>
           )}
         </div>
       )}
       {openSection === "teams" && (
-        <div className="border-t border-border/60 p-4">
+        <div className="border-t border-border bg-surface-sunken p-3">
           <TeamsPanel tournamentId={String(tournament.id)} />
         </div>
       )}
@@ -197,18 +193,32 @@ export default function DashboardPage() {
 
   const active = (tournaments ?? []).filter((t) => t.status !== "completed");
   const finished = (tournaments ?? []).filter((t) => t.status === "completed");
+  const openMarkets = (tournaments ?? []).reduce(
+    (sum, t) => sum + t.open_markets_count,
+    0
+  );
 
   return (
-    <div className="mx-auto flex w-full max-w-5xl flex-1 flex-col gap-6 px-4 py-8">
-      <div>
-        <h1 className="font-heading text-2xl font-bold tracking-tight">Dashboard</h1>
-        <p className="text-sm text-muted-foreground">
-          Torneos en vivo, rondas y mercados — todo en un vistazo.
-        </p>
-      </div>
+    <div className="mx-auto flex w-full max-w-4xl flex-1 flex-col gap-5 px-4 py-6">
+      {/* Cabecera de transmisión: el dato agregado arriba de todo, no un párrafo */}
+      <header className="flex items-end justify-between gap-4 border-b border-border pb-4">
+        <div>
+          <StatLabel>Claim</StatLabel>
+          <h1 className="font-heading text-display-lg font-bold uppercase">Dashboard</h1>
+        </div>
+        {tournaments && tournaments.length > 0 && (
+          <StatNumber
+            value={openMarkets}
+            label="Mercados abiertos"
+            size="lg"
+            tone={openMarkets > 0 ? "primary" : "muted"}
+            className="items-end text-right"
+          />
+        )}
+      </header>
 
       {isLoading && (
-        <div className="flex flex-col gap-4">
+        <div className="flex flex-col gap-3">
           <TournamentCardSkeleton />
           <TournamentCardSkeleton />
         </div>
@@ -223,10 +233,8 @@ export default function DashboardPage() {
 
       {active.length > 0 && (
         <section className="flex flex-col gap-3">
-          <h2 className="flex items-center gap-2 text-sm font-semibold uppercase tracking-wider text-muted-foreground">
-            <Trophy className="size-4 text-primary" /> En juego
-          </h2>
-          <div className="flex flex-col gap-4">
+          <SectionRule title="En juego" meta={`${active.length}`} />
+          <div className="flex flex-col gap-3">
             {active.map((t) => (
               <TournamentCard key={t.id} tournament={t} />
             ))}
@@ -236,10 +244,8 @@ export default function DashboardPage() {
 
       {finished.length > 0 && (
         <section className="flex flex-col gap-3">
-          <h2 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground">
-            Terminados
-          </h2>
-          <div className="flex flex-col gap-4">
+          <SectionRule title="Terminados" meta={`${finished.length}`} />
+          <div className="flex flex-col gap-3">
             {finished.map((t) => (
               <TournamentCard key={t.id} tournament={t} />
             ))}
@@ -247,12 +253,13 @@ export default function DashboardPage() {
         </section>
       )}
 
-      <p className="text-center text-xs text-muted-foreground">
-        ¿Buscás apostar?{" "}
-        <Link href="/bets" className="font-medium text-primary hover:underline">
-          Ir a los mercados abiertos →
-        </Link>
-      </p>
+      <Link
+        href="/bets"
+        className="group flex items-center justify-center gap-2 rounded-lg border border-border bg-card py-3 text-sm font-medium transition-colors hover:border-primary/40 hover:bg-primary/5"
+      >
+        Ir a los mercados abiertos
+        <ArrowRight className="size-4 text-primary transition-transform group-hover:translate-x-0.5" />
+      </Link>
     </div>
   );
 }

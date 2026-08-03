@@ -1,18 +1,23 @@
 import type { Metadata } from "next";
-import { Inter, Space_Grotesk, Geist_Mono } from "next/font/google";
+import { Barlow, Barlow_Condensed, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import { Providers } from "@/components/providers";
 import { Sidebar } from "@/components/layout/sidebar";
 import { MainShell } from "@/components/layout/main-shell";
 
-const inter = Inter({
+/* Pairing "Sports/Fitness" del rediseño broadcast (ver Rediseno UIX 2026 en el vault).
+ * Barlow trae numerales tabulares, que es lo que evita que una cuota "baile" de ancho
+ * cuando se actualiza en vivo -- por eso este par y no Inter/Space Grotesk. */
+const barlow = Barlow({
   variable: "--font-sans",
   subsets: ["latin"],
+  weight: ["300", "400", "500", "600", "700"],
 });
 
-const spaceGrotesk = Space_Grotesk({
+const barlowCondensed = Barlow_Condensed({
   variable: "--font-display",
   subsets: ["latin"],
+  weight: ["400", "500", "600", "700"],
 });
 
 const geistMono = Geist_Mono({
@@ -34,7 +39,7 @@ export default function RootLayout({
   return (
     <html
       lang="es"
-      className={`dark ${inter.variable} ${spaceGrotesk.variable} ${geistMono.variable} h-full antialiased`}
+      className={`dark ${barlow.variable} ${barlowCondensed.variable} ${geistMono.variable} h-full antialiased`}
     >
       <body className="min-h-full bg-background text-foreground">
         <Providers>

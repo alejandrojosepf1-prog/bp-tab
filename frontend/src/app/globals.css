@@ -46,51 +46,132 @@
   --radius-2xl: calc(var(--radius) * 1.8);
   --radius-3xl: calc(var(--radius) * 2.2);
   --radius-4xl: calc(var(--radius) * 2.6);
+
+  /* --- Rediseño broadcast: semántica de datos --- */
+  /* Expuestos como utilidades (bg-up, text-down, border-live...) para que el significado
+   * viva en el nombre y no en un hex suelto adentro de un componente. */
+  --color-up: var(--up);
+  --color-up-soft: var(--up-soft);
+  --color-down: var(--down);
+  --color-down-soft: var(--down-soft);
+  --color-live: var(--live);
+  --color-surface-raised: var(--surface-raised);
+  --color-surface-sunken: var(--surface-sunken);
+
+  /* --- Escala tipográfica broadcast ---
+   * Salto real entre pasos (no los dos tamaños que había antes). Los `--text-stat-*` son
+   * para NÚMEROS: line-height 1 y tracking apretado, porque una cuota grande con
+   * line-height de párrafo se ve flotando en el medio de su caja. */
+  --text-stat-xl: 3.5rem;
+  --text-stat-xl--line-height: 1;
+  --text-stat-xl--letter-spacing: -0.03em;
+  --text-stat-lg: 2.5rem;
+  --text-stat-lg--line-height: 1;
+  --text-stat-lg--letter-spacing: -0.02em;
+  --text-stat-md: 1.75rem;
+  --text-stat-md--line-height: 1;
+  --text-stat-md--letter-spacing: -0.01em;
+  --text-stat-sm: 1.25rem;
+  --text-stat-sm--line-height: 1;
+
+  /* Etiquetas de dato: chiquitas, mayúsculas, muy espaciadas — el "SHOTS ON TARGET"
+   * de una placa de transmisión. */
+  --text-label: 0.6875rem;
+  --text-label--line-height: 1.2;
+  --text-label--letter-spacing: 0.12em;
+
+  /* Titulares condensados */
+  --text-display-lg: 2.25rem;
+  --text-display-lg--line-height: 1.05;
+  --text-display-lg--letter-spacing: -0.01em;
+  --text-display-md: 1.5rem;
+  --text-display-md--line-height: 1.1;
+
+  /* --- Densidad dashboard (8-32px, no la 16-64px de antes) --- */
+  --spacing-dense-1: 0.5rem;
+  --spacing-dense-2: 0.75rem;
+  --spacing-dense-3: 1rem;
+  --spacing-dense-4: 1.5rem;
+  --spacing-dense-5: 2rem;
+
+  /* --- Motion --- */
+  --ease-broadcast: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-snap: cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 
 /*
- * Claim — identidad visual, zona apuestas.
- * Plataforma de apuestas de esports/debate: fondo casi negro con tinte azul profundo,
- * paleta Arcade/Retro Game (Pieza 5) -- primario rojo (la "ficha" de Claim), secundario
- * azul. El verde de ganancia/puntaje vive aparte, como clases Tailwind directas
- * (`text-emerald-400` etc. en sidebar.tsx) sobre eventos puntuales, no como este primario/
- * secundario estructural. Dark-first: la clase `dark` va fija en <html>, así que :root y
- * .dark comparten la misma paleta oscura.
+ * Claim — zona apuestas. Dirección "broadcast deportivo en vivo" (SofaScore/ESPN/DAZN).
+ * Ver `Rediseno UIX 2026 - Broadcast en vivo` en el vault.
+ *
+ * REGLA DE COLOR CENTRAL, y la razón de que el primario ya no sea rojo:
+ * en una plataforma de apuestas, rojo y verde YA significan algo antes de que la marca
+ * opine — bajó/subió, perdiste/ganaste. Si el rojo es además el color del botón de acción,
+ * un "Apostar" rojo compite con una "cuota bajando" roja en la misma pantalla. Así que:
+ *   - rojo/verde quedan RESERVADOS 100% para semántica de datos (--up / --down),
+ *   - la acción y la marca pasan a ÁMBAR, que sobre oscuro lee a transmisión deportiva
+ *     premium y no colisiona con ninguno de los dos significados.
+ * Esto reemplaza el "primario rojo" de la Pieza 5, que se decidió antes de que existieran
+ * los indicadores de movimiento de cuota en vivo.
+ *
+ * `--live` comparte el rojo a propósito: "EN VIVO" en rojo es una convención de
+ * transmisión demasiado fuerte para pelearla. Se desambigua porque SIEMPRE va como punto
+ * pulsante + la palabra, nunca como color suelto sobre un número.
+ *
+ * Fondo: azul-noche muy oscuro, nunca #000 puro (smear en OLED al hacer scroll).
+ * Dark-first: la clase `dark` va fija en <html>, así que :root y .dark comparten paleta.
  */
 :root,
 .dark {
-  --background: oklch(0.16 0.02 262);
-  --foreground: oklch(0.95 0.01 250);
-  --card: oklch(0.2 0.025 262);
-  --card-foreground: oklch(0.95 0.01 250);
-  --popover: oklch(0.22 0.025 262);
-  --popover-foreground: oklch(0.95 0.01 250);
-  --primary: #dc2626;
-  --primary-foreground: #fef2f2;
-  --secondary: #2563eb;
-  --secondary-foreground: #eff6ff;
-  --muted: oklch(0.25 0.02 262);
-  --muted-foreground: oklch(0.68 0.015 255);
-  --accent: oklch(0.28 0.03 265);
-  --accent-foreground: oklch(0.95 0.01 250);
-  --destructive: oklch(0.66 0.2 25);
-  --border: oklch(0.95 0.01 250 / 10%);
-  --input: oklch(0.95 0.01 250 / 14%);
-  --ring: #dc262699;
-  --chart-1: #dc2626;
-  --chart-2: #2563eb;
-  --chart-3: oklch(0.75 0.13 200);
-  --chart-4: oklch(0.8 0.15 80);
-  --chart-5: oklch(0.66 0.2 25);
-  --radius: 0.75rem;
-  --sidebar: oklch(0.185 0.024 262);
-  --sidebar-foreground: oklch(0.9 0.01 250);
-  --sidebar-primary: #dc2626;
-  --sidebar-primary-foreground: #fef2f2;
-  --sidebar-accent: oklch(0.26 0.03 265);
-  --sidebar-accent-foreground: oklch(0.95 0.01 250);
-  --sidebar-border: oklch(0.95 0.01 250 / 8%);
-  --sidebar-ring: #dc262699;
+  --background: oklch(0.145 0.018 265);
+  --foreground: oklch(0.97 0.005 250);
+  --card: oklch(0.19 0.021 264);
+  --card-foreground: oklch(0.97 0.005 250);
+  --popover: oklch(0.215 0.023 264);
+  --popover-foreground: oklch(0.97 0.005 250);
+
+  /* Acción / marca */
+  --primary: #f59e0b;
+  --primary-foreground: #1a1206;
+  --secondary: oklch(0.28 0.03 265);
+  --secondary-foreground: oklch(0.97 0.005 250);
+
+  --muted: oklch(0.245 0.02 264);
+  --muted-foreground: oklch(0.72 0.015 258);
+  --accent: oklch(0.27 0.028 265);
+  --accent-foreground: oklch(0.97 0.005 250);
+  --destructive: #ef4444;
+
+  --border: oklch(0.97 0.005 250 / 11%);
+  --input: oklch(0.97 0.005 250 / 15%);
+  --ring: #f59e0b99;
+
+  /* Semántica de datos — NO usar para marca ni acciones */
+  --up: #22c55e;
+  --up-soft: #22c55e1f;
+  --down: #ef4444;
+  --down-soft: #ef44441f;
+  --live: #ff3b30;
+
+  /* Niveles de superficie: dan profundidad sin recurrir a blur pesado */
+  --surface-raised: oklch(0.225 0.024 264);
+  --surface-sunken: oklch(0.125 0.016 265);
+
+  --chart-1: #f59e0b;
+  --chart-2: #22c55e;
+  --chart-3: #ef4444;
+  --chart-4: oklch(0.75 0.13 200);
+  --chart-5: oklch(0.62 0.18 285);
+
+  --radius: 0.625rem;
+
+  --sidebar: oklch(0.165 0.02 265);
+  --sidebar-foreground: oklch(0.92 0.008 252);
+  --sidebar-primary: #f59e0b;
+  --sidebar-primary-foreground: #1a1206;
+  --sidebar-accent: oklch(0.25 0.026 265);
+  --sidebar-accent-foreground: oklch(0.97 0.005 250);
+  --sidebar-border: oklch(0.97 0.005 250 / 9%);
+  --sidebar-ring: #f59e0b99;
 }
 
 @layer base {
@@ -107,15 +188,96 @@
   h2,
   h3 {
     font-family: var(--font-display), var(--font-sans), sans-serif;
-    letter-spacing: -0.02em;
+    letter-spacing: -0.01em;
   }
+  /* Todo dato numérico va tabular por defecto: sin esto, una cuota que pasa de 2.11 a
+   * 2.45 cambia de ancho y empuja el layout en cada refresh en vivo. */
+  [data-stat],
+  .tabular {
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: "tnum";
+  }
+}
+
+/* Número protagonista: la unidad de contenido de una placa de transmisión.
+ * Se combina con el tamaño: `class="stat text-stat-lg"`. */
+@utility stat {
+  font-family: var(--font-display), var(--font-sans), sans-serif;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum";
+}
+
+/* Etiqueta de dato: el "POSESIÓN" chiquito arriba del número grande. */
+@utility label-broadcast {
+  font-family: var(--font-display), var(--font-sans), sans-serif;
+  font-size: var(--text-label);
+  line-height: var(--text-label--line-height);
+  letter-spacing: var(--text-label--letter-spacing);
+  font-weight: 600;
+  text-transform: uppercase;
+  color: var(--muted-foreground);
 }
 
 /* Sutileza de marca: brillo detrás del contenido principal, sin ruido en pantallas chicas */
 .claim-glow {
   background:
-    radial-gradient(60rem 30rem at 85% -10%, #dc26260d, transparent 60%),
-    radial-gradient(50rem 26rem at -10% 110%, #2563eb0f, transparent 60%);
+    radial-gradient(60rem 30rem at 85% -10%, #f59e0b0f, transparent 60%),
+    radial-gradient(50rem 26rem at -10% 110%, #22c55e0a, transparent 60%);
+}
+
+/* Pulso de "en vivo" — respira, no parpadea. `animate-pulse` de Tailwind es un fade
+ * genérico que se usa igual para skeletons; esto tiene que leerse como señal, no como
+ * carga. Se apaga entero con prefers-reduced-motion. */
+@keyframes live-pulse {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.45;
+    transform: scale(0.82);
+  }
+}
+
+.live-dot {
+  animation: live-pulse 1.8s var(--ease-broadcast) infinite;
+}
+
+/* Flash al cambiar una cuota/balance: verde si subió, rojo si bajó. */
+@keyframes value-flash-up {
+  0% {
+    background-color: var(--up-soft);
+  }
+  100% {
+    background-color: transparent;
+  }
+}
+
+@keyframes value-flash-down {
+  0% {
+    background-color: var(--down-soft);
+  }
+  100% {
+    background-color: transparent;
+  }
+}
+
+.flash-up {
+  animation: value-flash-up 0.9s var(--ease-broadcast);
+}
+
+.flash-down {
+  animation: value-flash-down 0.9s var(--ease-broadcast);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .live-dot,
+  .flash-up,
+  .flash-down {
+    animation: none;
+  }
 }
 
 /*
