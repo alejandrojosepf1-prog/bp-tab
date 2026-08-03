@@ -22,6 +22,31 @@ export interface TournamentBalance {
   balance: number;
 }
 
+// ---------- Acceso por pases (CNADE 2026 Pieza 4) ----------
+
+export type AccessPassStatus = "pending" | "approved" | "rejected";
+
+// Informational only -- an admin-facing hint, never what actually decides the live betting-time
+// block (see app.services.access_pass_service.is_participant_of_tournament on the backend).
+export interface AccessPassMatchHint {
+  kind: "speaker" | "adjudicator";
+  id: number;
+  name: string;
+}
+
+export interface AccessPass {
+  id: number;
+  tournament_id: number;
+  email: string;
+  phone: string;
+  full_name: string;
+  status: AccessPassStatus;
+  match_hint: AccessPassMatchHint | null;
+  user_id: number | null;
+  reviewed_at: string | null;
+  created_at: string;
+}
+
 // ---------- Premios ----------
 
 export type PrizeEventType = "manual_award" | "raffle" | "activity_bonus";
@@ -79,6 +104,8 @@ export interface Tournament {
   champion_team_id: number | null;
   timezone: string;
   is_active: boolean;
+  // CNADE 2026 Pieza 4 -- admin toggle; when true, betting requires an approved access pass.
+  requires_access_pass: boolean;
   created_at: string;
   // Resumen para las tarjetas del dashboard (calculado por el backend, no columnas).
   current_round: Round | null;

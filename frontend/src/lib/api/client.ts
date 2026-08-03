@@ -1,4 +1,6 @@
 import type {
+  AccessPass,
+  AccessPassStatus,
   Adjudicator,
   BetMarket,
   BetType,
@@ -155,10 +157,28 @@ export const api = {
       post<Tournament>("/tournaments", data),
     update: (
       id: number | string,
-      data: Partial<{ name: string; tab_url: string; is_active: boolean }>
+      data: Partial<{
+        name: string;
+        tab_url: string;
+        is_active: boolean;
+        requires_access_pass: boolean;
+      }>
     ) => patch<Tournament>(`/tournaments/${id}`, data),
     scrape: (id: number | string) =>
       post<{ status: "queued" }>(`/tournaments/${id}/scrape`),
+  },
+
+  accessPasses: {
+    submit: (tournamentId: number | string, data: { email: string; phone: string; full_name: string }) =>
+      post<AccessPass>(`/tournaments/${tournamentId}/access-passes`, data),
+    list: (tournamentId: number | string, statusFilter?: AccessPassStatus) =>
+      get<AccessPass[]>(
+        `/admin/access-passes${qs({ tournament_id: tournamentId, status_filter: statusFilter })}`
+      ),
+    approve: (id: number | string) => post<AccessPass>(`/admin/access-passes/${id}/approve`),
+    reject: (id: number | string) => post<AccessPass>(`/admin/access-passes/${id}/reject`),
+    activate: (data: { token: string; password: string }) =>
+      post<{ access_token: string; token_type: string }>("/auth/activate", data),
   },
 
   institutions: {

@@ -20,6 +20,7 @@ import {
   Landmark,
   Gift,
   GitMerge,
+  UserCheck,
 } from "lucide-react";
 import { useAuth } from "@/lib/auth/auth-context";
 import { cn } from "@/lib/utils";
@@ -43,6 +44,7 @@ const ADMIN_ITEMS = [
   { href: "/admin/scraping", label: "Scraping", icon: Radar },
   { href: "/admin/finance", label: "Economía", icon: Landmark },
   { href: "/admin/circuit", label: "Instituciones", icon: GitMerge },
+  { href: "/admin/access-passes", label: "Pases", icon: UserCheck },
 ];
 
 function Wordmark() {
@@ -217,7 +219,9 @@ export function Sidebar() {
   const pathname = usePathname();
   const [mobileOpen, setMobileOpen] = useState(false);
 
-  if (pathname === "/login") return null;
+  // Public, no-login pages (CNADE 2026 Pieza 4) render full-bleed, same as /login.
+  if (pathname === "/login" || pathname === "/activate" || pathname.startsWith("/access-request"))
+    return null;
 
   return (
     <>

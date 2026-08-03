@@ -52,4 +52,6 @@ export const queryKeys = {
   adminCircuitInstitutions: ["admin", "circuit", "institutions"] as const,
   adminCircuitReviewQueue: ["admin", "circuit", "review-queue"] as const,
   adminUnassignedTeams: ["admin", "circuit", "unassigned-teams"] as const,
+  adminAccessPasses: (tournamentId: Id, statusFilter?: string) =>
+    ["admin", "access-passes", tournamentId, statusFilter ?? "all"] as const,
 };
