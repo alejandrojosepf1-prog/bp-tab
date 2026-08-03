@@ -19,6 +19,8 @@ class TournamentOut(BaseModel):
     champion_team_id: int | None
     timezone: str
     is_active: bool
+    # CNADE 2026 Roadmap Pieza 4 -- admin-toggled, default False. See app.models.access.AccessPass.
+    requires_access_pass: bool
     created_at: datetime.datetime
     # Card-level summary for the dashboard (filled by the list/get endpoints, not columns):
     # lets the tournament cards show "ronda actual", team count and open-market count without
@@ -42,6 +44,7 @@ class TournamentUpdate(BaseModel):
     name: str | None = None
     tab_url: str | None = None
     is_active: bool | None = None
+    requires_access_pass: bool | None = None
 
 
 class ScrapeQueuedResponse(BaseModel):

@@ -5,6 +5,7 @@ Alembic autogenerate / ``create_all`` and (b) callers can simply do ``from app i
 """
 
 from app.db.base import Base
+from app.models.access import AccessPass
 from app.models.betting import (
     BetMarket,
     LeaderboardEntry,
@@ -47,6 +48,7 @@ from app.models.transactions import Transaction
 __all__ = [
     "Base",
     "Tournament",
+    "AccessPass",
     "CircuitInstitution",
     "CircuitInstitutionAlias",
     "CircuitPerson",

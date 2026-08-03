@@ -24,6 +24,7 @@ from app.db.session import get_db
 from app.models import BetMarket, OddsSnapshot, Prediction, Round, Tournament, User
 from app.models.enums import BetMarketStatus
 from app.services.betting_service import (
+    AccessDeniedError,
     InsufficientBalanceError,
     MarketCreationError,
     TooManyPicksError,
@@ -346,6 +347,9 @@ async def create_prediction(
     except TooManyPicksError as exc:
         await session.rollback()
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except AccessDeniedError as exc:
+        await session.rollback()
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
 
     await session.commit()
     await session.refresh(prediction)

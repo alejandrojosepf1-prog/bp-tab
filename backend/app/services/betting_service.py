@@ -49,6 +49,7 @@ from app.models.enums import (
     RoundStage,
     SpeakerRole,
     TournamentStatus,
+    UserRole,
 )
 
 # Standard BP roles for the FIRST speaker of a bench (PM/LO/MG/MO); the other role in each pair
@@ -56,6 +57,7 @@ from app.models.enums import (
 # opens the bench" -- straight from data already recorded for every judged debate, no new column.
 _FIRST_SPEAKER_ROLES = {SpeakerRole.PM, SpeakerRole.LO, SpeakerRole.MG, SpeakerRole.MO}
 from app.repositories.upsert import upsert_by_natural_key
+from app.services.access_pass_service import has_approved_access, is_participant_of_tournament
 from app.services.bankroll_service import get_or_create_tournament_balance
 from app.services.odds_service import (
     MAX_SPEAKER_POSITION,
@@ -156,6 +158,12 @@ class TooManyPicksError(Exception):
 class MarketCreationError(Exception):
     """Raised when a market can't be created against this tournament's/payload's current
     state -- the router maps this to a 400."""
+
+
+class AccessDeniedError(Exception):
+    """Raised when `bet_market.tournament.requires_access_pass` and the user either has no
+    APPROVED access_pass_service pass for it, or does but currently matches a scraped
+    participant (CNADE 2026 Roadmap Pieza 4) -- the router maps this to a 403."""
 
 
 def validate_market_creation(
@@ -274,7 +282,25 @@ async def place_prediction(
     their pick before it closes), that prior stake is refunded first so editing a bet never
     double-charges them. Raises InsufficientBalanceError if the balance (after any refund)
     can't cover the new stake -- callers should not commit the session in that case.
+
+    CNADE 2026 Roadmap Pieza 4: when `bet_market`'s tournament requires an access pass, a
+    non-admin user needs an APPROVED one for it, and is blocked even with one if they currently
+    match a scraped participant of that tournament (checked live, never cached -- see
+    access_pass_service.is_participant_of_tournament). Admins bypass both checks: they don't
+    request a pass to their own admin-controlled platform.
     """
+    tournament = await session.get(Tournament, bet_market.tournament_id)
+    assert tournament is not None  # bet_market.tournament_id is a NOT NULL FK, always resolves
+    if tournament.requires_access_pass and user.role != UserRole.ADMIN:
+        if not await has_approved_access(session, tournament.id, user):
+            raise AccessDeniedError(
+                "necesitás un pase aprobado para apostar en este torneo"
+            )
+        if await is_participant_of_tournament(session, tournament.id, user):
+            raise AccessDeniedError(
+                "no podés apostar en mercados de un torneo mientras competís en él"
+            )
+
     if stake_amount <= 0:
         raise ValueError("stake_amount must be positive")
     if stake_amount < MIN_STAKE:

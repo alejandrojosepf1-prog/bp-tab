@@ -35,6 +35,13 @@ async def get_current_user(
     except JWTError as exc:
         raise _CREDENTIALS_EXCEPTION from exc
 
+    # A plain login session token never carries a "purpose" claim -- special-purpose tokens
+    # (e.g. access_pass_service's activation link) do, specifically so a real, unexpired,
+    # correctly-signed activation token can never double as a login bypass just because its
+    # `sub` happens to collide with a real user id.
+    if payload.get("purpose") is not None:
+        raise _CREDENTIALS_EXCEPTION
+
     raw_user_id = payload.get("sub")
     if raw_user_id is None:
         raise _CREDENTIALS_EXCEPTION

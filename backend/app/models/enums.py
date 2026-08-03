@@ -164,3 +164,12 @@ class TransactionType(str, enum.Enum):
 
     TRANSFER_OUT = "transfer_out"
     TRANSFER_IN = "transfer_in"
+
+
+class AccessPassStatus(str, enum.Enum):
+    """Lifecycle of app.models.access.AccessPass -- one-way except PENDING can be re-triggered
+    by a resubmission (see access_pass_service.submit_access_pass_request)."""
+
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
