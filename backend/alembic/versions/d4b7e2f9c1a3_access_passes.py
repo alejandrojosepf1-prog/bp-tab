@@ -41,9 +41,9 @@ def upgrade() -> None:
         sa.Column('full_name', sa.String(length=200), nullable=False),
         sa.Column(
             'status',
-            sa.Enum('pending', 'approved', 'rejected', name='accesspassstatus'),
+            sa.Enum('PENDING', 'APPROVED', 'REJECTED', name='accesspassstatus'),
             nullable=False,
-            server_default='pending',
+            server_default='PENDING',
         ),
         sa.Column('match_hint', sa.JSON(), nullable=True),
         sa.Column(
