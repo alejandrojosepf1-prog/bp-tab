@@ -12,6 +12,9 @@ class TournamentOut(BaseModel):
     id: int
     name: str
     slug: str
+    # Nullable -- set explicitly at creation for backfilled historical tournaments; a live
+    # tournament created today can leave it unset (see app.models.tournament.Tournament.year).
+    year: int | None
     source_base_url: str
     source_slug: str
     status: TournamentStatus
@@ -38,6 +41,7 @@ class TournamentCreate(BaseModel):
     # asking the admin to split the URL into two fields by hand.
     tab_url: str
     timezone: str = "UTC"
+    year: int | None = None
 
 
 class TournamentUpdate(BaseModel):
@@ -45,6 +49,7 @@ class TournamentUpdate(BaseModel):
     tab_url: str | None = None
     is_active: bool | None = None
     requires_access_pass: bool | None = None
+    year: int | None = None
 
 
 class ScrapeQueuedResponse(BaseModel):

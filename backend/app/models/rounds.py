@@ -174,5 +174,8 @@ class Result(Base, TimestampMixin):
     ballot_source_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
     motion_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     confirmed_at: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    # Admin-entered, never scraped -- no tab exposes this. CNADE 2026 Roadmap Pieza 2 public
+    # archive: "watch this debate" link shown on the tournament page when set.
+    video_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
 
     debate = relationship("Debate", back_populates="result")

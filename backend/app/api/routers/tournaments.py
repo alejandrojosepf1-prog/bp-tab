@@ -79,6 +79,20 @@ async def get_tournament(
     return await _to_tournament_out(session, tournament)
 
 
+@router.get("/slug/{slug}", response_model=TournamentOut)
+async def get_tournament_by_slug(
+    slug: str, session: AsyncSession = Depends(get_db)
+) -> TournamentOut:
+    """Public archive lookup (CNADE 2026 Roadmap Pieza 2) -- the /torneos/:slug page links here
+    instead of by numeric id, which the frontend URL never exposes."""
+    tournament = (
+        await session.execute(select(Tournament).where(Tournament.slug == slug))
+    ).scalar_one_or_none()
+    if tournament is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tournament not found")
+    return await _to_tournament_out(session, tournament)
+
+
 @router.get("/{tournament_id}/me/balance", response_model=BalanceOut)
 async def my_tournament_balance(
     tournament_id: int,
@@ -111,6 +125,7 @@ async def create_tournament_endpoint(
             source_base_url=source_base_url,
             source_slug=source_slug,
             timezone=payload.timezone,
+            year=payload.year,
         )
         await session.commit()
     except IntegrityError as exc:

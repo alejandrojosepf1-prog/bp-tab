@@ -24,6 +24,10 @@ class Tournament(Base, TimestampMixin):
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     slug: Mapped[str] = mapped_column(String(200), nullable=False, unique=True)
+    # Nullable, admin-set (backfilled tournaments set it explicitly at creation) -- NOT derived
+    # from created_at, which is scrape/insert time and would show every backfilled historical
+    # tournament as "this year." Used to browse the public archive by year.
+    year: Mapped[int | None] = mapped_column(nullable=True)
 
     source_base_url: Mapped[str] = mapped_column(String(500), nullable=False)
     source_slug: Mapped[str] = mapped_column(String(200), nullable=False)

@@ -66,6 +66,7 @@ async def create_tournament(
     source_base_url: str,
     source_slug: str,
     timezone: str,
+    year: int | None = None,
 ) -> Tournament:
     """Creates a Tournament row, deriving its unique `slug` from `name` since the API contract
     doesn't ask the client for one directly (see `Tournament.slug` vs. `source_slug`)."""
@@ -76,6 +77,7 @@ async def create_tournament(
         source_base_url=source_base_url,
         source_slug=source_slug,
         timezone=timezone,
+        year=year,
     )
     session.add(tournament)
     await session.flush()
