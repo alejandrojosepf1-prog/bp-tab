@@ -6,20 +6,43 @@ same pattern as betting_service.place_prediction.
 
 Transfers move tokens within ONE tournament's `TournamentBalance` (CNADE 2026 Roadmap Pieza 3)
 -- there's no such thing as a tournament-less transfer anymore, since balance itself is
-per-tournament. A cap on transfer amount relative to that tournament's balance is deliberately
-NOT implemented yet -- see Active Priorities: it's deferred until this per-tournament scoping
-existed, which is exactly what this module just gained.
+per-tournament.
+
+**Anti-collusion cap (closed 2026-08-02):** the leaderboard's `total_points` is settled-prediction
+net profit, not raw balance -- but a bigger balance still buys bigger absolute stakes, so one
+account gifting tokens to another right before a confident bet can inflate that second account's
+absolute net profit without any extra skill. `MAX_P2P_RECEIVED_PER_TOURNAMENT` caps how much a
+user can RECEIVE via P2P in one tournament, cumulative across every sender -- not a per-transfer
+cap, which a determined pair could just work around with several smaller transfers. A transfer
+that would push the recipient over the cap is rejected whole, same as insufficient balance --
+never silently trimmed to what still fits.
 """
 
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Transaction, User
+from app.models.betting import STARTING_BALANCE
 from app.models.enums import TransactionType
 from app.services.bankroll_service import get_or_create_tournament_balance
 
 # Anti-spam floor, not an anti-exploit measure (unlike MOTION_TYPE_MIN_STAKE) -- there's no
 # arbitrage in moving your own tokens to a friend, just no reason to ledger a 0.01-token transfer.
 MIN_TRANSFER_AMOUNT = 1.0
+
+# One full starting grant, gifted -- a memorable ceiling tied to an existing constant rather
+# than a new magic number. See the module docstring for why this is per-tournament-received,
+# not per-transfer.
+MAX_P2P_RECEIVED_PER_TOURNAMENT = STARTING_BALANCE
+
+
+async def _received_this_tournament(session: AsyncSession, user_id: int, tournament_id: int) -> float:
+    stmt = select(func.coalesce(func.sum(Transaction.amount), 0.0)).where(
+        Transaction.user_id == user_id,
+        Transaction.tournament_id == tournament_id,
+        Transaction.type == TransactionType.TRANSFER_IN,
+    )
+    return float((await session.execute(stmt)).scalar_one())
 
 
 class TransferError(Exception):
@@ -57,10 +80,19 @@ async def transfer_tokens(
             f"saldo insuficiente: tenés {sender_balance.balance:.2f}, necesitás {amount:.2f}"
         )
 
+    already_received = await _received_this_tournament(session, recipient.id, tournament_id)
+    if already_received + amount > MAX_P2P_RECEIVED_PER_TOURNAMENT:
+        raise TransferError(
+            f"ese usuario ya recibió {already_received:.2f} de "
+            f"{MAX_P2P_RECEIVED_PER_TOURNAMENT:.0f} tokens permitidos por transferencias en "
+            "este torneo"
+        )
+
     sender_balance.balance -= amount
     recipient_balance.balance += amount
 
     out_tx = Transaction(
+        tournament_id=tournament_id,
         user_id=sender.id,
         counterparty_user_id=recipient.id,
         type=TransactionType.TRANSFER_OUT,
@@ -69,6 +101,7 @@ async def transfer_tokens(
         note=note,
     )
     in_tx = Transaction(
+        tournament_id=tournament_id,
         user_id=recipient.id,
         counterparty_user_id=sender.id,
         type=TransactionType.TRANSFER_IN,

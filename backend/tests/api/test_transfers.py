@@ -93,6 +93,111 @@ async def test_transfer_rejects_insufficient_balance_self_and_below_minimum(
     assert unchanged.json()["balance"] == 10.0
 
 
+async def test_transfer_cap_allows_up_to_max_received_across_multiple_senders(
+    client: AsyncClient, db_session: AsyncSession
+) -> None:
+    """The cap is cumulative RECEIVED, summed across every sender -- not a per-transfer limit a
+    determined pair could route around with several smaller transfers."""
+    tournament = await make_tournament(db_session)
+    alice = await make_user(
+        db_session, email="alice-cap1@example.com", tournament=tournament, balance=100.0
+    )
+    carol = await make_user(
+        db_session, email="carol-cap1@example.com", tournament=tournament, balance=100.0
+    )
+    dave = await make_user(db_session, email="dave-cap1@example.com")
+
+    first = await client.post(
+        "/api/v1/transfers",
+        json={"recipient_id": dave.id, "amount": 60.0, "tournament_id": tournament.id},
+        headers=auth_headers(alice),
+    )
+    assert first.status_code == 201
+
+    # 60 + 40 = exactly the 100-token cap -- right at the boundary, must still succeed.
+    second = await client.post(
+        "/api/v1/transfers",
+        json={"recipient_id": dave.id, "amount": 40.0, "tournament_id": tournament.id},
+        headers=auth_headers(carol),
+    )
+    assert second.status_code == 201
+
+    dave_balance = await client.get(
+        f"/api/v1/tournaments/{tournament.id}/me/balance", headers=auth_headers(dave)
+    )
+    assert dave_balance.json()["balance"] == 200.0  # 100 start + 60 + 40
+
+
+async def test_transfer_rejects_once_recipient_would_exceed_received_cap(
+    client: AsyncClient, db_session: AsyncSession
+) -> None:
+    tournament = await make_tournament(db_session)
+    alice = await make_user(
+        db_session, email="alice-cap2@example.com", tournament=tournament, balance=100.0
+    )
+    bob = await make_user(
+        db_session, email="bob-cap2@example.com", tournament=tournament, balance=100.0
+    )
+    dave = await make_user(db_session, email="dave-cap2@example.com")
+    # Headers/IDs captured up front, before the rejected transfer's rollback expires the
+    # session's ORM objects (same MissingGreenlet trap as test_betting.py's motion_type test
+    # and the sibling insufficient-balance test above).
+    tournament_id = tournament.id
+    dave_id = dave.id
+    alice_headers, bob_headers, dave_headers = (
+        auth_headers(alice), auth_headers(bob), auth_headers(dave)
+    )
+
+    first = await client.post(
+        "/api/v1/transfers",
+        json={"recipient_id": dave_id, "amount": 60.0, "tournament_id": tournament_id},
+        headers=alice_headers,
+    )
+    assert first.status_code == 201
+
+    # 60 already received + 50 more = 110 > the 100-token cap -- rejected WHOLE, not trimmed to
+    # the 40 that would still fit.
+    second = await client.post(
+        "/api/v1/transfers",
+        json={"recipient_id": dave_id, "amount": 50.0, "tournament_id": tournament_id},
+        headers=bob_headers,
+    )
+    assert second.status_code == 400
+
+    dave_balance = await client.get(
+        f"/api/v1/tournaments/{tournament_id}/me/balance", headers=dave_headers
+    )
+    assert dave_balance.json()["balance"] == 160.0  # 100 start + 60 only -- the 50 never landed
+
+
+async def test_transfer_received_cap_is_scoped_per_tournament(
+    client: AsyncClient, db_session: AsyncSession
+) -> None:
+    t1 = await make_tournament(db_session)
+    t2 = await make_tournament(db_session)
+    alice = await make_user(
+        db_session, email="alice-cap3@example.com", tournament=t1, balance=100.0
+    )
+    bob = await make_user(db_session, email="bob-cap3@example.com", tournament=t2, balance=100.0)
+    dave = await make_user(db_session, email="dave-cap3@example.com")
+
+    maxed_out = await client.post(
+        "/api/v1/transfers",
+        json={"recipient_id": dave.id, "amount": 100.0, "tournament_id": t1.id},
+        headers=auth_headers(alice),
+    )
+    assert maxed_out.status_code == 201
+
+    # Dave already received the full cap in t1 -- but t2 is a separate tournament with its own
+    # TournamentBalance and its own cap, so this must succeed, not inherit t1's exhausted cap.
+    in_other_tournament = await client.post(
+        "/api/v1/transfers",
+        json={"recipient_id": dave.id, "amount": 100.0, "tournament_id": t2.id},
+        headers=auth_headers(bob),
+    )
+    assert in_other_tournament.status_code == 201
+
+
 async def test_list_users_excludes_self_and_inactive(
     client: AsyncClient, db_session: AsyncSession
 ) -> None:
