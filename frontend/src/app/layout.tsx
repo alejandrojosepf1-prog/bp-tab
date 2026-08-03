@@ -3,6 +3,7 @@ import { Inter, Space_Grotesk, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import { Providers } from "@/components/providers";
 import { Sidebar } from "@/components/layout/sidebar";
+import { MainShell } from "@/components/layout/main-shell";
 
 const inter = Inter({
   variable: "--font-sans",
@@ -39,9 +40,7 @@ export default function RootLayout({
         <Providers>
           <div className="flex min-h-screen">
             <Sidebar />
-            <main className="claim-glow flex min-w-0 flex-1 flex-col pt-14 lg:pt-0 lg:pl-60">
-              {children}
-            </main>
+            <MainShell>{children}</MainShell>
           </div>
         </Providers>
       </body>

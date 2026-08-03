@@ -8,8 +8,10 @@ import type {
   BreakCategory,
   BreakEntry,
   CircuitInstitution,
+  CircuitInstitutionDetail,
   CircuitInstitutionResolvePayload,
   CircuitReviewItem,
+  MotionEntry,
   Debate,
   DebateSummary,
   DashboardData,
@@ -151,6 +153,7 @@ export const api = {
   tournaments: {
     list: () => get<Tournament[]>("/tournaments"),
     get: (id: number | string) => get<Tournament>(`/tournaments/${id}`),
+    getBySlug: (slug: string) => get<Tournament>(`/tournaments/slug/${slug}`),
     myBalance: (id: number | string) =>
       get<TournamentBalance>(`/tournaments/${id}/me/balance`),
     create: (data: { name: string; tab_url: string; timezone: string }) =>
@@ -357,6 +360,13 @@ export const api = {
       teamId: number | string,
       payload: CircuitInstitutionResolvePayload
     ) => post<CircuitInstitution>(`/admin/circuit/teams/${teamId}/assign-institution`, payload),
+  },
+
+  archive: {
+    institutions: () => get<CircuitInstitution[]>("/circuit/institutions"),
+    institution: (slug: string) => get<CircuitInstitutionDetail>(`/circuit/institutions/${slug}`),
+    motions: (params?: { category?: MotionCategory; year?: number }) =>
+      get<MotionEntry[]>(`/motions${qs({ category: params?.category, year: params?.year })}`),
   },
 };
 

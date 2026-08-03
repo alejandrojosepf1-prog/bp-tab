@@ -5,6 +5,12 @@ type Id = number | string;
 export const queryKeys = {
   tournaments: ["tournaments"] as const,
   tournament: (id: Id) => ["tournaments", id] as const,
+  tournamentBySlug: (slug: string) => ["tournaments", "slug", slug] as const,
+
+  archiveInstitutions: ["archive", "institutions"] as const,
+  archiveInstitution: (slug: string) => ["archive", "institutions", slug] as const,
+  archiveMotions: (params?: Record<string, unknown>) =>
+    ["archive", "motions", params ?? {}] as const,
 
   institutions: (tournamentId: Id) => ["tournaments", tournamentId, "institutions"] as const,
   teams: (tournamentId: Id) => ["tournaments", tournamentId, "teams"] as const,

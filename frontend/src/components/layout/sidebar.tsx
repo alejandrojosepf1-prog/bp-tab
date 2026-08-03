@@ -25,6 +25,7 @@ import {
 import { useAuth } from "@/lib/auth/auth-context";
 import { cn } from "@/lib/utils";
 import { formatTokens } from "@/lib/format";
+import { isFullBleedRoute } from "@/lib/route-zones";
 
 const MAIN_ITEMS = [
   { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
@@ -219,9 +220,8 @@ export function Sidebar() {
   const pathname = usePathname();
   const [mobileOpen, setMobileOpen] = useState(false);
 
-  // Public, no-login pages (CNADE 2026 Pieza 4) render full-bleed, same as /login.
-  if (pathname === "/login" || pathname === "/activate" || pathname.startsWith("/access-request"))
-    return null;
+  // Public, no-login pages and the archive zone render full-bleed, same as /login.
+  if (isFullBleedRoute(pathname)) return null;
 
   return (
     <>

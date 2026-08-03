@@ -97,6 +97,9 @@ export interface Tournament {
   id: number;
   name: string;
   slug: string;
+  // Set explicitly for backfilled historical tournaments; a live tournament created today can
+  // leave it unset. Used to browse the public archive chronologically.
+  year: number | null;
   source_base_url: string;
   source_slug: string;
   status: TournamentStatus;
@@ -189,6 +192,9 @@ export interface Debate {
   status: string;
   motion_text: string | null;
   ballot_source_url: string | null;
+  // Admin-entered "watch this debate" YouTube link, never scraped -- null until an admin sets
+  // it (CNADE 2026 Roadmap Pieza 2 public archive).
+  video_url: string | null;
   teams: DebateTeamDetail[];
   adjudicators: DebateAdjudicator[];
 }
@@ -511,6 +517,29 @@ export interface UnassignedTeam {
 export type CircuitInstitutionResolvePayload =
   | { circuit_institution_id: number }
   | { new_institution_name: string; new_institution_region?: string };
+
+// ---------- Archivo público del circuito (CNADE 2026 Roadmap Pieza 2) ----------
+
+export interface InstitutionTournamentAppearance {
+  tournament_name: string;
+  tournament_slug: string;
+  tournament_year: number | null;
+  team_names: string[];
+  was_champion: boolean;
+}
+
+export interface CircuitInstitutionDetail extends CircuitInstitution {
+  appearances: InstitutionTournamentAppearance[];
+}
+
+export interface MotionEntry {
+  tournament_name: string;
+  tournament_slug: string;
+  tournament_year: number | null;
+  round_name: string;
+  motion_text: string;
+  motion_category: MotionCategory | null;
+}
 
 // ---------- Leaderboard ----------
 
