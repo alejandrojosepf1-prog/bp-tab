@@ -57,9 +57,6 @@ export default function AdminUsersPage() {
               </p>
               <p className="truncate text-xs text-muted-foreground">{u.email}</p>
             </div>
-            <span className="font-mono text-sm text-muted-foreground">
-              ${u.balance.toLocaleString("es")}
-            </span>
             <Badge
               variant="outline"
               className={cn(

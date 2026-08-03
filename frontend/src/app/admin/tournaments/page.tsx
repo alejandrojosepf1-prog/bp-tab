@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { Loader2, PlusCircle, RefreshCw, Power } from "lucide-react";
+import { Loader2, PlusCircle, RefreshCw, Power, Ticket } from "lucide-react";
 import { api, ApiError } from "@/lib/api/client";
 import { queryKeys } from "@/lib/api/query-keys";
 import { Button } from "@/components/ui/button";
@@ -36,6 +36,22 @@ function TournamentRow({ tournament }: { tournament: Tournament }) {
     mutationFn: () =>
       api.tournaments.update(tournament.id, { is_active: !tournament.is_active }),
     onSuccess: invalidate,
+    onError: (err) => toast.error(err instanceof ApiError ? err.detail : "Error al actualizar"),
+  });
+
+  const toggleAccessPassMutation = useMutation({
+    mutationFn: () =>
+      api.tournaments.update(tournament.id, {
+        requires_access_pass: !tournament.requires_access_pass,
+      }),
+    onSuccess: () => {
+      toast.success(
+        tournament.requires_access_pass
+          ? "Ya no requiere pase de acceso"
+          : "Ahora requiere pase de acceso — gestionalo en Pases"
+      );
+      invalidate();
+    },
     onError: (err) => toast.error(err instanceof ApiError ? err.detail : "Error al actualizar"),
   });
 
@@ -88,6 +104,16 @@ function TournamentRow({ tournament }: { tournament: Tournament }) {
           >
             <Power className="size-3.5" />
             {tournament.is_active ? "Activo" : "Inactivo"}
+          </Button>
+          <Button
+            size="sm"
+            variant={tournament.requires_access_pass ? "secondary" : "outline"}
+            disabled={toggleAccessPassMutation.isPending}
+            onClick={() => toggleAccessPassMutation.mutate()}
+            title="Solo quien tenga un pase aprobado puede apostar en este torneo"
+          >
+            <Ticket className="size-3.5" />
+            {tournament.requires_access_pass ? "Requiere pase" : "Libre"}
           </Button>
         </div>
       </div>

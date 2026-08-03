@@ -13,15 +13,13 @@ class UserOut(BaseModel):
     display_name: str
     role: UserRole
     is_active: bool
-    # Fictional USD bankroll -- see app.models.betting.User.balance.
-    balance: float
     created_at: datetime.datetime
 
 
 class MeUpdate(BaseModel):
     """Self-service profile edit. Deliberately display_name ONLY -- email is the login identity
-    and role/balance/is_active are admin-controlled (PATCH /admin/users/{id}); letting a user
-    PATCH their own balance here would be a token printer."""
+    and role/is_active are admin-controlled (PATCH /admin/users/{id}); balance isn't editable
+    anywhere (it's derived from TournamentBalance -- see GET /tournaments/{id}/me/balance)."""
 
     display_name: str = Field(min_length=2, max_length=100)
 

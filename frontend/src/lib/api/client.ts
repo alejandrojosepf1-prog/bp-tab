@@ -1,10 +1,17 @@
 import type {
+  AccessPass,
+  AccessPassStatus,
   Adjudicator,
   BetMarket,
   BetType,
   BreakAssessment,
   BreakCategory,
   BreakEntry,
+  CircuitInstitution,
+  CircuitInstitutionDetail,
+  CircuitInstitutionResolvePayload,
+  CircuitReviewItem,
+  MotionEntry,
   Debate,
   DebateSummary,
   DashboardData,
@@ -32,7 +39,9 @@ import type {
   Team,
   TeamStanding,
   Tournament,
+  TournamentBalance,
   TournamentStatus,
+  UnassignedTeam,
   User,
 } from "./types";
 
@@ -132,22 +141,47 @@ export const api = {
   },
 
   transfers: {
-    create: (data: { recipient_id: number; amount: number; note?: string }) =>
-      post<{ sent: Transaction }>("/transfers", data),
+    create: (data: {
+      recipient_id: number;
+      amount: number;
+      tournament_id: number;
+      note?: string;
+    }) => post<{ sent: Transaction }>("/transfers", data),
     myTransfers: () => get<Transaction[]>("/transfers/me"),
   },
 
   tournaments: {
     list: () => get<Tournament[]>("/tournaments"),
     get: (id: number | string) => get<Tournament>(`/tournaments/${id}`),
+    getBySlug: (slug: string) => get<Tournament>(`/tournaments/slug/${slug}`),
+    myBalance: (id: number | string) =>
+      get<TournamentBalance>(`/tournaments/${id}/me/balance`),
     create: (data: { name: string; tab_url: string; timezone: string }) =>
       post<Tournament>("/tournaments", data),
     update: (
       id: number | string,
-      data: Partial<{ name: string; tab_url: string; is_active: boolean }>
+      data: Partial<{
+        name: string;
+        tab_url: string;
+        is_active: boolean;
+        requires_access_pass: boolean;
+      }>
     ) => patch<Tournament>(`/tournaments/${id}`, data),
     scrape: (id: number | string) =>
       post<{ status: "queued" }>(`/tournaments/${id}/scrape`),
+  },
+
+  accessPasses: {
+    submit: (tournamentId: number | string, data: { email: string; phone: string; full_name: string }) =>
+      post<AccessPass>(`/tournaments/${tournamentId}/access-passes`, data),
+    list: (tournamentId: number | string, statusFilter?: AccessPassStatus) =>
+      get<AccessPass[]>(
+        `/admin/access-passes${qs({ tournament_id: tournamentId, status_filter: statusFilter })}`
+      ),
+    approve: (id: number | string) => post<AccessPass>(`/admin/access-passes/${id}/approve`),
+    reject: (id: number | string) => post<AccessPass>(`/admin/access-passes/${id}/reject`),
+    activate: (data: { token: string; password: string }) =>
+      post<{ access_token: string; token_type: string }>("/auth/activate", data),
   },
 
   institutions: {
@@ -315,6 +349,24 @@ export const api = {
       patch<RoundMotionCategory>(`/admin/rounds/${roundId}/motion-category`, {
         motion_category: motionCategory,
       }),
+    circuitInstitutions: () => get<CircuitInstitution[]>("/admin/circuit/institutions"),
+    circuitReviewQueue: () => get<CircuitReviewItem[]>("/admin/circuit/review-queue"),
+    resolveCircuitInstitution: (
+      institutionId: number | string,
+      payload: CircuitInstitutionResolvePayload
+    ) => post<CircuitInstitution>(`/admin/circuit/institutions/${institutionId}/resolve`, payload),
+    unassignedTeams: () => get<UnassignedTeam[]>("/admin/circuit/unassigned-teams"),
+    assignTeamInstitution: (
+      teamId: number | string,
+      payload: CircuitInstitutionResolvePayload
+    ) => post<CircuitInstitution>(`/admin/circuit/teams/${teamId}/assign-institution`, payload),
+  },
+
+  archive: {
+    institutions: () => get<CircuitInstitution[]>("/circuit/institutions"),
+    institution: (slug: string) => get<CircuitInstitutionDetail>(`/circuit/institutions/${slug}`),
+    motions: (params?: { category?: MotionCategory; year?: number }) =>
+      get<MotionEntry[]>(`/motions${qs({ category: params?.category, year: params?.year })}`),
   },
 };
 

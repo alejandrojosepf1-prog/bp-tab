@@ -1,7 +1,7 @@
 import datetime
 
 from app.models import Tournament, User
-from app.models.betting import BetMarket, Prediction
+from app.models.betting import BetMarket, Prediction, TournamentBalance
 from app.models.enums import BetMarketStatus, BetType, PredictionStatus, TournamentStatus, UserRole
 from app.services.game_economy_service import compute_game_economy, compute_market_payout_spread
 
@@ -21,11 +21,17 @@ async def _make_tournament(db_session) -> Tournament:
     return tournament
 
 
-async def _make_user(db_session, email: str, *, balance: float = 100.0) -> User:
-    user = User(email=email, password_hash="x", display_name=email, role=UserRole.USER,
-                balance=balance)
+async def _make_user(
+    db_session, email: str, *, tournament: Tournament | None = None, balance: float | None = None
+) -> User:
+    user = User(email=email, password_hash="x", display_name=email, role=UserRole.USER)
     db_session.add(user)
     await db_session.flush()
+    if tournament is not None and balance is not None:
+        db_session.add(
+            TournamentBalance(tournament_id=tournament.id, user_id=user.id, balance=balance)
+        )
+        await db_session.flush()
     return user
 
 
@@ -62,8 +68,8 @@ def _prediction(market, user, *, entity_key, payload, stake, odds, status, point
 async def test_compute_game_economy_separates_open_and_settled(db_session) -> None:
     tournament = await _make_tournament(db_session)
     market = await _make_market(db_session, tournament, BetType.CHAMPION)
-    alice = await _make_user(db_session, "alice@example.com", balance=200.0)
-    bob = await _make_user(db_session, "bob@example.com", balance=70.0)
+    alice = await _make_user(db_session, "alice@example.com", tournament=tournament, balance=200.0)
+    bob = await _make_user(db_session, "bob@example.com", tournament=tournament, balance=70.0)
 
     db_session.add_all(
         [
@@ -89,7 +95,7 @@ async def test_compute_game_economy_separates_open_and_settled(db_session) -> No
     assert summary.settled_predictions_count == 2
     assert summary.open_predictions_count == 0
     assert summary.active_bettors_count == 2
-    assert summary.tokens_in_circulation == 270.0  # 200 + 70, NOT scoped by tournament_id
+    assert summary.tokens_in_circulation == 270.0  # 200 + 70, scoped to this tournament
 
 
 async def test_compute_market_payout_spread_mutually_exclusive_bounds(db_session) -> None:

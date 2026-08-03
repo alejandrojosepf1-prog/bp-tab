@@ -114,3 +114,37 @@
     radial-gradient(60rem 30rem at 85% -10%, oklch(0.88 0.22 128 / 5%), transparent 60%),
     radial-gradient(50rem 26rem at -10% 110%, oklch(0.62 0.18 285 / 6%), transparent 60%);
 }
+
+/*
+ * Zona archivo — CNADE 2026 Roadmap Pieza 5. Modo claro, estilo Editorial Grid/Magazine:
+ * tipografía y espacio en blanco, sin `.claim-glow` ni efectos de resplandor (esos son
+ * exclusivos de la zona de apuestas). Paleta Q&A Community: azul conocimiento + dorado de
+ * reputación. El primario NO es el #2563EB del diseño original -- ese hex es el mismo que el
+ * secundario de la paleta Arcade de apuestas, y como el objetivo es que las dos zonas se
+ * sientan distintas (no la misma pantalla en dos modos), se corrió a un azul más oscuro y
+ * desaturado (ajuste de implementación ya anotado en la Pieza 5, no una decisión nueva).
+ * Scopeado a un wrapper (`.archivo`), no a `:root`/`.dark` -- así conviven ambas zonas sin
+ * tocar la clase `dark` fija en <html>: cualquier elemento adentro del wrapper que use las
+ * utilidades `bg-background`/`text-foreground`/etc. hereda estos valores por cascada de CSS,
+ * sin JS ni un toggle de tema.
+ */
+.archivo {
+  --background: #f8fafc;
+  --foreground: #0f172a;
+  --card: #ffffff;
+  --card-foreground: #0f172a;
+  --popover: #ffffff;
+  --popover-foreground: #0f172a;
+  --primary: #1d4ed8;
+  --primary-foreground: #f8fafc;
+  --secondary: #d97706;
+  --secondary-foreground: #f8fafc;
+  --muted: #f1f5f9;
+  --muted-foreground: #64748b;
+  --accent: #d97706;
+  --accent-foreground: #f8fafc;
+  --destructive: #dc2626;
+  --border: #e2e8f0;
+  --input: #e2e8f0;
+  --ring: #1d4ed8;
+}

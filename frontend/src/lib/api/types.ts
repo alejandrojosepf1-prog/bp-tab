@@ -13,9 +13,37 @@ export interface User {
   display_name: string;
   role: Role;
   is_active: boolean;
-  // Play-token balance -- goes up and down as bets are placed/won/lost. Never real money;
-  // every account starts with a fixed grant (see backend app.models.betting.STARTING_BALANCE).
+  created_at: string;
+}
+
+// Play-token balance for ONE tournament (CNADE 2026 Roadmap Pieza 3) -- there's no single
+// global balance anymore. GET /tournaments/{id}/me/balance.
+export interface TournamentBalance {
   balance: number;
+}
+
+// ---------- Acceso por pases (CNADE 2026 Pieza 4) ----------
+
+export type AccessPassStatus = "pending" | "approved" | "rejected";
+
+// Informational only -- an admin-facing hint, never what actually decides the live betting-time
+// block (see app.services.access_pass_service.is_participant_of_tournament on the backend).
+export interface AccessPassMatchHint {
+  kind: "speaker" | "adjudicator";
+  id: number;
+  name: string;
+}
+
+export interface AccessPass {
+  id: number;
+  tournament_id: number;
+  email: string;
+  phone: string;
+  full_name: string;
+  status: AccessPassStatus;
+  match_hint: AccessPassMatchHint | null;
+  user_id: number | null;
+  reviewed_at: string | null;
   created_at: string;
 }
 
@@ -69,6 +97,9 @@ export interface Tournament {
   id: number;
   name: string;
   slug: string;
+  // Set explicitly for backfilled historical tournaments; a live tournament created today can
+  // leave it unset. Used to browse the public archive chronologically.
+  year: number | null;
   source_base_url: string;
   source_slug: string;
   status: TournamentStatus;
@@ -76,6 +107,8 @@ export interface Tournament {
   champion_team_id: number | null;
   timezone: string;
   is_active: boolean;
+  // CNADE 2026 Pieza 4 -- admin toggle; when true, betting requires an approved access pass.
+  requires_access_pass: boolean;
   created_at: string;
   // Resumen para las tarjetas del dashboard (calculado por el backend, no columnas).
   current_round: Round | null;
@@ -159,6 +192,9 @@ export interface Debate {
   status: string;
   motion_text: string | null;
   ballot_source_url: string | null;
+  // Admin-entered "watch this debate" YouTube link, never scraped -- null until an admin sets
+  // it (CNADE 2026 Roadmap Pieza 2 public archive).
+  video_url: string | null;
   teams: DebateTeamDetail[];
   adjudicators: DebateAdjudicator[];
 }
@@ -450,6 +486,59 @@ export interface GameEconomy {
   payout_spread: MarketPayoutSpread[];
   payout_spread_worst_case_total: number;
   payout_spread_best_case_total: number;
+}
+
+// ---------- Admin: Identidad de circuito ----------
+// Ver backend app.services.circuit_curation_service. Dos huecos distintos que curación humana
+// cierra: instituciones con un match difuso sin confirmar, y equipos que la heurística de
+// prefijo nunca pudo vincular a ninguna institución de su propio torneo.
+
+export interface CircuitInstitution {
+  id: number;
+  name: string;
+  slug: string;
+  region: string | null;
+}
+
+export interface CircuitReviewItem {
+  institution_id: number;
+  tournament_id: number;
+  institution_name: string;
+  institution_code: string;
+  matched_circuit_institution: CircuitInstitution;
+}
+
+export interface UnassignedTeam {
+  team_id: number;
+  tournament_id: number;
+  team_name: string;
+}
+
+export type CircuitInstitutionResolvePayload =
+  | { circuit_institution_id: number }
+  | { new_institution_name: string; new_institution_region?: string };
+
+// ---------- Archivo público del circuito (CNADE 2026 Roadmap Pieza 2) ----------
+
+export interface InstitutionTournamentAppearance {
+  tournament_name: string;
+  tournament_slug: string;
+  tournament_year: number | null;
+  team_names: string[];
+  was_champion: boolean;
+}
+
+export interface CircuitInstitutionDetail extends CircuitInstitution {
+  appearances: InstitutionTournamentAppearance[];
+}
+
+export interface MotionEntry {
+  tournament_name: string;
+  tournament_slug: string;
+  tournament_year: number | null;
+  round_name: string;
+  motion_text: string;
+  motion_category: MotionCategory | null;
 }
 
 // ---------- Leaderboard ----------

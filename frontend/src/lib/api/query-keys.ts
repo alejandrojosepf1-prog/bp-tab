@@ -5,6 +5,12 @@ type Id = number | string;
 export const queryKeys = {
   tournaments: ["tournaments"] as const,
   tournament: (id: Id) => ["tournaments", id] as const,
+  tournamentBySlug: (slug: string) => ["tournaments", "slug", slug] as const,
+
+  archiveInstitutions: ["archive", "institutions"] as const,
+  archiveInstitution: (slug: string) => ["archive", "institutions", slug] as const,
+  archiveMotions: (params?: Record<string, unknown>) =>
+    ["archive", "motions", params ?? {}] as const,
 
   institutions: (tournamentId: Id) => ["tournaments", tournamentId, "institutions"] as const,
   teams: (tournamentId: Id) => ["tournaments", tournamentId, "teams"] as const,
@@ -40,6 +46,7 @@ export const queryKeys = {
   dashboard: (tournamentId: Id) => ["tournaments", tournamentId, "dashboard"] as const,
 
   me: ["auth", "me"] as const,
+  myBalance: (tournamentId: Id) => ["tournaments", tournamentId, "me", "balance"] as const,
   users: ["auth", "users"] as const,
   myTransfers: ["transfers", "me"] as const,
   adminUsers: ["admin", "users"] as const,
@@ -48,4 +55,9 @@ export const queryKeys = {
     ["admin", "pending-elimination-results", tournamentId ?? "all"] as const,
   adminGameEconomy: (tournamentId?: Id) =>
     ["admin", "game-economy", tournamentId ?? "all"] as const,
+  adminCircuitInstitutions: ["admin", "circuit", "institutions"] as const,
+  adminCircuitReviewQueue: ["admin", "circuit", "review-queue"] as const,
+  adminUnassignedTeams: ["admin", "circuit", "unassigned-teams"] as const,
+  adminAccessPasses: (tournamentId: Id, statusFilter?: string) =>
+    ["admin", "access-passes", tournamentId, statusFilter ?? "all"] as const,
 };

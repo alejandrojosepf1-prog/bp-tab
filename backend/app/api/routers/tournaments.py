@@ -3,9 +3,10 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import require_admin
+from app.api.deps import get_current_user, require_admin
 from app.api.schemas.rounds import RoundOut
 from app.api.schemas.tournaments import (
+    BalanceOut,
     ScrapeQueuedResponse,
     TournamentCreate,
     TournamentOut,
@@ -15,6 +16,7 @@ from app.db.session import get_db
 from app.domain.tab_url import parse_tab_url
 from app.models import BetMarket, Team, Tournament, User
 from app.models.enums import BetMarketStatus
+from app.services.bankroll_service import get_or_create_tournament_balance
 from app.services.tournament_service import create_tournament, get_current_round
 from app.tasks.scrape_tasks import scrape_tournament_async
 
@@ -77,6 +79,37 @@ async def get_tournament(
     return await _to_tournament_out(session, tournament)
 
 
+@router.get("/slug/{slug}", response_model=TournamentOut)
+async def get_tournament_by_slug(
+    slug: str, session: AsyncSession = Depends(get_db)
+) -> TournamentOut:
+    """Public archive lookup (CNADE 2026 Roadmap Pieza 2) -- the /torneos/:slug page links here
+    instead of by numeric id, which the frontend URL never exposes."""
+    tournament = (
+        await session.execute(select(Tournament).where(Tournament.slug == slug))
+    ).scalar_one_or_none()
+    if tournament is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tournament not found")
+    return await _to_tournament_out(session, tournament)
+
+
+@router.get("/{tournament_id}/me/balance", response_model=BalanceOut)
+async def my_tournament_balance(
+    tournament_id: int,
+    session: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> BalanceOut:
+    """The logged-in user's play-token balance for this tournament, lazily creating it (with
+    any ROI carryover applied) on first read -- see app.services.bankroll_service. Replaces the
+    old flat `GET /auth/me` balance field now that balance is per-tournament."""
+    await _get_tournament_or_404(session, tournament_id)
+    tournament_balance = await get_or_create_tournament_balance(
+        session, current_user, tournament_id
+    )
+    await session.commit()
+    return BalanceOut(balance=tournament_balance.balance)
+
+
 @router.post("", response_model=TournamentOut, status_code=status.HTTP_201_CREATED)
 async def create_tournament_endpoint(
     payload: TournamentCreate,
@@ -92,6 +125,7 @@ async def create_tournament_endpoint(
             source_base_url=source_base_url,
             source_slug=source_slug,
             timezone=payload.timezone,
+            year=payload.year,
         )
         await session.commit()
     except IntegrityError as exc:

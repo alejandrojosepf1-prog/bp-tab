@@ -220,6 +220,12 @@ async def test_champion_is_set_once_the_final_debate_is_judged(db_session) -> No
         )
     await db_session.commit()
 
+    assert tournament.is_active is True
+
     await refresh_tournament_status(db_session, tournament)
     assert tournament.status == TournamentStatus.COMPLETED
     assert tournament.champion_team_id == teams[0].id
+    # A completed tournament has nothing left to autoscrape -- see refresh_tournament_status's
+    # comment. Without this, adding a historical/backfill tab would keep polling it forever
+    # instead of "paste the URL, get one scrape, done".
+    assert tournament.is_active is False

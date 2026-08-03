@@ -5,6 +5,10 @@ from app.models.enums import TournamentStatus
 def test_all_domain_tables_are_registered() -> None:
     expected = {
         "tournaments",
+        "circuit_institutions",
+        "circuit_institution_aliases",
+        "circuit_people",
+        "circuit_person_aliases",
         "break_categories",
         "speaker_categories",
         "institutions",
@@ -27,12 +31,14 @@ def test_all_domain_tables_are_registered() -> None:
         "bet_markets",
         "predictions",
         "leaderboard_entries",
+        "tournament_balances",
         "scrape_logs",
         "change_events",
         "prize_events",
         "prize_entries",
         "odds_snapshots",
         "transactions",
+        "access_passes",
     }
     assert expected == set(Base.metadata.tables.keys())
 

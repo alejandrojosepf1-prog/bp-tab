@@ -3,6 +3,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
+from app.api.schemas.access_passes import ActivateAccessPassIn, ActivateAccessPassOut
 from app.api.schemas.auth import (
     LoginRequest,
     MeUpdate,
@@ -16,6 +17,7 @@ from app.core.security import create_access_token, hash_password, verify_passwor
 from app.db.session import get_db
 from app.models import BetMarket, Prediction, Speaker, Team, Tournament, User
 from app.models.enums import UserRole
+from app.services.access_pass_service import AccessPassError, activate_access_pass
 from app.services.odds_service import format_payload_label
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -60,6 +62,23 @@ async def login(payload: LoginRequest, session: AsyncSession = Depends(get_db)) 
         )
     access_token = create_access_token(str(user.id))
     return TokenResponse(access_token=access_token)
+
+
+@router.post("/activate", response_model=ActivateAccessPassOut)
+async def activate(
+    payload: ActivateAccessPassIn, session: AsyncSession = Depends(get_db)
+) -> ActivateAccessPassOut:
+    """Redeems an access-pass approval email's link (CNADE 2026 Roadmap Pieza 4): sets the
+    account's password and logs it straight in. Public -- the token itself, not a session, is
+    the credential here."""
+    try:
+        user = await activate_access_pass(session, payload.token, password=payload.password)
+    except AccessPassError as exc:
+        await session.rollback()
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    await session.commit()
+    access_token = create_access_token(str(user.id))
+    return ActivateAccessPassOut(access_token=access_token)
 
 
 @router.get("/me", response_model=UserOut)

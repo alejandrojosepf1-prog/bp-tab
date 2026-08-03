@@ -73,5 +73,6 @@ class DebateDetailOut(BaseModel):
     status: DebateStatus
     motion_text: str | None
     ballot_source_url: str | None
+    video_url: str | None
     teams: list[DebateTeamDetailOut]
     adjudicators: list[DebateAdjudicatorOut]

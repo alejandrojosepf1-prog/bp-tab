@@ -9,7 +9,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.api.routers import (
+    access_passes,
     admin,
+    archive,
     auth,
     betting,
     breaks,
@@ -92,6 +94,8 @@ app.include_router(dashboard.router, prefix=API_PREFIX)
 app.include_router(prizes.router, prefix=API_PREFIX)
 app.include_router(admin.router, prefix=API_PREFIX)
 app.include_router(transfers.router, prefix=API_PREFIX)
+app.include_router(access_passes.router, prefix=API_PREFIX)
+app.include_router(archive.router, prefix=API_PREFIX)
 
 
 @app.get("/health", tags=["health"])

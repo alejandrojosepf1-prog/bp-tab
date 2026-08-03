@@ -19,10 +19,13 @@ import {
   Gem,
   Landmark,
   Gift,
+  GitMerge,
+  UserCheck,
 } from "lucide-react";
 import { useAuth } from "@/lib/auth/auth-context";
 import { cn } from "@/lib/utils";
 import { formatTokens } from "@/lib/format";
+import { isFullBleedRoute } from "@/lib/route-zones";
 
 const MAIN_ITEMS = [
   { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
@@ -41,6 +44,8 @@ const ADMIN_ITEMS = [
   { href: "/admin/users", label: "Usuarios", icon: Users },
   { href: "/admin/scraping", label: "Scraping", icon: Radar },
   { href: "/admin/finance", label: "Economía", icon: Landmark },
+  { href: "/admin/circuit", label: "Instituciones", icon: GitMerge },
+  { href: "/admin/access-passes", label: "Pases", icon: UserCheck },
 ];
 
 function Wordmark() {
@@ -112,8 +117,8 @@ function NavLink({
 function SidebarBody({ onNavigate }: { onNavigate?: () => void }) {
   const pathname = usePathname();
   const router = useRouter();
-  const { user, isAuthenticated, isAdmin, logout } = useAuth();
-  const balanceFlash = useBalanceFlash(user?.balance);
+  const { user, balance, isAuthenticated, isAdmin, logout } = useAuth();
+  const balanceFlash = useBalanceFlash(balance ?? undefined);
 
   const isActive = (href: string) =>
     pathname === href || pathname.startsWith(`${href}/`);
@@ -193,7 +198,7 @@ function SidebarBody({ onNavigate }: { onNavigate?: () => void }) {
                   !balanceFlash && "text-primary"
                 )}
               >
-                {formatTokens(user?.balance ?? 0)}
+                {formatTokens(balance ?? 0)}
               </span>
             </div>
           </div>
@@ -215,7 +220,8 @@ export function Sidebar() {
   const pathname = usePathname();
   const [mobileOpen, setMobileOpen] = useState(false);
 
-  if (pathname === "/login") return null;
+  // Public, no-login pages and the archive zone render full-bleed, same as /login.
+  if (isFullBleedRoute(pathname)) return null;
 
   return (
     <>

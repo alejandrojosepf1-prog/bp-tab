@@ -16,6 +16,13 @@ class Transaction(Base, TimestampMixin):
     __tablename__ = "transactions"
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    # Nullable: rows written before CNADE 2026 Roadmap Pieza 3's P2P cap predate tournament-scoped
+    # balances entirely, so there's no tournament to attribute them to. Every transfer from here
+    # on sets it -- transfer_service sums this per (tournament_id, user_id) to enforce
+    # MAX_P2P_RECEIVED_PER_TOURNAMENT.
+    tournament_id: Mapped[int | None] = mapped_column(
+        ForeignKey("tournaments.id", ondelete="CASCADE"), nullable=True, index=True
+    )
     user_id: Mapped[int] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
     )

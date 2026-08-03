@@ -134,6 +134,7 @@ async def get_debate(
         status=debate.status,
         motion_text=debate.result.motion_text if debate.result else None,
         ballot_source_url=debate.result.ballot_source_url if debate.result else None,
+        video_url=debate.result.video_url if debate.result else None,
         teams=[
             DebateTeamDetailOut(
                 team=_team_schema(dt.team),

@@ -78,6 +78,52 @@ class MarketPayoutSpreadOut(BaseModel):
     best_case: float
 
 
+class CircuitInstitutionOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    slug: str
+    region: str | None
+
+
+class CircuitReviewItemOut(BaseModel):
+    """One tournament-scoped Institution row whose current circuit-identity link came from an
+    unconfirmed fuzzy match (see app.services.circuit_curation_service)."""
+
+    institution_id: int
+    tournament_id: int
+    institution_name: str
+    institution_code: str
+    matched_circuit_institution: CircuitInstitutionOut
+
+
+class CircuitInstitutionResolveIn(BaseModel):
+    """Exactly one of the two ways to resolve a review item: point at an existing circuit
+    identity, or name a brand-new one (region optional either way)."""
+
+    circuit_institution_id: int | None = None
+    new_institution_name: str | None = None
+    new_institution_region: str | None = None
+
+    @model_validator(mode="after")
+    def _exactly_one_target(self) -> "CircuitInstitutionResolveIn":
+        if (self.circuit_institution_id is None) == (self.new_institution_name is None):
+            raise ValueError(
+                "provide exactly one of circuit_institution_id or new_institution_name"
+            )
+        return self
+
+
+class UnassignedTeamOut(BaseModel):
+    """A team the automatic prefix heuristic (_match_institution_by_name_prefix) couldn't link
+    to any institution in its own tournament -- surfaced so an admin can assign one by hand."""
+
+    team_id: int
+    tournament_id: int
+    team_name: str
+
+
 class GameEconomyOut(BaseModel):
     total_staked_open: float
     total_staked_settled: float

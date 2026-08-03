@@ -103,10 +103,11 @@ async def test_full_champion_market_lifecycle_settles_and_updates_leaderboard(
     assert market["status"] == "open"
     market_id = market["id"]
 
-    # Alice predicts correctly, Bob predicts incorrectly.
+    # Alice predicts correctly, Bob predicts incorrectly. Stakes at MAX_STAKE (50.0, Pieza 3's
+    # per-bet cap).
     alice_prediction = await client.post(
         f"/api/v1/bet-markets/{market_id}/predictions",
-        json={"payload": {"team_id": team.id}, "stake_amount": 100.0},
+        json={"payload": {"team_id": team.id}, "stake_amount": 50.0},
         headers=auth_headers(alice),
     )
     assert alice_prediction.status_code == 201
@@ -132,7 +133,7 @@ async def test_full_champion_market_lifecycle_settles_and_updates_leaderboard(
     # Re-submitting updates the same row rather than creating a second one (unique constraint).
     alice_resubmit = await client.post(
         f"/api/v1/bet-markets/{market_id}/predictions",
-        json={"payload": {"team_id": team.id}, "stake_amount": 100.0},
+        json={"payload": {"team_id": team.id}, "stake_amount": 50.0},
         headers=auth_headers(alice),
     )
     assert alice_resubmit.status_code == 201
@@ -150,19 +151,25 @@ async def test_full_champion_market_lifecycle_settles_and_updates_leaderboard(
     assert settle_response.json() == {"settled": True}
 
     # A 2-team field with no debates played yet prices both teams at a fair 50/50 prior
-    # (power=0 for both) -- see app.domain.odds's pari-mutuel-with-seed model. Alice's odds get
-    # LOCKED at her final (resubmit) call, which happens after Bob has already staked 50 on the
-    # loser: her own prior 100-stake is excluded from the pool she's priced against (see
-    # odds_service._open_stakes's exclude_user_id), so that pool is just Bob's 50 on the OTHER
-    # team, none of it on Alice's pick. pari_mutuel_probability(0, 50, 0.5, seed=200) = 100/250 =
-    # 0.4 -> decimal odds 1/0.4 = 2.5, the fair price with no margin taken. She staked 100 on the
-    # winner, so she's paid stake * odds = 250; Bob staked 50 on the loser and gets nothing back.
+    # (power=0 for both) -- see app.domain.odds's pari-mutuel-with-seed model. Alice's `odds`
+    # field is the LOCKED-IN quote from her final (resubmit) call, computed EXCLUDING her own
+    # stake (odds_service._open_stakes's exclude_user_id) -- at that moment the pool she was
+    # priced against was just Bob's 50 on the OTHER team: pari_mutuel_probability(0, 50, 0.5,
+    # seed=200) = 100/250 = 0.4 -> decimal odds 2.5.
+    #
+    # Pieza 3: that quote is now only ever a placement-time PROJECTION, never what settlement
+    # actually pays -- settlement_payout_ratio recomputes the SAME formula against the pool's
+    # TRUE final composition (everyone's stakes, hers included): candidate=50 (her own stake,
+    # MAX_STAKE), pool=100 (50+50). pari_mutuel_probability(50, 100, 0.5, seed=200) = 150/300 =
+    # 0.5 -> decimal odds 2.0 exactly (a perfectly symmetric pool matches the flat fair price).
+    # She staked 50 on the winner, so she's paid stake * 2.0 = 100; Bob staked 50 on the loser
+    # and gets nothing back.
     alice_after = await client.get(
         f"/api/v1/bet-markets/{market_id}/predictions/me", headers=auth_headers(alice)
     )
     assert alice_after.json()[0]["status"] == "settled"
-    assert alice_after.json()[0]["odds"] == 2.5
-    assert alice_after.json()[0]["points_awarded"] == 250.0
+    assert alice_after.json()[0]["odds"] == 2.5  # placement-time projection, unchanged
+    assert alice_after.json()[0]["points_awarded"] == 100.0  # actual pari-mutuel payout
 
     bob_after = await client.get(
         f"/api/v1/bet-markets/{market_id}/predictions/me", headers=auth_headers(bob)
@@ -175,7 +182,7 @@ async def test_full_champion_market_lifecycle_settles_and_updates_leaderboard(
     assert len(leaderboard) == 2
     top = leaderboard[0]
     assert top["user"]["display_name"] == "Alice"
-    assert top["total_points"] == 150.0  # net profit: 250 payout - 100 stake
+    assert top["total_points"] == 50.0  # net profit: 100 payout - 50 stake
     assert top["rank"] == 1
 
 
@@ -322,13 +329,30 @@ async def test_odds_move_with_the_pool_as_stakes_come_in(
     (more real money already agreeing with the pick) while the other side's quote lengthens."""
     tournament, team, other_team = await _make_tournament_with_team(db_session)
     admin = await make_user(db_session, email="admin7@example.com", role=UserRole.ADMIN)
-    # Explicit balances: this test is about large stakes overwhelming the 200-token seed, so the
-    # stakes here (150 each) deliberately exceed the standard STARTING_BALANCE grant.
+    # Three separate backers at MAX_STAKE (50.0, Pieza 3's per-bet cap) rather than two heavy
+    # single stakes -- combined 150 still overwhelms the 200-token seed the same way the
+    # original two-account 150-each setup did; the point (real money piling onto one side moves
+    # the price) doesn't depend on how many accounts that money came from.
     alice = await make_user(
-        db_session, email="alice2@example.com", display_name="Alice2", balance=1000.0
+        db_session,
+        email="alice2@example.com",
+        display_name="Alice2",
+        tournament=tournament,
+        balance=1000.0,
     )
     bob = await make_user(
-        db_session, email="bob2@example.com", display_name="Bob2", balance=1000.0
+        db_session,
+        email="bob2@example.com",
+        display_name="Bob2",
+        tournament=tournament,
+        balance=1000.0,
+    )
+    dave = await make_user(
+        db_session,
+        email="dave2@example.com",
+        display_name="Dave2",
+        tournament=tournament,
+        balance=1000.0,
     )
     carol = await make_user(db_session, email="carol2@example.com", display_name="Carol2")
 
@@ -352,18 +376,16 @@ async def test_odds_move_with_the_pool_as_stakes_come_in(
     )
     assert initial_quote.json()["odds"] == 2.0
 
-    # Alice and Bob both back `team` heavily -- their combined stake (300) starts to dominate
-    # the 200-seed, so the crowd's conviction should shorten `team`'s price below the prior...
-    await client.post(
-        f"/api/v1/bet-markets/{market_id}/predictions",
-        json={"payload": {"team_id": team.id}, "stake_amount": 150.0},
-        headers=auth_headers(alice),
-    )
-    await client.post(
-        f"/api/v1/bet-markets/{market_id}/predictions",
-        json={"payload": {"team_id": team.id}, "stake_amount": 150.0},
-        headers=auth_headers(bob),
-    )
+    # Alice, Bob, and Dave all back `team` at the max per-bet stake -- their combined stake (150)
+    # starts to dominate the 200-seed, so the crowd's conviction should shorten `team`'s price
+    # below the prior...
+    for backer in (alice, bob, dave):
+        response = await client.post(
+            f"/api/v1/bet-markets/{market_id}/predictions",
+            json={"payload": {"team_id": team.id}, "stake_amount": 50.0},
+            headers=auth_headers(backer),
+        )
+        assert response.status_code == 201
 
     team_quote = await client.post(
         f"/api/v1/bet-markets/{market_id}/quote",
@@ -991,6 +1013,117 @@ async def test_market_board_round_winner_multi_debate_characterization(
     assert options_by_label["Board Team 2 gana su debate"]["odds"] == 1.87
 
 
+async def _seed_positional_history_favoring_og(db_session: AsyncSession) -> None:
+    """Populates PRELIMINARY-round debate history (in an unrelated tournament -- see
+    positional_stats_service, which counts across every tournament in the database) where
+    Opening Government always wins and Opening Opposition never does. Used to prove
+    round_winner pricing actually picks this up end-to-end, not just at the domain-function
+    level (see test_apply_positional_adjustment_favors_the_historically_stronger_position in
+    tests/domain/test_odds.py for that lower-level check)."""
+    tournament = Tournament(
+        name="Positional History Source",
+        slug="positional-history-source",
+        source_base_url="https://positional-history.calicotab.com",
+        source_slug="open",
+        status=TournamentStatus.COMPLETED,
+    )
+    db_session.add(tournament)
+    await db_session.flush()
+    round_ = Round(
+        tournament_id=tournament.id, seq=1, name="Round 1", stage=RoundStage.PRELIMINARY,
+        status=RoundStatus.COMPLETED,
+    )
+    db_session.add(round_)
+    await db_session.flush()
+    for i in range(5):
+        og_team = Team(tournament_id=tournament.id, external_id=1000 + i * 2, name=f"OG Winner {i}")
+        oo_team = Team(tournament_id=tournament.id, external_id=1001 + i * 2, name=f"OO Loser {i}")
+        db_session.add_all([og_team, oo_team])
+        await db_session.flush()
+        debate = Debate(tournament_id=tournament.id, round_id=round_.id, external_id=2000 + i)
+        db_session.add(debate)
+        await db_session.flush()
+        db_session.add_all(
+            [
+                DebateTeam(
+                    debate_id=debate.id,
+                    team_id=og_team.id,
+                    position=BPPosition.OPENING_GOVERNMENT,
+                    rank_in_debate=1,
+                ),
+                DebateTeam(
+                    debate_id=debate.id,
+                    team_id=oo_team.id,
+                    position=BPPosition.OPENING_OPPOSITION,
+                    rank_in_debate=4,
+                ),
+            ]
+        )
+    await db_session.commit()
+
+
+async def test_round_winner_quote_reflects_positional_history(
+    client: AsyncClient, db_session: AsyncSession
+) -> None:
+    """End-to-end proof that CNADE Roadmap Pieza 2b's positional prior actually reaches live
+    pricing: two teams with IDENTICAL power (both zero debates played) in a fresh debate should
+    price as a coin toss with no history, but once Opening Government has a real, seeded
+    historical edge over Opening Opposition, quote_odds must reflect it."""
+    await _seed_positional_history_favoring_og(db_session)
+
+    tournament, _t1, _t2 = await _make_tournament_with_team(db_session)
+    round_ = Round(
+        tournament_id=tournament.id, seq=1, name="Round 1", stage=RoundStage.PRELIMINARY,
+        status=RoundStatus.RELEASED,
+    )
+    db_session.add(round_)
+    await db_session.flush()
+    og_team = Team(tournament_id=tournament.id, external_id=500, name="Fresh OG")
+    oo_team = Team(tournament_id=tournament.id, external_id=501, name="Fresh OO")
+    db_session.add_all([og_team, oo_team])
+    await db_session.flush()
+    debate = Debate(tournament_id=tournament.id, round_id=round_.id, external_id=999)
+    db_session.add(debate)
+    await db_session.flush()
+    db_session.add_all(
+        [
+            DebateTeam(debate_id=debate.id, team_id=og_team.id, position=BPPosition.OPENING_GOVERNMENT),
+            DebateTeam(debate_id=debate.id, team_id=oo_team.id, position=BPPosition.OPENING_OPPOSITION),
+        ]
+    )
+    await db_session.commit()
+
+    admin = await make_user(db_session, email="admin-pos@example.com", role=UserRole.ADMIN)
+    create_response = await client.post(
+        f"/api/v1/tournaments/{tournament.id}/bet-markets",
+        json={
+            "bet_type": "round_winner",
+            "label": "Ganador",
+            "opens_at": PAST.isoformat(),
+            "closes_at": FUTURE.isoformat(),
+            "target_round_id": round_.id,
+        },
+        headers=auth_headers(admin),
+    )
+    market_id = create_response.json()["id"]
+
+    og_quote = await client.post(
+        f"/api/v1/bet-markets/{market_id}/quote",
+        json={"payload": {"debate_id": debate.id, "team_id": og_team.id}},
+        headers=auth_headers(admin),
+    )
+    oo_quote = await client.post(
+        f"/api/v1/bet-markets/{market_id}/quote",
+        json={"payload": {"debate_id": debate.id, "team_id": oo_team.id}},
+        headers=auth_headers(admin),
+    )
+
+    assert og_quote.status_code == 200
+    assert oo_quote.status_code == 200
+    # Lower decimal odds = higher implied probability -- OG should be the priced favorite.
+    assert og_quote.json()["odds"] < oo_quote.json()["odds"]
+
+
 async def test_round_head_to_head_quote_place_and_settle_with_sub_bet(
     client: AsyncClient, db_session: AsyncSession
 ) -> None:
@@ -1072,9 +1205,11 @@ async def test_round_head_to_head_quote_place_and_settle_with_sub_bet(
     settled_prediction = after.json()[0]
     assert settled_prediction["status"] == "settled"
     assert settled_prediction["sub_bet_status"] == "settled"
-    expected_payout = 10.0 * settled_prediction["odds"] * settled_prediction["sub_bet_odds"]
-    assert settled_prediction["points_awarded"] == pytest.approx(expected_payout)
-    assert settled_prediction["sub_bet_points_awarded"] == pytest.approx(expected_payout)
+    # Pieza 3: `odds` is only the placement-time projection now, not what settlement actually
+    # pays -- `stake * odds * sub_bet_odds` no longer predicts the real payout, since the base
+    # portion is the pari-mutuel ratio computed from the pool's final composition instead.
+    assert settled_prediction["points_awarded"] == pytest.approx(37.8)
+    assert settled_prediction["sub_bet_points_awarded"] == pytest.approx(37.8)
 
 
 async def test_round_winner_speaker_points_sub_bet_pays_base_immediately_and_stays_open(
@@ -1159,7 +1294,9 @@ async def test_round_winner_speaker_points_sub_bet_pays_base_immediately_and_sta
     )
     settled_prediction = after.json()[0]
     assert settled_prediction["status"] == "settled"
-    assert settled_prediction["points_awarded"] == pytest.approx(10.0 * settled_prediction["odds"])
+    # Pieza 3: `odds` is only the placement-time projection, not what settlement pays -- the
+    # base is now the pari-mutuel ratio computed from the pool's final composition.
+    assert settled_prediction["points_awarded"] == pytest.approx(16.0)
     # The base pick already paid in full -- the sub-bet is still awaiting real speaker points.
     assert settled_prediction["sub_bet_status"] == "open"
     assert settled_prediction["sub_bet_points_awarded"] is None
@@ -1267,9 +1404,11 @@ async def test_round_winner_speaker_order_sub_bet_settles_same_time_as_base(
     # SAME settle call: sub_bet_status is already "settled", not left "open".
     assert settled_prediction["status"] == "settled"
     assert settled_prediction["sub_bet_status"] == "settled"
-    expected_payout = 10.0 * settled_prediction["odds"] * settled_prediction["sub_bet_odds"]
-    assert settled_prediction["points_awarded"] == pytest.approx(expected_payout)
-    assert settled_prediction["sub_bet_points_awarded"] == pytest.approx(expected_payout)
+    # Pieza 3: `odds` is only the placement-time projection -- `stake * odds * sub_bet_odds` no
+    # longer predicts the real payout, since the base portion is the pari-mutuel ratio computed
+    # from the pool's final composition instead.
+    assert settled_prediction["points_awarded"] == pytest.approx(32.0)
+    assert settled_prediction["sub_bet_points_awarded"] == pytest.approx(32.0)
 
 
 async def test_motion_type_fixed_odds_min_stake_and_premature_settlement_guard(

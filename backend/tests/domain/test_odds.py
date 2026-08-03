@@ -8,6 +8,7 @@ from app.domain.odds import (
     MAX_ODDS,
     MIN_ODDS,
     adaptive_temperature,
+    apply_positional_adjustment,
     decimal_odds_from_probability,
     exact_rank_gap_probability,
     ordered_sequence_odds,
@@ -21,6 +22,7 @@ from app.domain.odds import (
     softmax_probabilities,
     top_n_probabilities,
 )
+from app.models.enums import BPPosition
 
 
 def test_softmax_probabilities_sum_to_one() -> None:
@@ -161,10 +163,11 @@ def test_pari_mutuel_probability_rejects_invalid_inputs() -> None:
 
 def test_pari_mutuel_odds_prices_a_wide_field_fairly_and_clamps_only_the_absurd() -> None:
     # With no house liability left to bound (see odds.py's "Fair book" note), a genuine longshot
-    # now pays its real price rather than being cut off early: a 40-way uniform field prices at
-    # the fair 40x, comfortably inside the band.
-    assert pari_mutuel_odds(0.0, 0.0, 1 / 40) == 40.0
-    # Only a truly absurd field (a 500-way toss-up would pay 500x) still hits the readability cap.
+    # still pays its real price as long as it's under the readability cap (MAX_ODDS=20, lowered
+    # from 50 by CNADE 2026 Roadmap Pieza 3 -- see that constant's own comment for why): a 15-way
+    # uniform field prices at the fair 15x, comfortably inside the band.
+    assert pari_mutuel_odds(0.0, 0.0, 1 / 15) == 15.0
+    # A wide-open field (a 500-way toss-up would fair-price at 500x) hits the readability cap.
     assert pari_mutuel_odds(0.0, 0.0, 1 / 500) == MAX_ODDS
 
 
@@ -432,3 +435,47 @@ def test_pair_top_two_probability_rejects_same_candidate() -> None:
 def test_pair_top_two_probability_unknown_candidate_raises() -> None:
     with pytest.raises(KeyError):
         pair_top_two_probability({"a": 1.0, "b": 1.0}, "a", "ghost")
+
+
+def test_apply_positional_adjustment_is_a_no_op_with_no_historical_data() -> None:
+    """The key safety property from CNADE Roadmap Pieza 2b: with nothing observed yet (every
+    position defaulting to the same 0.25 rate), the resulting probabilities must be identical to
+    not applying the adjustment at all -- adding a constant to every score is invariant under
+    softmax."""
+    power = {"og": 12.0, "oo": 8.0, "cg": 5.0, "co": 2.0}
+    position_by_candidate = {
+        "og": BPPosition.OPENING_GOVERNMENT,
+        "oo": BPPosition.OPENING_OPPOSITION,
+        "cg": BPPosition.CLOSING_GOVERNMENT,
+        "co": BPPosition.CLOSING_OPPOSITION,
+    }
+    flat_rates = {position: 0.25 for position in BPPosition}
+
+    adjusted = apply_positional_adjustment(power, position_by_candidate, flat_rates)
+
+    assert softmax_probabilities(adjusted) == pytest.approx(softmax_probabilities(power))
+
+
+def test_apply_positional_adjustment_favors_the_historically_stronger_position() -> None:
+    """Two candidates with EQUAL power but different historical position win rates should no
+    longer be priced as a coin toss -- the whole point of the feature."""
+    power = {"a": 10.0, "b": 10.0}
+    position_by_candidate = {
+        "a": BPPosition.OPENING_GOVERNMENT,
+        "b": BPPosition.CLOSING_OPPOSITION,
+    }
+    win_rates = {
+        BPPosition.OPENING_GOVERNMENT: 0.40,
+        BPPosition.OPENING_OPPOSITION: 0.25,
+        BPPosition.CLOSING_GOVERNMENT: 0.25,
+        BPPosition.CLOSING_OPPOSITION: 0.10,
+    }
+
+    adjusted = apply_positional_adjustment(power, position_by_candidate, win_rates)
+    probs = softmax_probabilities(adjusted)
+
+    assert probs["a"] > probs["b"]
+
+
+def test_apply_positional_adjustment_empty_input() -> None:
+    assert apply_positional_adjustment({}, {}, {}) == {}

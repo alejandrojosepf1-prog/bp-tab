@@ -24,6 +24,10 @@ class Tournament(Base, TimestampMixin):
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     slug: Mapped[str] = mapped_column(String(200), nullable=False, unique=True)
+    # Nullable, admin-set (backfilled tournaments set it explicitly at creation) -- NOT derived
+    # from created_at, which is scrape/insert time and would show every backfilled historical
+    # tournament as "this year." Used to browse the public archive by year.
+    year: Mapped[int | None] = mapped_column(nullable=True)
 
     source_base_url: Mapped[str] = mapped_column(String(500), nullable=False)
     source_slug: Mapped[str] = mapped_column(String(200), nullable=False)
@@ -43,6 +47,11 @@ class Tournament(Base, TimestampMixin):
 
     timezone: Mapped[str] = mapped_column(String(64), default="UTC", nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    # CNADE 2026 Roadmap Pieza 4 -- admin-toggled per tournament, default off so existing/trial
+    # tournaments are unaffected. When True, `place_prediction` requires an APPROVED
+    # app.models.access.AccessPass for the tournament, and blocks a matched participant even
+    # with one -- see access_pass_service.
+    requires_access_pass: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
     champion_team = relationship("Team", foreign_keys=[champion_team_id], post_update=True)
 

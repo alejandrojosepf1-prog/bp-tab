@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import BetMarket, Prediction, PrizeEntry, PrizeEvent, User
 from app.models.enums import PrizeEventStatus, PrizeEventType
+from app.services.bankroll_service import get_or_create_tournament_balance
 
 
 class PrizeEventError(Exception):
@@ -98,11 +99,15 @@ async def enter_raffle(
     if ticket_cost > 0:
         extra_cost = (tickets - already_owned) * ticket_cost
         if extra_cost > 0:
-            if user.balance < extra_cost:
+            tournament_balance = await get_or_create_tournament_balance(
+                session, user, event.tournament_id
+            )
+            if tournament_balance.balance < extra_cost:
                 raise InsufficientBalanceError(
-                    f"insufficient balance: have {user.balance:.2f}, need {extra_cost:.2f}"
+                    f"insufficient balance: have {tournament_balance.balance:.2f}, "
+                    f"need {extra_cost:.2f}"
                 )
-            user.balance -= extra_cost
+            tournament_balance.balance -= extra_cost
 
     if existing is not None:
         existing.tickets = tickets
@@ -147,7 +152,10 @@ async def _resolve_manual_award(session: AsyncSession, event: PrizeEvent) -> Non
         if entry.awarded_amount and entry.awarded_amount > 0:
             user = await session.get(User, entry.user_id)
             if user is not None:
-                user.balance += entry.awarded_amount
+                tournament_balance = await get_or_create_tournament_balance(
+                    session, user, event.tournament_id
+                )
+                tournament_balance.balance += entry.awarded_amount
 
 
 async def _resolve_raffle(session: AsyncSession, event: PrizeEvent) -> None:
@@ -176,7 +184,10 @@ async def _resolve_raffle(session: AsyncSession, event: PrizeEvent) -> None:
         if won and prize_per_winner > 0:
             user = await session.get(User, entry.user_id)
             if user is not None:
-                user.balance += prize_per_winner
+                tournament_balance = await get_or_create_tournament_balance(
+                    session, user, event.tournament_id
+                )
+                tournament_balance.balance += prize_per_winner
 
 
 async def _resolve_activity_bonus(session: AsyncSession, event: PrizeEvent) -> None:
@@ -206,4 +217,7 @@ async def _resolve_activity_bonus(session: AsyncSession, event: PrizeEvent) -> N
         )
         user = await session.get(User, user_id)
         if user is not None:
-            user.balance += bonus_amount
+            tournament_balance = await get_or_create_tournament_balance(
+                session, user, event.tournament_id
+            )
+            tournament_balance.balance += bonus_amount

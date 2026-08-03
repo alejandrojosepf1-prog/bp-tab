@@ -1,7 +1,7 @@
 import datetime
 
 from app.models import Tournament, User
-from app.models.betting import BetMarket, Prediction
+from app.models.betting import BetMarket, Prediction, TournamentBalance
 from app.models.enums import BetType, PredictionStatus, TournamentStatus, UserRole
 from app.services.leaderboard_service import compute_leaderboard
 
@@ -31,13 +31,22 @@ async def _make_market(db_session, tournament: Tournament) -> BetMarket:
     return market
 
 
-async def _make_user(db_session, email: str, display_name: str, balance: float = 100.0) -> User:
-    user = User(
-        email=email, password_hash="x", display_name=display_name, role=UserRole.USER,
-        balance=balance,
-    )
+async def _make_user(
+    db_session,
+    email: str,
+    display_name: str,
+    *,
+    tournament: Tournament | None = None,
+    balance: float | None = None,
+) -> User:
+    user = User(email=email, password_hash="x", display_name=display_name, role=UserRole.USER)
     db_session.add(user)
     await db_session.flush()
+    if tournament is not None and balance is not None:
+        db_session.add(
+            TournamentBalance(tournament_id=tournament.id, user_id=user.id, balance=balance)
+        )
+        await db_session.flush()
     return user
 
 
@@ -55,8 +64,8 @@ async def test_compute_leaderboard_sums_across_tournaments_when_unscoped(db_sess
     t2 = await _make_tournament(db_session, "Cup Two")
     m1 = await _make_market(db_session, t1)
     m2 = await _make_market(db_session, t2)
-    alice = await _make_user(db_session, "alice@x.com", "Alice", balance=150.0)
-    bob = await _make_user(db_session, "bob@x.com", "Bob", balance=80.0)
+    alice = await _make_user(db_session, "alice@x.com", "Alice", tournament=t1, balance=150.0)
+    bob = await _make_user(db_session, "bob@x.com", "Bob", tournament=t1, balance=80.0)
     await db_session.commit()
 
     db_session.add_all(

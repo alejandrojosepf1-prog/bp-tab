@@ -40,7 +40,7 @@ from app.models import (
     Tournament,
     User,
 )
-from app.models.betting import BetMarket
+from app.models.betting import STARTING_BALANCE, BetMarket
 from app.models.enums import (
     BetMarketStatus,
     BetType,
@@ -49,6 +49,7 @@ from app.models.enums import (
     RoundStage,
     SpeakerRole,
     TournamentStatus,
+    UserRole,
 )
 
 # Standard BP roles for the FIRST speaker of a bench (PM/LO/MG/MO); the other role in each pair
@@ -56,7 +57,14 @@ from app.models.enums import (
 # opens the bench" -- straight from data already recorded for every judged debate, no new column.
 _FIRST_SPEAKER_ROLES = {SpeakerRole.PM, SpeakerRole.LO, SpeakerRole.MG, SpeakerRole.MO}
 from app.repositories.upsert import upsert_by_natural_key
-from app.services.odds_service import MAX_SPEAKER_POSITION, quote_odds, quote_sub_bet_odds
+from app.services.access_pass_service import has_approved_access, is_participant_of_tournament
+from app.services.bankroll_service import get_or_create_tournament_balance
+from app.services.odds_service import (
+    MAX_SPEAKER_POSITION,
+    quote_odds,
+    quote_sub_bet_odds,
+    settlement_payout_ratio,
+)
 from app.services.ranking_service import (
     get_latest_completed_round_seq,
     get_standings,
@@ -90,6 +98,15 @@ CREATABLE_BET_TYPES = (
 # guaranteed loss on its own; this keeps the market meaningful against microbet spam and gives
 # headroom if the multiplier ever needs to move without silently reopening that arbitrage).
 MOTION_TYPE_MIN_STAKE = 20.0
+
+# General stake guards (CNADE 2026 Roadmap Pieza 3) -- MOTION_TYPE keeps its own higher,
+# type-specific floor above. MIN_STAKE keeps a bet meaningful against microbet/dust spam;
+# MAX_STAKE is fixed to STARTING_BALANCE rather than a fraction of the bettor's CURRENT balance,
+# so it stays a stable, predictable ceiling all season instead of drifting with whoever happens
+# to be ahead -- "one all-in pick shouldn't single-handedly define the season" only holds if the
+# cap doesn't grow right along with the balance it's meant to protect.
+MIN_STAKE = 1.0
+MAX_STAKE = STARTING_BALANCE / 2
 
 _ROUND_SCOPED_BET_TYPES = {
     BetType.ROUND_WINNER,
@@ -141,6 +158,12 @@ class TooManyPicksError(Exception):
 class MarketCreationError(Exception):
     """Raised when a market can't be created against this tournament's/payload's current
     state -- the router maps this to a 400."""
+
+
+class AccessDeniedError(Exception):
+    """Raised when `bet_market.tournament.requires_access_pass` and the user either has no
+    APPROVED access_pass_service pass for it, or does but currently matches a scraped
+    participant (CNADE 2026 Roadmap Pieza 4) -- the router maps this to a 403."""
 
 
 def validate_market_creation(
@@ -246,8 +269,11 @@ async def place_prediction(
     payload: dict,
     stake_amount: float,
 ) -> Prediction:
-    """Prices `payload` via `odds_service.quote_odds`, charges `stake_amount` against
-    `user.balance`, and upserts the Prediction row with odds locked in at this moment.
+    """Prices `payload` via `odds_service.quote_odds`, charges `stake_amount` against the
+    user's `TournamentBalance` for `bet_market.tournament_id` (CNADE 2026 Roadmap Pieza 3 --
+    lazily created via `bankroll_service.get_or_create_tournament_balance` if this is the
+    user's first touch of this tournament's economy), and upserts the Prediction row with odds
+    locked in at this moment.
 
     A user can hold one OPEN prediction per (market, entity_key) -- see `_entity_key` -- so
     betting on a different debate/slot/team within the same market creates a SEPARATE
@@ -256,13 +282,37 @@ async def place_prediction(
     their pick before it closes), that prior stake is refunded first so editing a bet never
     double-charges them. Raises InsufficientBalanceError if the balance (after any refund)
     can't cover the new stake -- callers should not commit the session in that case.
+
+    CNADE 2026 Roadmap Pieza 4: when `bet_market`'s tournament requires an access pass, a
+    non-admin user needs an APPROVED one for it, and is blocked even with one if they currently
+    match a scraped participant of that tournament (checked live, never cached -- see
+    access_pass_service.is_participant_of_tournament). Admins bypass both checks: they don't
+    request a pass to their own admin-controlled platform.
     """
+    tournament = await session.get(Tournament, bet_market.tournament_id)
+    assert tournament is not None  # bet_market.tournament_id is a NOT NULL FK, always resolves
+    if tournament.requires_access_pass and user.role != UserRole.ADMIN:
+        if not await has_approved_access(session, tournament.id, user):
+            raise AccessDeniedError(
+                "necesitás un pase aprobado para apostar en este torneo"
+            )
+        if await is_participant_of_tournament(session, tournament.id, user):
+            raise AccessDeniedError(
+                "no podés apostar en mercados de un torneo mientras competís en él"
+            )
+
     if stake_amount <= 0:
         raise ValueError("stake_amount must be positive")
+    if stake_amount < MIN_STAKE:
+        raise ValueError(f"la apuesta mínima es {MIN_STAKE:.0f} tokens")
+    if stake_amount > MAX_STAKE:
+        raise ValueError(f"la apuesta máxima es {MAX_STAKE:.0f} tokens")
     if bet_market.bet_type == BetType.MOTION_TYPE and stake_amount < MOTION_TYPE_MIN_STAKE:
         raise ValueError(
             f"la apuesta mínima para tipo de moción es {MOTION_TYPE_MIN_STAKE:.0f} tokens"
         )
+
+    tournament_balance = await get_or_create_tournament_balance(session, user, bet_market.tournament_id)
 
     odds = await quote_odds(session, bet_market, payload, exclude_user_id=user.id)
     # None whenever payload has no "sub_bet" key or this bet_type has no modifier support --
@@ -280,7 +330,7 @@ async def place_prediction(
         )
     ).scalar_one_or_none()
     if existing is not None and existing.status == PredictionStatus.OPEN:
-        user.balance += existing.stake_amount
+        tournament_balance.balance += existing.stake_amount
 
     # A genuinely NEW single-team ROUND_WINNER pick (not an edit of one already held, hence
     # `existing is None`) is capped at 2 per debate -- see _entity_key: each team gets its own
@@ -308,11 +358,11 @@ async def place_prediction(
                 "equipos por separado."
             )
 
-    if user.balance < stake_amount:
+    if tournament_balance.balance < stake_amount:
         raise InsufficientBalanceError(
-            f"insufficient balance: have {user.balance:.2f}, need {stake_amount:.2f}"
+            f"insufficient balance: have {tournament_balance.balance:.2f}, need {stake_amount:.2f}"
         )
-    user.balance -= stake_amount
+    tournament_balance.balance -= stake_amount
 
     now = datetime.datetime.now(datetime.timezone.utc)
     result = await upsert_by_natural_key(
@@ -599,7 +649,9 @@ async def _get_final_speaker_ranking(session: AsyncSession, tournament_id: int) 
     return [speaker_id for speaker_id, _total in rows]
 
 
-def _settle_prediction_payout(bet_type: BetType, prediction: Prediction, outcome: dict) -> float:
+async def _settle_prediction_payout(
+    session: AsyncSession, bet_market: BetMarket, prediction: Prediction, outcome: dict
+) -> float:
     """Base-pick payout, PLUS -- for the same-timing sub-bet types (`_SAME_TIMING_SUB_BET_TYPES`)
     -- the all-or-nothing combined payout if a modifier was attempted alongside it. Missing the
     base makes the modifier moot (no payout either way); missing the modifier after winning the
@@ -610,17 +662,29 @@ def _settle_prediction_payout(bet_type: BetType, prediction: Prediction, outcome
     ROUND_WINNER's speaker-points sub-bet is the one deferred exception (`_DEFERRED_SUB_BET_TYPES`):
     the base pick pays on its own the moment the round result is known, and the sub-bet is only
     flipped to `sub_bet_status=OPEN` here (never at placement) -- its actual resolution happens
-    much later, via `settle_pending_sub_bets`."""
-    won = did_prediction_win(bet_type, prediction.payload, outcome)
+    much later, via `settle_pending_sub_bets`.
+
+    The BASE payout ratio (CNADE 2026 Roadmap Pieza 3) is `odds_service.settlement_payout_ratio`
+    when available -- the true pari-mutuel split of the market's FINAL pool, not the frozen
+    `prediction.odds` locked in at bet time. It falls back to `prediction.odds` for MOTION_TYPE
+    and every retired bet type, which are deliberately not pari-mutuel at settlement -- see that
+    function's docstring. Sub-bets are deliberately NOT pari-mutuel themselves (kept as a fixed
+    multiplier on top of the base, per product decision -- they're low-volume enough that their
+    own pool would be mostly noise): `sub_bet_odds` stays exactly as quoted at placement time.
+    """
+    won = did_prediction_win(bet_market.bet_type, prediction.payload, outcome)
+    base_ratio = await settlement_payout_ratio(session, bet_market, prediction.payload)
+    if base_ratio is None:
+        base_ratio = prediction.odds
     sub_bet_payload = prediction.payload.get("sub_bet")
     has_sub_bet = bool(sub_bet_payload) and prediction.sub_bet_odds is not None
 
-    same_timing_key = _SAME_TIMING_SUB_BET_KEYS_BY_TYPE.get(bet_type)
+    same_timing_key = _SAME_TIMING_SUB_BET_KEYS_BY_TYPE.get(bet_market.bet_type)
     is_same_timing_override = (
         has_sub_bet and same_timing_key is not None and same_timing_key in sub_bet_payload
     )
 
-    if has_sub_bet and bet_type in _DEFERRED_SUB_BET_TYPES and not is_same_timing_override:
+    if has_sub_bet and bet_market.bet_type in _DEFERRED_SUB_BET_TYPES and not is_same_timing_override:
         # The base pays on its own right now, independent of the sub-bet -- see
         # settle_pending_sub_bets for how the modifier resolves later. A losing base pick makes
         # the modifier moot forever (there's no "this team's speakers scored X" to check if this
@@ -631,23 +695,21 @@ def _settle_prediction_payout(bet_type: BetType, prediction: Prediction, outcome
         else:
             prediction.sub_bet_status = PredictionStatus.SETTLED
             prediction.sub_bet_points_awarded = 0.0
-        return prediction.stake_amount * prediction.odds if won else 0.0
+        return prediction.stake_amount * base_ratio if won else 0.0
 
     if not has_sub_bet or not (
-        bet_type in _SAME_TIMING_SUB_BET_TYPES or is_same_timing_override
+        bet_market.bet_type in _SAME_TIMING_SUB_BET_TYPES or is_same_timing_override
     ):
-        return prediction.stake_amount * prediction.odds if won else 0.0
+        return prediction.stake_amount * base_ratio if won else 0.0
 
     if not won:
         prediction.sub_bet_status = PredictionStatus.SETTLED
         prediction.sub_bet_points_awarded = 0.0
         return 0.0
 
-    sub_bet_won = did_sub_bet_win(bet_type, prediction.payload, outcome)
+    sub_bet_won = did_sub_bet_win(bet_market.bet_type, prediction.payload, outcome)
     payout = (
-        prediction.stake_amount * prediction.odds * prediction.sub_bet_odds
-        if sub_bet_won
-        else 0.0
+        prediction.stake_amount * base_ratio * prediction.sub_bet_odds if sub_bet_won else 0.0
     )
     prediction.sub_bet_status = PredictionStatus.SETTLED
     prediction.sub_bet_points_awarded = payout
@@ -678,7 +740,7 @@ async def settle_market(
         # Never re-score an already-settled prediction. A per-prediction market stays un-SETTLED
         # (returns False below) while ANY of its debates is still unresolved, so this same market
         # is revisited on every subsequent scrape cycle -- without this guard the predictions
-        # that DID already resolve would have their payout credited to User.balance again on
+        # that DID already resolve would have their payout credited to the user's balance again on
         # every single cycle, minting balance out of nothing until the last debate resolved.
         if prediction.status == PredictionStatus.SETTLED:
             continue
@@ -693,14 +755,17 @@ async def settle_market(
         assert (
             outcome is not None
         )  # guaranteed by the shared_outcome check above when not per_prediction
-        payout = _settle_prediction_payout(bet_market.bet_type, prediction, outcome)
+        payout = await _settle_prediction_payout(session, bet_market, prediction, outcome)
         prediction.points_awarded = payout
         prediction.status = PredictionStatus.SETTLED
         any_settled = True
         if payout > 0:
             user = await session.get(User, prediction.user_id)
             if user is not None:
-                user.balance += payout
+                tournament_balance = await get_or_create_tournament_balance(
+                    session, user, bet_market.tournament_id
+                )
+                tournament_balance.balance += payout
 
     # An OPEN market nobody has bet on yet must never be auto-settled: with no predictions the
     # `all(...)` check below is vacuously true, so a freshly-created round market would be marked
@@ -776,8 +841,14 @@ async def settle_pending_sub_bets(session: AsyncSession, tournament_id: int) -> 
             continue  # still withheld -- retried on a later cycle
 
         sub_bet_won = did_speaker_points_sub_bet_win(sub_bet, score_by_speaker)
+        # The base already paid via settlement_payout_ratio's pari-mutuel split (Pieza 3), not
+        # the frozen prediction.odds -- points_awarded already holds that realized amount (see
+        # _settle_prediction_payout's deferred branch, which only reaches sub_bet_status=OPEN on
+        # a winning base), so the same effective ratio is derived from it rather than
+        # recomputed, to guarantee this bonus is consistent with what the base actually paid.
+        base_ratio = (prediction.points_awarded or 0.0) / prediction.stake_amount
         bonus = (
-            prediction.stake_amount * prediction.odds * (prediction.sub_bet_odds - 1)
+            prediction.stake_amount * base_ratio * (prediction.sub_bet_odds - 1)
             if sub_bet_won
             else 0.0
         )
@@ -791,7 +862,10 @@ async def settle_pending_sub_bets(session: AsyncSession, tournament_id: int) -> 
             prediction.points_awarded = (prediction.points_awarded or 0.0) + bonus
             user = await session.get(User, prediction.user_id)
             if user is not None:
-                user.balance += bonus
+                tournament_balance = await get_or_create_tournament_balance(
+                    session, user, tournament_id
+                )
+                tournament_balance.balance += bonus
 
     if resolved:
         await recompute_leaderboard(session, tournament_id)
@@ -851,10 +925,10 @@ async def recompute_leaderboard(session: AsyncSession, tournament_id: int) -> No
     summarizes.
 
     `total_points` here is this tournament's NET profit/loss (payout minus stake across every
-    settled prediction on one of its markets), not the user's overall bankroll: `User.balance`
-    is a single global wallet shared across every tournament a friend group tracks, so a
-    per-tournament leaderboard has to look at that tournament's predictions specifically to say
-    anything meaningful about "who called CMUDE 2025 the best." Unlike balance this CAN go
+    settled prediction on one of its markets), not the user's `TournamentBalance` for it: a
+    balance also reflects tokens still tied up in OPEN predictions and any ROI carryover from a
+    previous tournament (see app.services.bankroll_service), so it isn't a pure measure of
+    skill on THIS tournament's markets the way this sum is. Unlike balance this CAN go
     negative -- it's a scoreboard of prediction skill, not a running cash total.
     """
     stmt = (

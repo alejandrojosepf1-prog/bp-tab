@@ -4,6 +4,7 @@ import pytest
 from sqlalchemy import select
 
 from app.models import BetMarket, Prediction, PrizeEntry, PrizeEvent, Tournament, User
+from app.models.betting import STARTING_BALANCE, TournamentBalance
 from app.models.enums import (
     BetType,
     PredictionStatus,
@@ -39,14 +40,32 @@ async def _make_tournament(db_session) -> Tournament:
     return tournament
 
 
-async def _make_user(db_session, email: str, *, balance: float = 100.0) -> User:
-    user = User(
-        email=email, password_hash="x", display_name=email, role=UserRole.USER,
-        balance=balance,
-    )
+async def _make_user(
+    db_session, email: str, *, tournament: Tournament | None = None, balance: float | None = None
+) -> User:
+    user = User(email=email, password_hash="x", display_name=email, role=UserRole.USER)
     db_session.add(user)
     await db_session.flush()
+    if tournament is not None and balance is not None:
+        db_session.add(
+            TournamentBalance(tournament_id=tournament.id, user_id=user.id, balance=balance)
+        )
+        await db_session.flush()
     return user
+
+
+async def _balance(db_session, tournament_id: int, user_id: int) -> float:
+    """STARTING_BALANCE if the row hasn't been lazily created yet -- see
+    bankroll_service.get_or_create_tournament_balance."""
+    tb = (
+        await db_session.execute(
+            select(TournamentBalance).where(
+                TournamentBalance.tournament_id == tournament_id,
+                TournamentBalance.user_id == user_id,
+            )
+        )
+    ).scalar_one_or_none()
+    return tb.balance if tb is not None else STARTING_BALANCE
 
 
 async def _make_event(
@@ -67,18 +86,16 @@ async def _make_event(
 async def test_manual_award_credits_balance_only_after_resolve(db_session) -> None:
     tournament = await _make_tournament(db_session)
     event = await _make_event(db_session, tournament, PrizeEventType.MANUAL_AWARD)
-    alice = await _make_user(db_session, "alice@example.com", balance=50.0)
+    alice = await _make_user(db_session, "alice@example.com", tournament=tournament, balance=50.0)
     await db_session.commit()
 
     await queue_manual_award(db_session, event, alice.id, 25.0)
     await db_session.commit()
-    await db_session.refresh(alice)
-    assert alice.balance == 50.0  # not credited yet -- only queued
+    assert await _balance(db_session, tournament.id, alice.id) == 50.0  # not credited yet -- only queued
 
     await resolve_prize_event(db_session, event)
     await db_session.commit()
-    await db_session.refresh(alice)
-    assert alice.balance == 75.0
+    assert await _balance(db_session, tournament.id, alice.id) == 75.0
     assert event.status == PrizeEventStatus.RESOLVED
 
 
@@ -94,8 +111,8 @@ async def test_manual_award_requeue_replaces_not_stacks(db_session) -> None:
 
     await resolve_prize_event(db_session, event)
     await db_session.commit()
-    await db_session.refresh(alice)
-    assert alice.balance == pytest.approx(130.0)  # 100 start + 30, NOT +10+30
+    balance = await _balance(db_session, tournament.id, alice.id)
+    assert balance == pytest.approx(130.0)  # 100 start + 30, NOT +10+30
 
 
 async def test_manual_award_rejects_wrong_type(db_session) -> None:
@@ -126,13 +143,13 @@ async def test_raffle_entry_charges_ticket_cost(db_session) -> None:
         db_session, tournament, PrizeEventType.RAFFLE,
         config={"num_winners": 1, "prize_per_winner": 50.0, "ticket_cost": 5.0},
     )
-    alice = await _make_user(db_session, "alice@example.com", balance=100.0)
+    alice = await _make_user(db_session, "alice@example.com", tournament=tournament, balance=100.0)
     await db_session.commit()
 
     await enter_raffle(db_session, event, alice, 3)
     await db_session.commit()
-    await db_session.refresh(alice)
-    assert alice.balance == pytest.approx(85.0)  # 100 - 3*5
+    balance = await _balance(db_session, tournament.id, alice.id)
+    assert balance == pytest.approx(85.0)  # 100 - 3*5
 
 
 async def test_raffle_re_entry_only_charges_the_difference(db_session) -> None:
@@ -141,18 +158,18 @@ async def test_raffle_re_entry_only_charges_the_difference(db_session) -> None:
         db_session, tournament, PrizeEventType.RAFFLE,
         config={"num_winners": 1, "prize_per_winner": 50.0, "ticket_cost": 5.0},
     )
-    alice = await _make_user(db_session, "alice@example.com", balance=100.0)
+    alice = await _make_user(db_session, "alice@example.com", tournament=tournament, balance=100.0)
     await db_session.commit()
 
     entry = await enter_raffle(db_session, event, alice, 3)
     await db_session.commit()
     entry2 = await enter_raffle(db_session, event, alice, 5)  # tops up 3 -> 5, charges 2 more
     await db_session.commit()
-    await db_session.refresh(alice)
 
     assert entry.id == entry2.id  # same row, not a second entry
     assert entry2.tickets == 5
-    assert alice.balance == pytest.approx(75.0)  # 100 - 3*5 - 2*5, NOT 100 - 3*5 - 5*5
+    balance = await _balance(db_session, tournament.id, alice.id)
+    assert balance == pytest.approx(75.0)  # 100 - 3*5 - 2*5, NOT 100 - 3*5 - 5*5
 
 
 async def test_raffle_entry_rejects_insufficient_balance(db_session) -> None:
@@ -161,7 +178,7 @@ async def test_raffle_entry_rejects_insufficient_balance(db_session) -> None:
         db_session, tournament, PrizeEventType.RAFFLE,
         config={"num_winners": 1, "prize_per_winner": 50.0, "ticket_cost": 100.0},
     )
-    alice = await _make_user(db_session, "alice@example.com", balance=50.0)
+    alice = await _make_user(db_session, "alice@example.com", tournament=tournament, balance=50.0)
     await db_session.commit()
     with pytest.raises(InsufficientBalanceError):
         await enter_raffle(db_session, event, alice, 1)
@@ -173,12 +190,11 @@ async def test_raffle_free_entry_when_no_ticket_cost(db_session) -> None:
         db_session, tournament, PrizeEventType.RAFFLE,
         config={"num_winners": 1, "prize_per_winner": 50.0},  # no ticket_cost -> free
     )
-    alice = await _make_user(db_session, "alice@example.com", balance=10.0)
+    alice = await _make_user(db_session, "alice@example.com", tournament=tournament, balance=10.0)
     await db_session.commit()
     await enter_raffle(db_session, event, alice, 5)
     await db_session.commit()
-    await db_session.refresh(alice)
-    assert alice.balance == 10.0  # untouched
+    assert await _balance(db_session, tournament.id, alice.id) == 10.0  # untouched
 
 
 async def test_raffle_entry_rejects_over_the_max_tickets_per_user_cap(db_session) -> None:
@@ -213,7 +229,10 @@ async def test_raffle_resolve_picks_exactly_num_winners_and_pays_them(db_session
         db_session, tournament, PrizeEventType.RAFFLE,
         config={"num_winners": 2, "prize_per_winner": 100.0},
     )
-    users = [await _make_user(db_session, f"u{i}@example.com", balance=0.0) for i in range(5)]
+    users = [
+        await _make_user(db_session, f"u{i}@example.com", tournament=tournament, balance=0.0)
+        for i in range(5)
+    ]
     await db_session.commit()
     for u in users:
         await enter_raffle(db_session, event, u, 1)
@@ -238,9 +257,8 @@ async def test_raffle_resolve_picks_exactly_num_winners_and_pays_them(db_session
     assert all(e.awarded_amount == 100.0 for e in winners)
     assert event.rng_seed is not None
 
-    for u in users:
-        await db_session.refresh(u)
-    total_paid = sum(u.balance for u in users)
+    balances = [await _balance(db_session, tournament.id, u.id) for u in users]
+    total_paid = sum(balances)
     assert total_paid == pytest.approx(200.0)  # exactly 2 winners * 100, no more no less
 
 
@@ -264,8 +282,7 @@ async def test_raffle_more_tickets_gives_more_wins_over_many_seeds(db_session) -
         await db_session.commit()
         await resolve_prize_event(db_session, event)
         await db_session.commit()
-        await db_session.refresh(heavy)
-        if heavy.balance > 100.0:
+        if await _balance(db_session, tournament.id, heavy.id) > 100.0:
             heavy_wins += 1
     # With a true 9:1 weighting, heavy should win ~90% of the time -- assert comfortably above
     # the 50% a broken (unweighted) implementation would produce.
@@ -300,9 +317,13 @@ async def test_activity_bonus_credits_only_users_who_bet_in_window(db_session) -
     db_session.add_all([market, other_market])
     await db_session.flush()
 
-    active = await _make_user(db_session, "active@example.com", balance=0.0)
-    inactive = await _make_user(db_session, "inactive@example.com", balance=0.0)
-    wrong_tournament = await _make_user(db_session, "wrong@example.com", balance=0.0)
+    active = await _make_user(db_session, "active@example.com", tournament=tournament, balance=0.0)
+    inactive = await _make_user(
+        db_session, "inactive@example.com", tournament=tournament, balance=0.0
+    )
+    wrong_tournament = await _make_user(
+        db_session, "wrong@example.com", tournament=tournament, balance=0.0
+    )
     await db_session.commit()
 
     event = await _make_event(
@@ -322,12 +343,10 @@ async def test_activity_bonus_credits_only_users_who_bet_in_window(db_session) -
     await resolve_prize_event(db_session, event)
     await db_session.commit()
 
-    await db_session.refresh(active)
-    await db_session.refresh(inactive)
-    await db_session.refresh(wrong_tournament)
-    assert active.balance == 15.0
-    assert inactive.balance == 0.0
-    assert wrong_tournament.balance == 0.0  # bet on a DIFFERENT tournament, doesn't qualify
+    assert await _balance(db_session, tournament.id, active.id) == 15.0
+    assert await _balance(db_session, tournament.id, inactive.id) == 0.0
+    # bet on a DIFFERENT tournament, doesn't qualify
+    assert await _balance(db_session, tournament.id, wrong_tournament.id) == 0.0
 
 
 async def test_activity_bonus_ignores_predictions_outside_the_window(db_session) -> None:
@@ -338,7 +357,7 @@ async def test_activity_bonus_ignores_predictions_outside_the_window(db_session)
     )
     db_session.add(market)
     await db_session.flush()
-    user = await _make_user(db_session, "late@example.com", balance=0.0)
+    user = await _make_user(db_session, "late@example.com", tournament=tournament, balance=0.0)
     await db_session.commit()
 
     event = await _make_event(
@@ -354,5 +373,4 @@ async def test_activity_bonus_ignores_predictions_outside_the_window(db_session)
 
     await resolve_prize_event(db_session, event)
     await db_session.commit()
-    await db_session.refresh(user)
-    assert user.balance == 0.0
+    assert await _balance(db_session, tournament.id, user.id) == 0.0

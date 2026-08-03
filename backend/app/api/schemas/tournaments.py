@@ -12,6 +12,9 @@ class TournamentOut(BaseModel):
     id: int
     name: str
     slug: str
+    # Nullable -- set explicitly at creation for backfilled historical tournaments; a live
+    # tournament created today can leave it unset (see app.models.tournament.Tournament.year).
+    year: int | None
     source_base_url: str
     source_slug: str
     status: TournamentStatus
@@ -19,6 +22,8 @@ class TournamentOut(BaseModel):
     champion_team_id: int | None
     timezone: str
     is_active: bool
+    # CNADE 2026 Roadmap Pieza 4 -- admin-toggled, default False. See app.models.access.AccessPass.
+    requires_access_pass: bool
     created_at: datetime.datetime
     # Card-level summary for the dashboard (filled by the list/get endpoints, not columns):
     # lets the tournament cards show "ronda actual", team count and open-market count without
@@ -36,13 +41,23 @@ class TournamentCreate(BaseModel):
     # asking the admin to split the URL into two fields by hand.
     tab_url: str
     timezone: str = "UTC"
+    year: int | None = None
 
 
 class TournamentUpdate(BaseModel):
     name: str | None = None
     tab_url: str | None = None
     is_active: bool | None = None
+    requires_access_pass: bool | None = None
+    year: int | None = None
 
 
 class ScrapeQueuedResponse(BaseModel):
     status: str = "queued"
+
+
+class BalanceOut(BaseModel):
+    # The logged-in user's TournamentBalance for this tournament (CNADE 2026 Roadmap Pieza 3) --
+    # lazily created on first read via app.services.bankroll_service, applying the ROI carryover
+    # from their previous COMPLETED tournament if one exists.
+    balance: float

@@ -23,12 +23,21 @@ def verify_password(plain_password: str, password_hash: str) -> bool:
     return _pwd_context.verify(plain_password, password_hash)
 
 
-def create_access_token(subject: str, *, expires_delta: datetime.timedelta | None = None) -> str:
+def create_access_token(
+    subject: str,
+    *,
+    expires_delta: datetime.timedelta | None = None,
+    extra_claims: dict[str, Any] | None = None,
+) -> str:
+    """`extra_claims` lets a caller stamp a token for a purpose other than "logged-in session"
+    -- e.g. access_pass_service's activation link sets `{"purpose": "activate_access_pass"}` so
+    `/auth/activate` can reject a token that's real and unexpired but was never meant for this,
+    same idea as get_current_user rejecting a malformed/expired one."""
     settings = get_settings()
     expire = datetime.datetime.now(datetime.timezone.utc) + (
         expires_delta or datetime.timedelta(minutes=settings.access_token_expire_minutes)
     )
-    to_encode: dict[str, Any] = {"sub": subject, "exp": expire}
+    to_encode: dict[str, Any] = {"sub": subject, "exp": expire, **(extra_claims or {})}
     return jwt.encode(to_encode, settings.jwt_secret, algorithm=settings.jwt_algorithm)
 
 

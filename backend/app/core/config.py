@@ -45,6 +45,16 @@ class Settings(BaseSettings):
     # --- CORS ---
     cors_allowed_origins: list[str] = ["http://localhost:3000"]
 
+    # --- Access passes (CNADE 2026 Roadmap Pieza 4) ---
+    # Where the activation link in the approval email points -- the SPA route that completes
+    # account setup, not the API.
+    frontend_base_url: str = "http://localhost:3000"
+    # None until Paranoid creates a Resend account and sets this -- see
+    # app.services.email_service, which logs the email instead of sending when unset, same
+    # "collected but not verified" pragmatism this platform already uses for phone numbers.
+    resend_api_key: str | None = None
+    resend_from_email: str = "Claim <onboarding@resend.dev>"
+
 
 @lru_cache
 def get_settings() -> Settings:
