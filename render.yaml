@@ -1,4 +1,11 @@
-# Render Blueprint for the free-tier deployment of Claim.
+# Render Blueprint for the free-tier deployment of Claim's BACKEND only.
+#
+# The frontend moved to Vercel (2026-08-03) -- Vercel is a much better fit for Next.js (no
+# 15-minute spin-down, first-class framework support, still free) and the backend never
+# belonged there anyway (Vercel's serverless functions can't host the long-lived autoscrape
+# loop below). Deleting `bp-tab-frontend` from this Blueprint does NOT tear down the live
+# Render service by itself -- suspend or delete it by hand in the Render dashboard once
+# Vercel is confirmed working.
 #
 # This intentionally does NOT include Postgres or Redis/Celery services: Postgres is provided
 # by a free Neon project instead (paste its connection string as DATABASE_URL when Render asks
@@ -45,27 +52,19 @@ services:
         value: production
       - key: DEBUG
         value: "false"
-      # NOTE: Render appended a random suffix to the service name (bp-tab-frontend-5xwd instead
-      # of bp-tab-frontend) since the plain name was already taken -- update this value to match
-      # whatever your actual frontend service URL turns out to be if it's not this one.
+      # Frontend now lives on Vercel (see the file-level note above), not the bp-tab-frontend
+      # Render service this used to point at. Update the live env var on the Render dashboard
+      # too -- this file alone doesn't push config to an already-running service.
       - key: CORS_ALLOWED_ORIGINS
-        value: '["https://bp-tab-frontend-5xwd.onrender.com"]'
+        value: '["https://claim-six-theta.vercel.app", "https://claim-nwlfpr7lr-claim3.vercel.app"]'
+      # Was never actually set here before -- silently defaulted to Settings' localhost:3000
+      # fallback in production too, meaning any access-pass activation email
+      # (app.services.email_service.send_activation_email) would have linked to a broken
+      # localhost URL for whoever received one. Same class of fix as CORS above.
+      - key: FRONTEND_BASE_URL
+        value: https://claim-six-theta.vercel.app
       # No REDIS_URL/CELERY_* here: Settings has working defaults, and nothing on this deploy
       # path touches Celery/Redis (see comment above).
 
-  - type: web
-    name: bp-tab-frontend
-    runtime: docker
-    plan: free
-    rootDir: frontend
-    dockerfilePath: ./Dockerfile
-    dockerContext: .
-    # NEXT_PUBLIC_* is inlined into the client bundle at build time (see frontend/Dockerfile's
-    # ARG), so this must also be passed as a Docker build arg, not just a runtime env var --
-    # Render does this automatically for any envVar whose key matches a Dockerfile ARG.
-    # No dockerCommand override: the Dockerfile's own CMD (`npm start` -> `next start`) already
-    # reads the PORT env var natively, so the default CMD works as-is.
-    envVars:
-      # See the NOTE above on the backend service's CORS_ALLOWED_ORIGINS about the -5xwd suffix.
-      - key: NEXT_PUBLIC_API_URL
-        value: https://bp-tab-backend-5xwd.onrender.com
+  # bp-tab-frontend removed 2026-08-03 -- replaced by Vercel. The live Render service isn't
+  # deleted by removing it here; suspend/delete it by hand once Vercel is confirmed working.
