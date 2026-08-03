@@ -49,10 +49,13 @@
 }
 
 /*
- * Claim — identidad visual.
+ * Claim — identidad visual, zona apuestas.
  * Plataforma de apuestas de esports/debate: fondo casi negro con tinte azul profundo,
- * acento lima eléctrico (la "ficha" de Claim), secundario violeta. Dark-first: la clase
- * `dark` va fija en <html>, así que :root y .dark comparten la misma paleta oscura.
+ * paleta Arcade/Retro Game (Pieza 5) -- primario rojo (la "ficha" de Claim), secundario
+ * azul. El verde de ganancia/puntaje vive aparte, como clases Tailwind directas
+ * (`text-emerald-400` etc. en sidebar.tsx) sobre eventos puntuales, no como este primario/
+ * secundario estructural. Dark-first: la clase `dark` va fija en <html>, así que :root y
+ * .dark comparten la misma paleta oscura.
  */
 :root,
 .dark {
@@ -62,10 +65,10 @@
   --card-foreground: oklch(0.95 0.01 250);
   --popover: oklch(0.22 0.025 262);
   --popover-foreground: oklch(0.95 0.01 250);
-  --primary: oklch(0.88 0.22 128);
-  --primary-foreground: oklch(0.2 0.04 130);
-  --secondary: oklch(0.3 0.05 285);
-  --secondary-foreground: oklch(0.93 0.02 285);
+  --primary: #dc2626;
+  --primary-foreground: #fef2f2;
+  --secondary: #2563eb;
+  --secondary-foreground: #eff6ff;
   --muted: oklch(0.25 0.02 262);
   --muted-foreground: oklch(0.68 0.015 255);
   --accent: oklch(0.28 0.03 265);
@@ -73,21 +76,21 @@
   --destructive: oklch(0.66 0.2 25);
   --border: oklch(0.95 0.01 250 / 10%);
   --input: oklch(0.95 0.01 250 / 14%);
-  --ring: oklch(0.88 0.22 128 / 60%);
-  --chart-1: oklch(0.88 0.22 128);
-  --chart-2: oklch(0.62 0.18 285);
+  --ring: #dc262699;
+  --chart-1: #dc2626;
+  --chart-2: #2563eb;
   --chart-3: oklch(0.75 0.13 200);
   --chart-4: oklch(0.8 0.15 80);
   --chart-5: oklch(0.66 0.2 25);
   --radius: 0.75rem;
   --sidebar: oklch(0.185 0.024 262);
   --sidebar-foreground: oklch(0.9 0.01 250);
-  --sidebar-primary: oklch(0.88 0.22 128);
-  --sidebar-primary-foreground: oklch(0.2 0.04 130);
+  --sidebar-primary: #dc2626;
+  --sidebar-primary-foreground: #fef2f2;
   --sidebar-accent: oklch(0.26 0.03 265);
   --sidebar-accent-foreground: oklch(0.95 0.01 250);
   --sidebar-border: oklch(0.95 0.01 250 / 8%);
-  --sidebar-ring: oklch(0.88 0.22 128 / 60%);
+  --sidebar-ring: #dc262699;
 }
 
 @layer base {
@@ -111,8 +114,8 @@
 /* Sutileza de marca: brillo detrás del contenido principal, sin ruido en pantallas chicas */
 .claim-glow {
   background:
-    radial-gradient(60rem 30rem at 85% -10%, oklch(0.88 0.22 128 / 5%), transparent 60%),
-    radial-gradient(50rem 26rem at -10% 110%, oklch(0.62 0.18 285 / 6%), transparent 60%);
+    radial-gradient(60rem 30rem at 85% -10%, #dc26260d, transparent 60%),
+    radial-gradient(50rem 26rem at -10% 110%, #2563eb0f, transparent 60%);
 }
 
 /*
