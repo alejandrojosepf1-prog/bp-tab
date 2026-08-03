@@ -44,6 +44,12 @@ class Settings(BaseSettings):
 
     # --- CORS ---
     cors_allowed_origins: list[str] = ["http://localhost:3000"]
+    # Every Vercel deploy gets a NEW unique per-deployment alias (e.g.
+    # claim-<hash>-<team>.vercel.app) on top of the stable production domain already in
+    # cors_allowed_origins -- hardcoding one exact alias breaks again on the next deploy (see
+    # the real incident this fixed: a single mistyped character in one alias 401'd every
+    # login). Matches any subdomain of this project on vercel.app instead of the one domain.
+    cors_allowed_origin_regex: str | None = r"^https://claim-[a-z0-9-]+\.vercel\.app$"
 
     # --- Access passes (CNADE 2026 Roadmap Pieza 4) ---
     # Where the activation link in the approval email points -- the SPA route that completes

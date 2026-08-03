@@ -55,8 +55,15 @@ services:
       # Frontend now lives on Vercel (see the file-level note above), not the bp-tab-frontend
       # Render service this used to point at. Update the live env var on the Render dashboard
       # too -- this file alone doesn't push config to an already-running service.
+      #
+      # Only the stable production domain needs to be listed here -- every OTHER Vercel
+      # deployment alias (a new one gets minted on every single deploy, e.g.
+      # claim-<hash>-<team>.vercel.app) is matched generically by Settings'
+      # cors_allowed_origin_regex default instead of needing to be added by hand each time.
+      # A real incident is exactly why: one mistyped character in one hardcoded alias here
+      # 401'd every login for that deployment.
       - key: CORS_ALLOWED_ORIGINS
-        value: '["https://claim-six-theta.vercel.app", "https://claim-nwlfpr7lr-claim3.vercel.app"]'
+        value: '["https://claim-six-theta.vercel.app"]'
       # Was never actually set here before -- silently defaulted to Settings' localhost:3000
       # fallback in production too, meaning any access-pass activation email
       # (app.services.email_service.send_activation_email) would have linked to a broken
