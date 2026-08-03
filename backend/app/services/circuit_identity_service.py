@@ -17,12 +17,14 @@ Two very different reliability profiles drive the two matchers below:
     leaving two entries for the same person unmerged is a visible, cheap admin fix later.
 """
 
+import asyncio
 import re
 import unicodedata
 from difflib import SequenceMatcher
 from typing import TypeVar
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.base import Base
@@ -34,6 +36,16 @@ from app.models.circuit import (
 )
 
 ModelT = TypeVar("ModelT", bound=Base)
+
+# CircuitInstitution/CircuitPerson are the only GLOBAL (non-tournament-scoped) tables this
+# service writes to, so they're the only place two DIFFERENT tournaments' scrapes running at
+# the same time (a manual "Forzar scraping" overlapping autoscrape's cycle, or two admins
+# acting at once -- autoscrape itself scrapes tournaments strictly one at a time, see
+# app.tasks.autoscrape) can genuinely race to create the SAME brand-new identity. How many
+# times to retry the create-new path on that conflict before giving up and letting the error
+# propagate -- a single scrape failing outright is already handled gracefully by the caller
+# (autoscrape logs it and retries next cycle; a manual scrape just shows an error to retry).
+_MAX_CREATE_ATTEMPTS = 3
 
 # Below this similarity ratio, a name is treated as a genuinely different institution rather
 # than a spelling variant of a known one. 0.87 (the original guess here) turned out to be far
@@ -129,21 +141,46 @@ async def match_or_create_institution(
         await session.flush()
         return institution, True
 
-    slug = await unique_slug(session, CircuitInstitution, slugify(name))
-    institution = CircuitInstitution(name=name, slug=slug, region=region)
-    session.add(institution)
-    await session.flush()
-    session.add(
-        CircuitInstitutionAlias(circuit_institution_id=institution.id, alias=name_key, confirmed=True)
-    )
-    if code_key != name_key:
-        session.add(
-            CircuitInstitutionAlias(
-                circuit_institution_id=institution.id, alias=code_key, confirmed=True
-            )
-        )
-    await session.flush()
-    return institution, False
+    for attempt in range(_MAX_CREATE_ATTEMPTS):
+        try:
+            async with session.begin_nested():
+                slug = await unique_slug(session, CircuitInstitution, slugify(name))
+                institution = CircuitInstitution(name=name, slug=slug, region=region)
+                session.add(institution)
+                await session.flush()
+                session.add(
+                    CircuitInstitutionAlias(
+                        circuit_institution_id=institution.id, alias=name_key, confirmed=True
+                    )
+                )
+                if code_key != name_key:
+                    session.add(
+                        CircuitInstitutionAlias(
+                            circuit_institution_id=institution.id, alias=code_key, confirmed=True
+                        )
+                    )
+                await session.flush()
+            return institution, False
+        except IntegrityError:
+            if attempt == _MAX_CREATE_ATTEMPTS - 1:
+                raise
+            # The savepoint rollback (automatic on exception exit) undoes only this attempt's
+            # half-written institution/aliases, not anything else this ingestion run already
+            # staged. The concurrent writer may not have committed yet either -- a short wait
+            # before re-checking is the whole fix; it's a rare coincidence, not a hot path.
+            await asyncio.sleep(0.1 * (attempt + 1))
+            exact = (
+                await session.execute(
+                    select(CircuitInstitutionAlias).where(
+                        CircuitInstitutionAlias.alias.in_({name_key, code_key})
+                    )
+                )
+            ).scalars().first()
+            if exact is not None:
+                institution = await session.get(CircuitInstitution, exact.circuit_institution_id)
+                assert institution is not None
+                return institution, False
+    raise AssertionError("unreachable")  # pragma: no cover
 
 
 async def match_or_create_person(session: AsyncSession, name: str) -> CircuitPerson:
