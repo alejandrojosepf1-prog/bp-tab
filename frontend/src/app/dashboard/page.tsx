@@ -100,7 +100,7 @@ function TournamentCard({ tournament }: { tournament: Tournament }) {
       >
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
-            <h3 className="truncate font-heading text-display-md font-bold uppercase">
+            <h3 className="truncate font-heading display-md font-bold uppercase">
               {tournament.name}
             </h3>
             <p className="mt-0.5 truncate text-xs text-muted-foreground">
@@ -204,7 +204,7 @@ export default function DashboardPage() {
       <header className="flex items-end justify-between gap-4 border-b border-border pb-4">
         <div>
           <StatLabel>Claim</StatLabel>
-          <h1 className="font-heading text-display-lg font-bold uppercase">Dashboard</h1>
+          <h1 className="font-heading display-lg font-bold uppercase">Dashboard</h1>
         </div>
         {tournaments && tournaments.length > 0 && (
           <StatNumber

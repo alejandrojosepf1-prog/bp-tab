@@ -10,10 +10,10 @@ import { cn } from "@/lib/utils";
  */
 
 const SIZE_CLASS = {
-  xl: "text-stat-xl",
-  lg: "text-stat-lg",
-  md: "text-stat-md",
-  sm: "text-stat-sm",
+  xl: "stat-xl",
+  lg: "stat-lg",
+  md: "stat-md",
+  sm: "stat-sm",
 } as const;
 
 export type StatSize = keyof typeof SIZE_CLASS;
@@ -62,7 +62,7 @@ export function StatNumber({
           {value}
         </span>
         {suffix && (
-          <span className="stat text-stat-sm text-muted-foreground">{suffix}</span>
+          <span className="stat stat-sm text-muted-foreground">{suffix}</span>
         )}
         {delta != null && delta !== 0 && <DeltaTag delta={delta} />}
       </div>

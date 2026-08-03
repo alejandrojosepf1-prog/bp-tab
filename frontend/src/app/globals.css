@@ -58,35 +58,6 @@
   --color-surface-raised: var(--surface-raised);
   --color-surface-sunken: var(--surface-sunken);
 
-  /* --- Escala tipográfica broadcast ---
-   * Salto real entre pasos (no los dos tamaños que había antes). Los `--text-stat-*` son
-   * para NÚMEROS: line-height 1 y tracking apretado, porque una cuota grande con
-   * line-height de párrafo se ve flotando en el medio de su caja. */
-  --text-stat-xl: 3.5rem;
-  --text-stat-xl--line-height: 1;
-  --text-stat-xl--letter-spacing: -0.03em;
-  --text-stat-lg: 2.5rem;
-  --text-stat-lg--line-height: 1;
-  --text-stat-lg--letter-spacing: -0.02em;
-  --text-stat-md: 1.75rem;
-  --text-stat-md--line-height: 1;
-  --text-stat-md--letter-spacing: -0.01em;
-  --text-stat-sm: 1.25rem;
-  --text-stat-sm--line-height: 1;
-
-  /* Etiquetas de dato: chiquitas, mayúsculas, muy espaciadas — el "SHOTS ON TARGET"
-   * de una placa de transmisión. */
-  --text-label: 0.6875rem;
-  --text-label--line-height: 1.2;
-  --text-label--letter-spacing: 0.12em;
-
-  /* Titulares condensados */
-  --text-display-lg: 2.25rem;
-  --text-display-lg--line-height: 1.05;
-  --text-display-lg--letter-spacing: -0.01em;
-  --text-display-md: 1.5rem;
-  --text-display-md--line-height: 1.1;
-
   /* --- Densidad dashboard (8-32px, no la 16-64px de antes) --- */
   --spacing-dense-1: 0.5rem;
   --spacing-dense-2: 0.75rem;
@@ -200,7 +171,15 @@
 }
 
 /* Número protagonista: la unidad de contenido de una placa de transmisión.
- * Se combina con el tamaño: `class="stat text-stat-lg"`. */
+ * Se combina con el tamaño: `class="stat stat-lg"`.
+ *
+ * Los tamaños son utilidades PROPIAS (`stat-xl`/`stat-lg`/...), no `text-stat-xl` via el
+ * namespace `--text-*` de Tailwind: `cn()` usa `twMerge` sin extender para esta escala
+ * custom, y con el prefijo `text-` twMerge las trata como si compitieran por el mismo slot
+ * que `text-{color}` (ambas empiezan con `text-`) -- se quedaba con la última clase y
+ * descartaba el tamaño en silencio, sin error, sin nada en consola. Bug real encontrado
+ * verificando en el sitio desplegado, no en el código. Evitar el prefijo `text-` en
+ * cualquier utilidad de tamaño nueva que se combine con color en el mismo className. */
 @utility stat {
   font-family: var(--font-display), var(--font-sans), sans-serif;
   font-weight: 700;
@@ -208,12 +187,46 @@
   font-feature-settings: "tnum";
 }
 
+@utility stat-xl {
+  font-size: 3.5rem;
+  line-height: 1;
+  letter-spacing: -0.03em;
+}
+
+@utility stat-lg {
+  font-size: 2.5rem;
+  line-height: 1;
+  letter-spacing: -0.02em;
+}
+
+@utility stat-md {
+  font-size: 1.75rem;
+  line-height: 1;
+  letter-spacing: -0.01em;
+}
+
+@utility stat-sm {
+  font-size: 1.25rem;
+  line-height: 1;
+}
+
+@utility display-lg {
+  font-size: 2.25rem;
+  line-height: 1.05;
+  letter-spacing: -0.01em;
+}
+
+@utility display-md {
+  font-size: 1.5rem;
+  line-height: 1.1;
+}
+
 /* Etiqueta de dato: el "POSESIÓN" chiquito arriba del número grande. */
 @utility label-broadcast {
   font-family: var(--font-display), var(--font-sans), sans-serif;
-  font-size: var(--text-label);
-  line-height: var(--text-label--line-height);
-  letter-spacing: var(--text-label--letter-spacing);
+  font-size: 0.6875rem;
+  line-height: 1.2;
+  letter-spacing: 0.12em;
   font-weight: 600;
   text-transform: uppercase;
   color: var(--muted-foreground);
